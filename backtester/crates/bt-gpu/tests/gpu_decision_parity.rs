@@ -800,28 +800,29 @@ fn test_sl_codegen_branch_coverage() {
 
 #[test]
 fn test_sl_codegen_modifier_ordering() {
-    // The Rust SSOT applies modifiers in a specific order:
-    // ASE -> FTB(disabled) -> DASE -> SLB -> raw SL -> breakeven
-    // CUDA must follow the same order.
+    // Stop-loss codegen must scan the encoded exit_order contract and apply
+    // stop-loss behaviours in the same relative order as the Rust plan.
     let src = get_sl_cuda_source();
 
-    // Use the full section divider markers (with parenthetical names) to avoid
-    // matching the header summary which lists all modifiers in a compact form.
+    assert!(
+        src.contains("unsigned int exit_order[18]"),
+        "SL codegen must read the encoded exit order contract"
+    );
     let ase_pos = src
-        .find("1. ASE (ADX")
-        .expect("ASE section marker must exist");
+        .find("GPU_EXIT_ORDER_ID_STOP_LOSS_ASE")
+        .expect("ASE exit-order marker must exist");
     let dase_pos = src
-        .find("3. DASE (Dynamic")
-        .expect("DASE section marker must exist");
+        .find("GPU_EXIT_ORDER_ID_STOP_LOSS_DASE")
+        .expect("DASE exit-order marker must exist");
     let slb_pos = src
-        .find("4. SLB (Saturation")
-        .expect("SLB section marker must exist");
+        .find("GPU_EXIT_ORDER_ID_STOP_LOSS_SLB")
+        .expect("SLB exit-order marker must exist");
     let raw_sl_pos = src
-        .find("Compute raw SL price")
-        .expect("Raw SL computation section marker must exist");
+        .find("GPU_EXIT_ORDER_ID_STOP_LOSS_BASE")
+        .expect("BASE exit-order marker must exist");
     let be_pos = src
-        .find("5. Breakeven Stop")
-        .expect("Breakeven section marker must exist");
+        .find("GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN")
+        .expect("Breakeven exit-order marker must exist");
 
     assert!(ase_pos < dase_pos, "ASE must precede DASE (Rust order)");
     assert!(dase_pos < slb_pos, "DASE must precede SLB (Rust order)");
@@ -1126,22 +1127,23 @@ fn test_trailing_codegen_branch_coverage() {
 
 #[test]
 fn test_trailing_codegen_modifier_ordering() {
-    // The Rust SSOT applies trailing modifiers in a specific order:
-    // per-conf overrides -> RSI floor -> VBTS -> high-profit/TATP/TSPV/weak ->
-    // clamp floor -> activation gate -> candidate -> ratchet
+    // Trailing codegen must read the encoded exit_order contract so low-conf
+    // overrides and VBTS can follow the Rust behaviour plan order.
     let src = get_trailing_cuda_source();
 
-    // Use the section divider markers (with dashes) to avoid matching the
-    // header summary which lists all modifiers in a compact one-line form.
+    assert!(
+        src.contains("unsigned int exit_order[18]"),
+        "Trailing codegen must read the encoded exit order contract"
+    );
     let conf_pos = src
-        .find("Per-confidence overrides for trailing")
-        .expect("Per-confidence section marker must exist");
+        .find("GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE")
+        .expect("low-confidence exit-order marker must exist");
+    let vbts_pos = src
+        .find("GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER")
+        .expect("VBTS exit-order marker must exist");
     let rsi_floor_pos = src
         .find("RSI Trend-Guard floor")
         .expect("RSI Trend-Guard floor section marker must exist");
-    let vbts_pos = src
-        .find("VBTS (Vol-Buffered")
-        .expect("VBTS section marker must exist");
     let high_profit_pos = src
         .find("High-profit tightening")
         .expect("High-profit tightening section marker must exist");
@@ -1153,10 +1155,13 @@ fn test_trailing_codegen_modifier_ordering() {
         .expect("Ratchet section marker must exist");
 
     assert!(
-        conf_pos < rsi_floor_pos,
-        "Per-confidence must precede RSI floor"
+        conf_pos < vbts_pos,
+        "Trailing low-confidence handling must precede VBTS dispatch block"
     );
-    assert!(rsi_floor_pos < vbts_pos, "RSI floor must precede VBTS");
+    assert!(
+        vbts_pos < rsi_floor_pos,
+        "VBTS dispatch must precede RSI floor application"
+    );
     assert!(
         vbts_pos < high_profit_pos,
         "VBTS must precede high-profit tightening"
@@ -3427,18 +3432,18 @@ fn test_pesc_elapsed_time_check() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AQC-1270: Config round-trip 145 fields
+// AQC-1270: Config round-trip 163 fields
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn test_config_round_trip_size_141_fields() {
-    // AQC-1270: Verify GpuComboConfig is 580 bytes = 145 x 4-byte fields.
+    // AQC-1270: Verify GpuComboConfig is 652 bytes = 163 x 4-byte fields.
     // This ensures all fields are accounted for and none were accidentally
     // added or removed without updating the struct size assertion.
     assert_eq!(
         std::mem::size_of::<bt_gpu::buffers::GpuComboConfig>(),
-        580,
-        "GpuComboConfig must be exactly 580 bytes (145 x 4-byte fields)"
+        652,
+        "GpuComboConfig must be exactly 652 bytes (163 x 4-byte fields)"
     );
 }
 
@@ -3543,6 +3548,24 @@ fn test_config_all_decision_fields_referenced_in_codegen() {
         "cfg.signal_mode_order_0",
         "cfg.signal_mode_order_1",
         "cfg.signal_mode_order_2",
+        "cfg.exit_order_0",
+        "cfg.exit_order_1",
+        "cfg.exit_order_2",
+        "cfg.exit_order_3",
+        "cfg.exit_order_4",
+        "cfg.exit_order_5",
+        "cfg.exit_order_6",
+        "cfg.exit_order_7",
+        "cfg.exit_order_8",
+        "cfg.exit_order_9",
+        "cfg.exit_order_10",
+        "cfg.exit_order_11",
+        "cfg.exit_order_12",
+        "cfg.exit_order_13",
+        "cfg.exit_order_14",
+        "cfg.exit_order_15",
+        "cfg.exit_order_16",
+        "cfg.exit_order_17",
         // Sizing
         "cfg.allocation_pct",
         "cfg.enable_dynamic_sizing",

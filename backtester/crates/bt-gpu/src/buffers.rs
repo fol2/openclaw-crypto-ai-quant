@@ -245,7 +245,7 @@ const _: () = assert!(std::mem::size_of::<IndicatorParams>() == 32);
 /// Flattened trade parameters for one sweep combo.
 /// Only trade-affecting fields (not indicator windows).
 ///
-/// 580 bytes.
+/// 652 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuComboConfig {
@@ -449,9 +449,29 @@ pub struct GpuComboConfig {
     pub signal_mode_order_0: u32,
     pub signal_mode_order_1: u32,
     pub signal_mode_order_2: u32,
+
+    // Exit behaviour order contract [145-162]
+    pub exit_order_0: u32,
+    pub exit_order_1: u32,
+    pub exit_order_2: u32,
+    pub exit_order_3: u32,
+    pub exit_order_4: u32,
+    pub exit_order_5: u32,
+    pub exit_order_6: u32,
+    pub exit_order_7: u32,
+    pub exit_order_8: u32,
+    pub exit_order_9: u32,
+    pub exit_order_10: u32,
+    pub exit_order_11: u32,
+    pub exit_order_12: u32,
+    pub exit_order_13: u32,
+    pub exit_order_14: u32,
+    pub exit_order_15: u32,
+    pub exit_order_16: u32,
+    pub exit_order_17: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 580);
+const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 652);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuPosition — per-symbol position state
@@ -712,6 +732,25 @@ pub const GPU_SIGNAL_MODE_ID_STANDARD_TREND: u32 = 0;
 pub const GPU_SIGNAL_MODE_ID_PULLBACK: u32 = 1;
 pub const GPU_SIGNAL_MODE_ID_SLOW_DRIFT: u32 = 2;
 
+pub const GPU_EXIT_ORDER_ID_STOP_LOSS_ASE: u32 = 0;
+pub const GPU_EXIT_ORDER_ID_STOP_LOSS_DASE: u32 = 1;
+pub const GPU_EXIT_ORDER_ID_STOP_LOSS_SLB: u32 = 2;
+pub const GPU_EXIT_ORDER_ID_STOP_LOSS_BASE: u32 = 3;
+pub const GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN: u32 = 4;
+pub const GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE: u32 = 5;
+pub const GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER: u32 = 6;
+pub const GPU_EXIT_ORDER_ID_TRAILING_BASE: u32 = 7;
+pub const GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL: u32 = 8;
+pub const GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL: u32 = 9;
+pub const GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN: u32 = 10;
+pub const GPU_EXIT_ORDER_ID_SMART_TREND_EXHAUSTION: u32 = 11;
+pub const GPU_EXIT_ORDER_ID_SMART_EMA_MACRO_BREAKDOWN: u32 = 12;
+pub const GPU_EXIT_ORDER_ID_SMART_STAGNATION: u32 = 13;
+pub const GPU_EXIT_ORDER_ID_SMART_FUNDING_HEADWIND: u32 = 14;
+pub const GPU_EXIT_ORDER_ID_SMART_TSME: u32 = 15;
+pub const GPU_EXIT_ORDER_ID_SMART_MMDE: u32 = 16;
+pub const GPU_EXIT_ORDER_ID_SMART_RSI_OVEREXTENSION: u32 = 17;
+
 /// Validate that an f64 value fits in f32 without becoming infinite.
 /// Returns `Err` if a finite f64 overflows to infinity in f32.
 fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
@@ -806,6 +845,45 @@ fn encode_signal_mode_order(
     Ok(out)
 }
 
+fn encode_exit_order(
+    plan: &bt_core::behaviour::ResolvedBehaviourPlan,
+) -> Result<[u32; 18], String> {
+    let mut out = [GPU_EXIT_ORDER_ID_STOP_LOSS_ASE; 18];
+    for (idx, id) in plan.exits.ordered_ids().enumerate() {
+        if idx >= out.len() {
+            return Err(format!(
+                "GPU exit order only supports 18 behaviours, got extra `{id}`"
+            ));
+        }
+        out[idx] = match id {
+            "exit.stop_loss.ase" => GPU_EXIT_ORDER_ID_STOP_LOSS_ASE,
+            "exit.stop_loss.dase" => GPU_EXIT_ORDER_ID_STOP_LOSS_DASE,
+            "exit.stop_loss.slb" => GPU_EXIT_ORDER_ID_STOP_LOSS_SLB,
+            "exit.stop_loss.base" => GPU_EXIT_ORDER_ID_STOP_LOSS_BASE,
+            "exit.stop_loss.breakeven" => GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN,
+            "exit.trailing.low_conf_override" => GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE,
+            "exit.trailing.vol_buffer" => GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER,
+            "exit.trailing.base" => GPU_EXIT_ORDER_ID_TRAILING_BASE,
+            "exit.take_profit.partial" => GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL,
+            "exit.take_profit.full" => GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL,
+            "exit.smart.trend_breakdown" => GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN,
+            "exit.smart.trend_exhaustion" => GPU_EXIT_ORDER_ID_SMART_TREND_EXHAUSTION,
+            "exit.smart.ema_macro_breakdown" => GPU_EXIT_ORDER_ID_SMART_EMA_MACRO_BREAKDOWN,
+            "exit.smart.stagnation" => GPU_EXIT_ORDER_ID_SMART_STAGNATION,
+            "exit.smart.funding_headwind" => GPU_EXIT_ORDER_ID_SMART_FUNDING_HEADWIND,
+            "exit.smart.tsme" => GPU_EXIT_ORDER_ID_SMART_TSME,
+            "exit.smart.mmde" => GPU_EXIT_ORDER_ID_SMART_MMDE,
+            "exit.smart.rsi_overextension" => GPU_EXIT_ORDER_ID_SMART_RSI_OVEREXTENSION,
+            _ => {
+                return Err(format!(
+                    "unknown exit behaviour `{id}` in GPU order encoding"
+                ))
+            }
+        };
+    }
+    Ok(out)
+}
+
 impl GpuComboConfig {
     /// Convert a `StrategyConfig` (f64) into a `GpuComboConfig` (f32).
     ///
@@ -817,6 +895,7 @@ impl GpuComboConfig {
         let smart_exit_behaviour_mask = build_smart_exit_behaviour_mask(&resolved.behaviour_plan);
         let signal_mode_behaviour_mask = build_signal_mode_behaviour_mask(&resolved.behaviour_plan);
         let signal_mode_order = encode_signal_mode_order(&resolved.behaviour_plan)?;
+        let exit_order = encode_exit_order(&resolved.behaviour_plan)?;
         let cfg = &resolved.effective_cfg;
         let tc = &cfg.trade;
         let fc = &cfg.filters;
@@ -1013,6 +1092,24 @@ impl GpuComboConfig {
             signal_mode_order_0: signal_mode_order[0],
             signal_mode_order_1: signal_mode_order[1],
             signal_mode_order_2: signal_mode_order[2],
+            exit_order_0: exit_order[0],
+            exit_order_1: exit_order[1],
+            exit_order_2: exit_order[2],
+            exit_order_3: exit_order[3],
+            exit_order_4: exit_order[4],
+            exit_order_5: exit_order[5],
+            exit_order_6: exit_order[6],
+            exit_order_7: exit_order[7],
+            exit_order_8: exit_order[8],
+            exit_order_9: exit_order[9],
+            exit_order_10: exit_order[10],
+            exit_order_11: exit_order[11],
+            exit_order_12: exit_order[12],
+            exit_order_13: exit_order[13],
+            exit_order_14: exit_order[14],
+            exit_order_15: exit_order[15],
+            exit_order_16: exit_order[16],
+            exit_order_17: exit_order[17],
         })
     }
 }
@@ -1023,9 +1120,11 @@ mod tests {
         GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
         GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN, GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
         GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE, GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
-        GPU_SIGNAL_MODE_ID_PULLBACK, GPU_SIGNAL_MODE_ID_SLOW_DRIFT,
-        GPU_SIGNAL_MODE_ID_STANDARD_TREND, GPU_SIGNAL_MODE_MASK_STANDARD_TREND,
-        GPU_SMART_EXIT_MASK_ALL,
+        GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN, GPU_EXIT_ORDER_ID_STOP_LOSS_ASE,
+        GPU_EXIT_ORDER_ID_STOP_LOSS_BASE, GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL,
+        GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL, GPU_SIGNAL_MODE_ID_PULLBACK,
+        GPU_SIGNAL_MODE_ID_SLOW_DRIFT, GPU_SIGNAL_MODE_ID_STANDARD_TREND,
+        GPU_SIGNAL_MODE_MASK_STANDARD_TREND, GPU_SMART_EXIT_MASK_ALL,
     };
     use bt_core::config::{
         BehaviourGroupConfig, BehaviourProfileConfig, PipelineConfig, PipelineProfileConfig,
@@ -1295,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_combo_config_rejects_custom_exit_reorder() {
+    fn test_gpu_combo_config_accepts_supported_exit_reorder() {
         let profile = "gpu_custom_exit_order";
         let mut cfg = StrategyConfig::default();
         cfg.runtime.profile = profile.to_string();
@@ -1305,8 +1404,17 @@ mod tests {
                 behaviours: BehaviourProfileConfig {
                     exits: BehaviourGroupConfig {
                         order: vec![
-                            "exit.take_profit.full".to_string(),
+                            "exit.stop_loss.ase".to_string(),
+                            "exit.stop_loss.dase".to_string(),
+                            "exit.stop_loss.slb".to_string(),
                             "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.breakeven".to_string(),
+                            "exit.trailing.low_conf_override".to_string(),
+                            "exit.trailing.vol_buffer".to_string(),
+                            "exit.trailing.base".to_string(),
+                            "exit.smart.trend_breakdown".to_string(),
+                            "exit.take_profit.full".to_string(),
+                            "exit.take_profit.partial".to_string(),
                         ],
                         ..BehaviourGroupConfig::default()
                     },
@@ -1316,8 +1424,39 @@ mod tests {
             },
         );
 
-        let err = GpuComboConfig::from_strategy_config(&cfg).unwrap_err();
-        assert!(err.contains("canonical order for `exits`"));
+        let gpu = GpuComboConfig::from_strategy_config(&cfg)
+            .expect("supported exit reorder should lower into GPU config");
+        assert_eq!(gpu.exit_order_8, GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN);
+        assert_eq!(gpu.exit_order_9, GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL);
+        assert_eq!(gpu.exit_order_10, GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL);
+    }
+
+    #[test]
+    fn test_gpu_combo_config_accepts_stop_loss_internal_reorder() {
+        let profile = "gpu_bad_stop_order";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        cfg.pipeline.profiles.insert(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.ase".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        );
+
+        let gpu = GpuComboConfig::from_strategy_config(&cfg)
+            .expect("stop-loss internal reorder should lower into GPU config");
+        assert_eq!(gpu.exit_order_0, GPU_EXIT_ORDER_ID_STOP_LOSS_BASE);
+        assert_eq!(gpu.exit_order_1, GPU_EXIT_ORDER_ID_STOP_LOSS_ASE);
     }
 
     #[test]

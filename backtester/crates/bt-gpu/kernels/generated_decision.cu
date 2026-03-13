@@ -42,6 +42,25 @@ static constexpr unsigned int GPU_SIGNAL_MODE_ID_STANDARD_TREND = 0u;
 static constexpr unsigned int GPU_SIGNAL_MODE_ID_PULLBACK = 1u;
 static constexpr unsigned int GPU_SIGNAL_MODE_ID_SLOW_DRIFT = 2u;
 
+static constexpr unsigned int GPU_EXIT_ORDER_ID_STOP_LOSS_ASE = 0u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_STOP_LOSS_DASE = 1u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_STOP_LOSS_SLB = 2u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_STOP_LOSS_BASE = 3u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN = 4u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE = 5u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER = 6u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_TRAILING_BASE = 7u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL = 8u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL = 9u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN = 10u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_TREND_EXHAUSTION = 11u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_EMA_MACRO_BREAKDOWN = 12u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_STAGNATION = 13u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_FUNDING_HEADWIND = 14u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_TSME = 15u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_MMDE = 16u;
+static constexpr unsigned int GPU_EXIT_ORDER_ID_SMART_RSI_OVEREXTENSION = 17u;
+
 // SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"6971a3a32cd759a171401243b5f5ba3ec62dde916658a4ebbef39f8cb8a30d02","../bt-core/src/exits/smart_exits.rs":"20c5f62e408df61ad7fb06bebc397b1db98270a1499bd2115f1bfe2b9c44d22f","../bt-core/src/exits/stop_loss.rs":"971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63","../bt-core/src/exits/take_profit.rs":"97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"dbfecf1ff50ea6c72e07f4de644b400a4645c8cd4ab5ca7244c6e26237bc7dca","../bt-signals/src/gates.rs":"1ed3afe9087f941e47894d16c88351ea33c76198ac48894772e9b8d7b236cd19"}
 
 // Derived from bt-signals/src/gates.rs
@@ -542,71 +561,83 @@ __device__ double compute_sl_price_codegen(
     }
 
     double sl_mult = (double)cfg.sl_atr_mult;
-
-    // ── 1. ASE (ADX Slope-Adjusted Stop) ─────────────────────────────────
-    // If trend is weakening (ADX slope < 0) and position is underwater,
-    // tighten the stop by 20%.
     bool is_underwater;
     if (pos_type == 1) {  // POS_LONG
         is_underwater = (current_price < entry_price);
     } else {              // POS_SHORT
         is_underwater = (current_price > entry_price);
     }
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_ASE) != 0u
-        && adx_slope < 0.0
-        && is_underwater) {
-        sl_mult *= 0.8;
-    }
+    double sl_price = 0.0;
+    unsigned int exit_order[18] = {
+        cfg.exit_order_0, cfg.exit_order_1, cfg.exit_order_2, cfg.exit_order_3,
+        cfg.exit_order_4, cfg.exit_order_5, cfg.exit_order_6, cfg.exit_order_7,
+        cfg.exit_order_8, cfg.exit_order_9, cfg.exit_order_10, cfg.exit_order_11,
+        cfg.exit_order_12, cfg.exit_order_13, cfg.exit_order_14, cfg.exit_order_15,
+        cfg.exit_order_16, cfg.exit_order_17
+    };
 
-    // ── 2. FTB (Funding Tailwind Buffer) ─────────────────────────────────
-    // Disabled in backtester — no funding rate data available.
+    for (int exit_idx = 0; exit_idx < 18; ++exit_idx) {
+        unsigned int exit_id = exit_order[exit_idx];
 
-    // ── 3. DASE (Dynamic ADX Stop Expansion) ─────────────────────────────
-    // If ADX > 40 and position is profitable by > 0.5 ATR, widen by 15%.
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_DASE) != 0u && adx > 40.0) {
-        double profit_in_atr;
-        if (pos_type == 1) {  // POS_LONG
-            profit_in_atr = (current_price - entry_price) / eff_atr;
-        } else {              // POS_SHORT
-            profit_in_atr = (entry_price - current_price) / eff_atr;
-        }
-        if (profit_in_atr > 0.5) {
-            sl_mult *= 1.15;
-        }
-    }
-
-    // ── 4. SLB (Saturation Loyalty Buffer) ───────────────────────────────
-    // If ADX > 45 (saturated/strong trend), widen overall SL by 10%.
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB) != 0u && adx > 45.0) {
-        sl_mult *= 1.10;
-    }
-
-    // ── Compute raw SL price ─────────────────────────────────────────────
-    double sl_price;
-    if (pos_type == 1) {  // POS_LONG
-        sl_price = entry_price - (eff_atr * sl_mult);
-    } else {              // POS_SHORT
-        sl_price = entry_price + (eff_atr * sl_mult);
-    }
-
-    // ── 5. Breakeven Stop ────────────────────────────────────────────────
-    // If profit exceeds breakeven_start_atr ATRs, move SL to
-    // entry +/- breakeven_buffer_atr ATRs (protecting at least entry).
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN) != 0u
-        && cfg.enable_breakeven_stop != 0u
-        && cfg.breakeven_start_atr > 0.0f) {
-        double be_start = eff_atr * (double)cfg.breakeven_start_atr;
-        double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
-
-        if (pos_type == 1) {  // POS_LONG
-            if ((current_price - entry_price) >= be_start) {
-                // Only raise SL, never lower it from the breakeven level.
-                sl_price = fmax(sl_price, entry_price + be_buffer);
+        if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_ASE) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_ASE) != 0u
+                && adx_slope < 0.0
+                && is_underwater) {
+                sl_mult *= 0.8;
             }
-        } else {              // POS_SHORT
-            if ((entry_price - current_price) >= be_start) {
-                // Only lower SL, never raise it from the breakeven level.
-                sl_price = fmin(sl_price, entry_price - be_buffer);
+            continue;
+        }
+
+        if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_DASE) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_DASE) != 0u && adx > 40.0) {
+                double profit_in_atr;
+                if (pos_type == 1) {
+                    profit_in_atr = (current_price - entry_price) / eff_atr;
+                } else {
+                    profit_in_atr = (entry_price - current_price) / eff_atr;
+                }
+                if (profit_in_atr > 0.5) {
+                    sl_mult *= 1.15;
+                }
+            }
+            continue;
+        }
+
+        if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_SLB) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB) != 0u && adx > 45.0) {
+                sl_mult *= 1.10;
+            }
+            continue;
+        }
+
+        if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BASE) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) != 0u) {
+                if (pos_type == 1) {
+                    sl_price = entry_price - (eff_atr * sl_mult);
+                } else {
+                    sl_price = entry_price + (eff_atr * sl_mult);
+                }
+            }
+            continue;
+        }
+
+        if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN) != 0u
+                && sl_price > 0.0
+                && cfg.enable_breakeven_stop != 0u
+                && cfg.breakeven_start_atr > 0.0f) {
+                double be_start = eff_atr * (double)cfg.breakeven_start_atr;
+                double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+
+                if (pos_type == 1) {
+                    if ((current_price - entry_price) >= be_start) {
+                        sl_price = fmax(sl_price, entry_price + be_buffer);
+                    }
+                } else {
+                    if ((entry_price - current_price) >= be_start) {
+                        sl_price = fmin(sl_price, entry_price - be_buffer);
+                    }
+                }
             }
         }
     }
@@ -641,39 +672,50 @@ __device__ double compute_trailing_codegen(
         return current_trailing_sl;
     }
 
-    // ── Per-confidence overrides for trailing start / distance ─────────────
     double trailing_start = (double)cfg.trailing_start_atr;
     double trailing_dist  = (double)cfg.trailing_distance_atr;
+    double effective_dist = trailing_dist;
+    unsigned int exit_order[18] = {
+        cfg.exit_order_0, cfg.exit_order_1, cfg.exit_order_2, cfg.exit_order_3,
+        cfg.exit_order_4, cfg.exit_order_5, cfg.exit_order_6, cfg.exit_order_7,
+        cfg.exit_order_8, cfg.exit_order_9, cfg.exit_order_10, cfg.exit_order_11,
+        cfg.exit_order_12, cfg.exit_order_13, cfg.exit_order_14, cfg.exit_order_15,
+        cfg.exit_order_16, cfg.exit_order_17
+    };
 
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE) != 0u
-        && confidence == 0) {  // Confidence::Low == 0
-        if (cfg.trailing_start_atr_low_conf > 0.0f) {
-            trailing_start = (double)cfg.trailing_start_atr_low_conf;
+    for (int exit_idx = 0; exit_idx < 18; ++exit_idx) {
+        unsigned int exit_id = exit_order[exit_idx];
+        if (exit_id == GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE) != 0u
+                && confidence == 0) {
+                if (cfg.trailing_start_atr_low_conf > 0.0f) {
+                    trailing_start = (double)cfg.trailing_start_atr_low_conf;
+                }
+                if (cfg.trailing_distance_atr_low_conf > 0.0f) {
+                    trailing_dist = (double)cfg.trailing_distance_atr_low_conf;
+                    effective_dist = trailing_dist;
+                }
+            }
+            continue;
         }
-        if (cfg.trailing_distance_atr_low_conf > 0.0f) {
-            trailing_dist = (double)cfg.trailing_distance_atr_low_conf;
+
+        if (exit_id == GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER) {
+            if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER) != 0u
+                && cfg.enable_vol_buffered_trailing != 0u
+                && bb_width_ratio > (double)cfg.trailing_vbts_bb_threshold) {
+                effective_dist *= (double)cfg.trailing_vbts_mult;
+            }
+            continue;
         }
     }
 
     // ── RSI Trend-Guard floor (v5.016) ────────────────────────────────────
-    // Minimum effective trailing distance.  Raised when RSI is favourable
-    // (trending in the direction of the position).
     double min_trailing_dist = (double)cfg.trailing_rsi_floor_default;
     if (pos_type == POS_LONG && rsi > 60.0) {
         min_trailing_dist = (double)cfg.trailing_rsi_floor_trending;
     }
     if (pos_type == POS_SHORT && rsi < 40.0) {
         min_trailing_dist = (double)cfg.trailing_rsi_floor_trending;
-    }
-
-    // ── Effective trailing distance ───────────────────────────────────────
-    double effective_dist = trailing_dist;
-
-    // VBTS (Vol-Buffered Trailing Stop, v5.015): widen when BB expanding.
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER) != 0u
-        && cfg.enable_vol_buffered_trailing != 0u
-        && bb_width_ratio > (double)cfg.trailing_vbts_bb_threshold) {
-        effective_dist *= (double)cfg.trailing_vbts_mult;
     }
 
     // High-profit tightening (> cfg threshold ATR) with TATP / TSPV overrides.
@@ -1168,91 +1210,179 @@ __device__ AllExitResult check_all_exits_codegen(
     result.exit_code = 0;
     result.exit_price = 0.0;
 
-    // ── 1. Stop Loss ────────────────────────────────────────────────────
-    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) != 0u) {
-        double sl_price = compute_sl_price_codegen(
-            cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
-        );
-        if (pos_type == 1) {  // POS_LONG
-            if (current_price <= sl_price) {
-                result.should_exit = true;
-                result.exit_code = 100;
-                result.exit_price = current_price;
-                return result;
+    unsigned int exit_order[18] = {
+        cfg.exit_order_0, cfg.exit_order_1, cfg.exit_order_2, cfg.exit_order_3,
+        cfg.exit_order_4, cfg.exit_order_5, cfg.exit_order_6, cfg.exit_order_7,
+        cfg.exit_order_8, cfg.exit_order_9, cfg.exit_order_10, cfg.exit_order_11,
+        cfg.exit_order_12, cfg.exit_order_13, cfg.exit_order_14, cfg.exit_order_15,
+        cfg.exit_order_16, cfg.exit_order_17
+    };
+
+    unsigned int active_stop_mask = 0u;
+    unsigned int active_trailing_mask = 0u;
+
+    for (int exit_idx = 0; exit_idx < 18; ++exit_idx) {
+        unsigned int exit_id = exit_order[exit_idx];
+
+        switch (exit_id) {
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_ASE:
+                active_stop_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_ASE);
+                break;
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_DASE:
+                active_stop_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_DASE);
+                break;
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_SLB:
+                active_stop_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB);
+                break;
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_BASE:
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN: {
+                unsigned int next_bit =
+                    (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BASE)
+                        ? GPU_EXIT_MASK_STOP_LOSS_BASE
+                        : GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN;
+                active_stop_mask |= (cfg.exit_behaviour_mask & next_bit);
+                if ((active_stop_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig stop_cfg = cfg;
+                stop_cfg.exit_behaviour_mask = active_stop_mask;
+                double sl_price = compute_sl_price_codegen(
+                    stop_cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
+                );
+                bool sl_triggered = (pos_type == 1)
+                    ? (current_price <= sl_price)
+                    : (current_price >= sl_price);
+                if (sl_triggered) {
+                    result.should_exit = true;
+                    result.exit_code = 100;
+                    result.exit_price = current_price;
+                    return result;
+                }
+                break;
             }
-        } else {              // POS_SHORT
-            if (current_price >= sl_price) {
-                result.should_exit = true;
-                result.exit_code = 100;
-                result.exit_price = current_price;
-                return result;
+            case GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE:
+                active_trailing_mask |=
+                    (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE);
+                break;
+            case GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER:
+                active_trailing_mask |=
+                    (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER);
+                break;
+            case GPU_EXIT_ORDER_ID_TRAILING_BASE: {
+                active_trailing_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_BASE);
+                if ((active_trailing_mask & GPU_EXIT_MASK_TRAILING_BASE) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig trail_cfg = cfg;
+                trail_cfg.exit_behaviour_mask = active_trailing_mask;
+                double trail_price = compute_trailing_codegen(
+                    trail_cfg, pos_type, entry_price, current_price, atr,
+                    0.0,
+                    confidence, rsi, adx, adx_slope,
+                    0.0,
+                    0.0,
+                    profit_atr
+                );
+                if (trail_price > 0.0) {
+                    bool trail_triggered = (pos_type == 1)
+                        ? (current_price <= trail_price)
+                        : (current_price >= trail_price);
+                    if (trail_triggered) {
+                        result.should_exit = true;
+                        result.exit_code = 101;
+                        result.exit_price = current_price;
+                        return result;
+                    }
+                }
+                break;
+            }
+            case GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL:
+            case GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL: {
+                unsigned int tp_mask =
+                    (exit_id == GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL)
+                        ? GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL
+                        : GPU_EXIT_MASK_TAKE_PROFIT_FULL;
+                if ((cfg.exit_behaviour_mask & tp_mask) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig tp_cfg = cfg;
+                tp_cfg.exit_behaviour_mask = tp_mask;
+                TpResult tp = check_tp_codegen(
+                    tp_cfg, pos_type, entry_price, entry_atr, current_price,
+                    equity,
+                    0u,
+                    (double)cfg.tp_atr_mult
+                );
+                bool tp_triggered =
+                    (exit_id == GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL && tp.action == 1)
+                    || (exit_id == GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL && tp.action == 2);
+                if (tp_triggered) {
+                    result.should_exit = true;
+                    result.exit_code = 102;
+                    result.exit_price = current_price;
+                    return result;
+                }
+                break;
+            }
+            default: {
+                unsigned int smart_mask = 0u;
+                switch (exit_id) {
+                    case GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN:
+                        smart_mask = GPU_SMART_EXIT_MASK_TREND_BREAKDOWN;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_TREND_EXHAUSTION:
+                        smart_mask = GPU_SMART_EXIT_MASK_TREND_EXHAUSTION;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_EMA_MACRO_BREAKDOWN:
+                        smart_mask = GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_STAGNATION:
+                        smart_mask = GPU_SMART_EXIT_MASK_STAGNATION;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_FUNDING_HEADWIND:
+                        smart_mask = GPU_SMART_EXIT_MASK_FUNDING_HEADWIND;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_TSME:
+                        smart_mask = GPU_SMART_EXIT_MASK_TSME;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_MMDE:
+                        smart_mask = GPU_SMART_EXIT_MASK_MMDE;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_RSI_OVEREXTENSION:
+                        smart_mask = GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION;
+                        break;
+                    default:
+                        break;
+                }
+                if (smart_mask == 0u || (cfg.smart_exit_behaviour_mask & smart_mask) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig smart_cfg = cfg;
+                smart_cfg.smart_exit_behaviour_mask = smart_mask;
+                SmartExitResult smart = check_smart_exits_codegen(
+                    smart_cfg, pos_type, entry_price, entry_atr, current_price,
+                    ema_fast, ema_slow, ema_macro,
+                    adx, adx_slope, atr,
+                    atr,
+                    rsi, macd_hist, prev_macd_hist,
+                    prev2_macd_hist, prev3_macd_hist,
+                    profit_atr, confidence, entry_adx_threshold
+                );
+                if (smart.should_exit) {
+                    result.should_exit = true;
+                    result.exit_code = smart.exit_code;
+                    result.exit_price = current_price;
+                    return result;
+                }
+                break;
             }
         }
     }
 
-    // ── 2. Trailing Stop ────────────────────────────────────────────────
-    // compute_trailing_codegen returns the trailing stop price (double).
-    // We pass current_trailing_sl = 0.0 (first-bar semantics; the sweep
-    // kernel maintains the running trailing SL across bars, but the
-    // orchestrator evaluates each bar independently with best_price).
-    double trail_price = compute_trailing_codegen(
-        cfg, pos_type, entry_price, current_price, atr,
-        0.0,  // current_trailing_sl — recomputed from best_price each bar
-        confidence, rsi, adx, adx_slope,
-        0.0,  // atr_slope — not tracked per-bar in sweep kernel
-        0.0,  // bb_width_ratio — not tracked per-bar in sweep kernel
-        profit_atr
-    );
-    if (trail_price > 0.0) {
-        bool trail_triggered = false;
-        if (pos_type == 1) {  // POS_LONG
-            trail_triggered = (current_price <= trail_price);
-        } else {              // POS_SHORT
-            trail_triggered = (current_price >= trail_price);
-        }
-        if (trail_triggered) {
-            result.should_exit = true;
-            result.exit_code = 101;
-            result.exit_price = current_price;
-            return result;
-        }
-    }
-
-    // ── 3. Take Profit ──────────────────────────────────────────────────
-    // check_tp_codegen returns TpResult { action, fraction, exit_code }.
-    // action 2 = close (full TP), action 1 = reduce (partial TP).
-    // For the sweep orchestrator, both partial and full TP trigger exit.
-    TpResult tp = check_tp_codegen(
-        cfg, pos_type, entry_price, entry_atr, current_price,
-        equity,       // size (position equity for partial sizing)
-        0u,           // tp1_taken (sweep kernel tracks this externally)
-        (double)cfg.tp_atr_mult  // tp_mult
-    );
-    if (tp.action > 0) {
-        result.should_exit = true;
-        result.exit_code = 102;
-        result.exit_price = current_price;
-        return result;
-    }
-
-    // ── 4. Smart Exits ──────────────────────────────────────────────────
-    SmartExitResult smart = check_smart_exits_codegen(
-        cfg, pos_type, entry_price, entry_atr, current_price,
-        ema_fast, ema_slow, ema_macro,
-        adx, adx_slope, atr,
-        atr,          // avg_atr — approximated by current ATR in sweep
-        rsi, macd_hist, prev_macd_hist,
-        prev2_macd_hist, prev3_macd_hist,
-        profit_atr, confidence, entry_adx_threshold
-    );
-    if (smart.should_exit) {
-        result.should_exit = true;
-        result.exit_code = smart.exit_code;
-        result.exit_price = current_price;
-        return result;
-    }
-
-    // ── No exit triggered ───────────────────────────────────────────────
     return result;
 }
 // Derived from bt-core/src/engine.rs sizing logic
