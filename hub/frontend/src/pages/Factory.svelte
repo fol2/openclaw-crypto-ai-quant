@@ -118,7 +118,7 @@
   <div class="page-header">
     <div>
       <h1>Factory</h1>
-      <p class="subtitle">Dormant contract for future factory reactivation. Historical artefacts stay readable even when execution is disabled.</p>
+      <p class="subtitle">Feature-gated Rust factory execution surface. Historical artefacts stay readable even when execution is disabled.</p>
     </div>
     <div class="header-actions">
       <button class="btn btn-primary" onclick={launchFactory} disabled={!capability?.execution_enabled}>
@@ -242,7 +242,7 @@
         </div>
         <textarea bind:value={settingsText} rows="18" disabled={!capability?.execution_enabled}></textarea>
         {#if !capability?.execution_enabled}
-          <p class="hint">Settings stay visible while the factory contract is dormant. Mutations are blocked until a `factory` build is deployed with `AI_QUANT_FACTORY_ENABLE=1`.</p>
+          <p class="hint">Settings stay visible while execution is disabled. Mutations are blocked until a `factory` build is deployed, the Rust executor binary is installed, and `AI_QUANT_FACTORY_ENABLE=1`.</p>
         {/if}
       </section>
 

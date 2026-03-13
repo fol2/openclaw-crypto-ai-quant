@@ -4,9 +4,10 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
 
@@ -15,6 +16,7 @@ use crate::factory_capability::{
     disabled_response, FactoryCapability, FACTORY_SERVICE_UNITS, FACTORY_SETTINGS_PATH,
 };
 use crate::state::AppState;
+use crate::subprocess::factory as factory_subprocess;
 use crate::subprocess::JobStatus;
 
 /// Build factory sub-router.
@@ -267,15 +269,88 @@ fn load_settings(state: &AppState) -> Value {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct RunFactoryBody {
+    profile: Option<String>,
+    config: Option<String>,
+    settings_path: Option<String>,
+}
+
+fn resolve_requested_path(
+    project_root: &StdPath,
+    default_path: &StdPath,
+    raw: Option<&str>,
+) -> PathBuf {
+    match raw {
+        Some(value) if PathBuf::from(value).is_absolute() => PathBuf::from(value),
+        Some(value) => project_root.join(value),
+        None => default_path.to_path_buf(),
+    }
+}
+
 /// POST /api/factory/run — launch a new factory cycle.
-async fn run_factory(State(state): State<Arc<AppState>>, Json(_body): Json<Value>) -> Response {
+async fn run_factory(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RunFactoryBody>,
+) -> Response {
     let cap = capability(&state);
     if !cap.execution_enabled {
         return disabled_response(&cap, "run");
     }
-
-    HubError::Internal("Factory execution support is not wired into this Hub build yet.".into())
-        .into_response()
+    {
+        let jobs = state.jobs.jobs.lock().await;
+        if jobs
+            .values()
+            .any(|job| job.kind == "factory" && job.status == JobStatus::Running)
+        {
+            return HubError::BadRequest(
+                "a factory job is already running; wait for it to finish or cancel it first".into(),
+            )
+            .into_response();
+        }
+    }
+    let profile = body
+        .profile
+        .unwrap_or_else(|| "daily".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(profile.as_str(), "daily" | "deep") {
+        return HubError::BadRequest(format!(
+            "invalid factory profile: {profile} (valid: daily, deep)"
+        ))
+        .into_response();
+    }
+    let config_path = resolve_requested_path(
+        &state.config.aiq_root,
+        &state.config.factory_config_path,
+        body.config.as_deref(),
+    );
+    let settings_path = resolve_requested_path(
+        &state.config.aiq_root,
+        &state.config.aiq_root.join(FACTORY_SETTINGS_PATH),
+        body.settings_path.as_deref(),
+    );
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let args = factory_subprocess::FactoryArgs {
+        executor_bin: state.config.factory_bin.display().to_string(),
+        config_path: config_path.display().to_string(),
+        settings_path: settings_path.display().to_string(),
+        profile: profile.clone(),
+    };
+    factory_subprocess::spawn_factory(
+        job_id.clone(),
+        args,
+        state.config.aiq_root.display().to_string(),
+        Arc::clone(&state.jobs),
+        state.broadcast.clone(),
+    )
+    .await;
+    Json(json!({
+        "job_id": job_id,
+        "profile": profile,
+        "status": "running",
+    }))
+    .into_response()
 }
 
 /// GET /api/factory/jobs — list all factory jobs.
@@ -340,8 +415,15 @@ async fn cancel_job(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     job.finished_at = Some(chrono::Utc::now().to_rfc3339());
 
     let mut handles = state.jobs.handles.lock().await;
-    if let Some(mut child) = handles.remove(&id) {
-        let _ = child.kill().await;
+    if let Some(pid) = handles.remove(&id) {
+        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return HubError::Internal(format!("failed to signal pid {pid}: {err}"))
+                    .into_response();
+            }
+        }
     }
 
     Json(json!({ "ok": true, "cancelled": id })).into_response()

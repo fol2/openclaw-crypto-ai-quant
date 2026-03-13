@@ -178,7 +178,7 @@ enum ManualExecutionClaim {
         cloid: String,
         resumed_existing: bool,
     },
-    Existing(ExistingManualIntent),
+    Existing(Box<ExistingManualIntent>),
 }
 
 pub fn preview_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result<Value, HubError> {
@@ -280,7 +280,8 @@ pub fn execute_open(
                 bind_manual_confirmation_to_intent(&conn, confirm_token, &recovered.intent_id)?;
                 return Ok(existing_manual_execution_payload("open", &recovered));
             }
-            early_retry_claim = Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
+            early_retry_claim =
+                Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
         } else {
             bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
             return Ok(existing_manual_execution_payload("open", &existing));
@@ -695,7 +696,8 @@ pub fn execute_close(
                 bind_manual_confirmation_to_intent(&conn, confirm_token, &recovered.intent_id)?;
                 return Ok(existing_manual_execution_payload("close", &recovered));
             }
-            early_retry_claim = Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
+            early_retry_claim =
+                Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
         } else {
             bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
             return Ok(existing_manual_execution_payload("close", &existing));
@@ -1716,7 +1718,9 @@ fn validate_manual_confirmation(
     let (stored_action, stored_hash, expires_ts_ms) = match row {
         Ok(value) => value,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
-            return Err(HubError::BadRequest("invalid or expired confirm token".into()))
+            return Err(HubError::BadRequest(
+                "invalid or expired confirm token".into(),
+            ))
         }
         Err(error) => return Err(HubError::Db(error.to_string())),
     };
@@ -1740,7 +1744,11 @@ fn bind_manual_confirmation_to_intent(
         "UPDATE manual_trade_confirmations
          SET status = 'BOUND', intent_id = ?1, consumed_ts_ms = COALESCE(consumed_ts_ms, ?2)
          WHERE confirm_token = ?3",
-        params![intent_id, chrono::Utc::now().timestamp_millis(), confirm_token],
+        params![
+            intent_id,
+            chrono::Utc::now().timestamp_millis(),
+            confirm_token
+        ],
     )?;
     Ok(())
 }
@@ -1982,7 +1990,10 @@ fn validate_resumed_open_request(
         .to_ascii_lowercase();
     let stored_limit_price = stored.get("limit_price").and_then(parse_json_number);
 
-    if existing.symbol.trim().to_ascii_uppercase() != request.symbol.trim().to_ascii_uppercase()
+    if !existing
+        .symbol
+        .trim()
+        .eq_ignore_ascii_case(request.symbol.trim())
         || stored_side != request.side.trim().to_ascii_uppercase()
         || (stored_notional - request.notional_usd).abs() >= 1e-9
         || stored_leverage != request.leverage
@@ -2027,7 +2038,10 @@ fn validate_resumed_close_request(
         .to_ascii_lowercase();
     let stored_limit_price = stored.get("limit_price").and_then(parse_json_number);
 
-    if existing.symbol.trim().to_ascii_uppercase() != request.symbol.trim().to_ascii_uppercase()
+    if !existing
+        .symbol
+        .trim()
+        .eq_ignore_ascii_case(request.symbol.trim())
         || (stored_close_pct - request.close_pct).abs() >= 1e-9
         || stored_order_type != request.order_type.trim().to_ascii_lowercase()
         || !same_optional_price(stored_limit_price, request.limit_price)
@@ -2230,7 +2244,7 @@ fn initialise_manual_execution(
     purge_stale_manual_confirmations(conn, now_ms)?;
     if let Some(existing) = load_existing_manual_intent_by_dedupe_key(conn, confirm_token)? {
         bind_manual_confirmation_to_intent(conn, confirm_token, &existing.intent_id)?;
-        return Ok(ManualExecutionClaim::Existing(existing));
+        return Ok(ManualExecutionClaim::Existing(Box::new(existing)));
     }
 
     validate_manual_confirmation(conn, confirm_token, action, expected_hash, now_ms)?;
@@ -2238,7 +2252,7 @@ fn initialise_manual_execution(
     if !inserted {
         if let Some(existing) = load_existing_manual_intent_by_dedupe_key(conn, confirm_token)? {
             bind_manual_confirmation_to_intent(conn, confirm_token, &existing.intent_id)?;
-            return Ok(ManualExecutionClaim::Existing(existing));
+            return Ok(ManualExecutionClaim::Existing(Box::new(existing)));
         }
         return Err(HubError::Internal(format!(
             "manual intent insert dedupe race without existing intent for {}",
@@ -2253,7 +2267,10 @@ fn initialise_manual_execution(
     })
 }
 
-fn insert_manual_intent(conn: &Connection, record: ManualIntentRecord<'_>) -> Result<bool, HubError> {
+fn insert_manual_intent(
+    conn: &Connection,
+    record: ManualIntentRecord<'_>,
+) -> Result<bool, HubError> {
     let changed = conn.execute(
         "INSERT OR IGNORE INTO oms_intents (
             intent_id, created_ts_ms, symbol, action, side, requested_size,

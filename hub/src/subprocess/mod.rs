@@ -1,10 +1,11 @@
 pub mod backtester;
+pub mod factory;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use crate::ws::broadcast::BroadcastHub;
@@ -38,7 +39,7 @@ pub struct JobInfo {
 /// Thread-safe job store.
 pub struct JobStore {
     pub jobs: Mutex<HashMap<JobId, JobInfo>>,
-    pub handles: Mutex<HashMap<JobId, Child>>,
+    pub handles: Mutex<HashMap<JobId, u32>>,
 }
 
 impl JobStore {
@@ -90,11 +91,9 @@ pub(crate) async fn run_subprocess(
     };
 
     // Store child handle for cancellation.
-    let child_id = child.id();
-    {
-        // We can't store Child directly since we need to take stdout/stderr.
-        // Instead, we'll handle cancellation via the PID.
-        let _ = child_id;
+    if let Some(child_id) = child.id() {
+        let mut handles = store.handles.lock().await;
+        handles.insert(job_id.clone(), child_id);
     }
 
     let stdout = child.stdout.take();
@@ -154,6 +153,10 @@ pub(crate) async fn run_subprocess(
 
     // Update job status.
     let mut jobs = store.jobs.lock().await;
+    {
+        let mut handles = store.handles.lock().await;
+        handles.remove(&job_id);
+    }
     if let Some(j) = jobs.get_mut(&job_id) {
         j.finished_at = Some(chrono::Utc::now().to_rfc3339());
 

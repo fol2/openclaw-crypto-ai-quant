@@ -7,11 +7,13 @@ use bt_core::sweep::apply_one_pub;
 use bt_data::sqlite_loader::query_time_range_multi;
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -490,6 +492,17 @@ struct TargetSnapshot {
     original_bytes: Option<Vec<u8>>,
 }
 
+#[derive(Debug)]
+struct FactoryRunLock {
+    file: File,
+}
+
+impl Drop for FactoryRunLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct RunMetadata {
     version: &'static str,
@@ -645,10 +658,12 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
             paths.artifacts_root.as_path().display()
         )
     })?;
+    let _factory_lock = acquire_factory_lock(&paths.project_dir)?;
 
     let now = Utc::now();
     let run_stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let run_id = format!("{}_{}", args.profile.run_prefix(), run_stamp);
+    let unique_stamp = format!("{run_stamp}_{:03}", now.timestamp_subsec_millis());
+    let run_id = format!("{}_{}", args.profile.run_prefix(), unique_stamp);
     let run_dir = paths
         .artifacts_root
         .join(now.format("%Y-%m-%d").to_string())
@@ -667,7 +682,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
     let effective_config_path = write_effective_config(
         &paths.artifacts_root,
         args.profile,
-        &run_stamp,
+        &unique_stamp,
         &paths.config_path,
         &base_cfg,
     )?;
@@ -790,6 +805,26 @@ fn load_factory_defaults(settings_path: &Path) -> Result<FactoryDefaults> {
         loaded.profiles = FactoryDefaults::default().profiles;
     }
     Ok(loaded)
+}
+
+fn acquire_factory_lock(project_dir: &Path) -> Result<FactoryRunLock> {
+    let lock_dir = project_dir.join("artifacts").join("_locks");
+    fs::create_dir_all(&lock_dir).with_context(|| format!("create {}", lock_dir.display()))?;
+    let lock_path = lock_dir.join("factory_cycle.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open {}", lock_path.display()))?;
+    file.try_lock_exclusive().with_context(|| {
+        format!(
+            "factory cycle already running (lock: {})",
+            lock_path.display()
+        )
+    })?;
+    Ok(FactoryRunLock { file })
 }
 
 fn resolve_under_project(project_dir: &Path, raw: &Path) -> PathBuf {
@@ -2235,5 +2270,13 @@ mod tests {
         fs::write(&path, "after: true\n").unwrap();
         rollback_target_snapshots(&[snapshot]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "before: true\n");
+    }
+
+    #[test]
+    fn acquire_factory_lock_rejects_parallel_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = acquire_factory_lock(dir.path()).unwrap();
+        let err = acquire_factory_lock(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("factory cycle already running"));
     }
 }
