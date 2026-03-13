@@ -31,6 +31,13 @@ fn smoke_lock() -> &'static Mutex<()> {
     SMOKE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn smoke_suite_guard() -> MutexGuard<'static, ()> {
+    match smoke_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DbSnapshot {
     db: Option<Vec<u8>>,
@@ -880,23 +887,23 @@ fn paper_service_apply_restarts_stale_running_lane() {
         .spawn()
         .expect("paper daemon restart fixture should spawn");
     let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
-    let mut running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    let running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
     let previous_pid = running_status
         .pointer("/pid")
         .and_then(Value::as_u64)
         .expect("running daemon pid should be present") as i32;
-    running_status["updated_at_ms"] = Value::from(1);
-    fs::write(
-        &fixture.status_path,
-        serde_json::to_vec_pretty(&running_status).expect("stale status should serialise"),
-    )
-    .expect("stale status should be written");
+    let preview = wait_for_service_action(&fixture, "restart", 1, Duration::from_secs(1));
+    assert_eq!(
+        preview.pointer("/desired_action").and_then(Value::as_str),
+        Some("restart"),
+        "read-only service preview should expose the stale restart path before supervision",
+    );
 
     let output = service_apply_command(&fixture)
         .arg("--action")
         .arg("auto")
         .arg("--stale-after-ms")
-        .arg("1000")
+        .arg("1")
         .output()
         .expect("paper service restart smoke should spawn");
     assert!(
@@ -909,7 +916,13 @@ fn paper_service_apply_restarts_stale_running_lane() {
     let restarted_pid = report
         .pointer("/spawned_pid")
         .and_then(Value::as_u64)
-        .expect("restart should report a spawned pid") as i32;
+        .unwrap_or_else(|| {
+            panic!(
+                "restart should report a spawned pid; report:\n{}",
+                serde_json::to_string_pretty(&report)
+                    .expect("restart report should serialise for diagnostics")
+            )
+        }) as i32;
     assert_ne!(
         restarted_pid, previous_pid,
         "restart should replace the stale daemon owner with a new pid",
@@ -1673,9 +1686,7 @@ fn paper_daemon_keeps_open_positions_in_active_symbols_after_manifest_reload() {
 }
 
 fn seed_fixture() -> Fixture {
-    let suite_guard = smoke_lock()
-        .lock()
-        .expect("paper daemon smoke fixture lock should not be poisoned");
+    let suite_guard = smoke_suite_guard();
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
@@ -1694,9 +1705,7 @@ fn seed_fixture() -> Fixture {
 }
 
 fn seed_empty_fixture() -> Fixture {
-    let suite_guard = smoke_lock()
-        .lock()
-        .expect("paper daemon smoke fixture lock should not be poisoned");
+    let suite_guard = smoke_suite_guard();
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
@@ -1922,6 +1931,41 @@ fn wait_for_status_pid(path: &Path, pid: u32, running: bool, timeout: Duration) 
             running
         );
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_service_action(
+    fixture: &Fixture,
+    desired_action: &str,
+    stale_after_ms: i64,
+    timeout: Duration,
+) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = service_command(fixture)
+            .arg("--stale-after-ms")
+            .arg(stale_after_ms.to_string())
+            .output()
+            .expect("paper service preview should spawn");
+        assert!(
+            output.status.success(),
+            "paper service preview should succeed while waiting for desired_action={}; output:\n{}",
+            desired_action,
+            combined_output(&output)
+        );
+        let report = parse_json_output(&output);
+        if report.pointer("/desired_action").and_then(Value::as_str) == Some(desired_action) {
+            return report;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "paper service preview did not reach desired_action={} within {:?}; last report:\n{}",
+            desired_action,
+            timeout,
+            serde_json::to_string_pretty(&report)
+                .expect("service preview report should serialise for diagnostics")
+        );
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
