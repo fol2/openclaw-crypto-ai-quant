@@ -24,9 +24,9 @@ README, and legacy runtime ledger.
 
 | Surface | Status | Notes |
 |---|---|---|
-| `engine/daemon.py` (`paper`, `dry_live`, `live`) | Archival recovery/debug only | Requires `AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1` for any mode; `AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1` remains accepted only for old live/dry-live recovery workflows |
+| `engine/daemon.py` | Retired shim only | Fails fast and points callers to Rust service wrappers |
 | `strategy/mei_alpha_v1.py` runtime ownership surfaces | Recovery-only fallback | Strategy logic still exists, but production paper execution is Rust-owned |
-| `live/trader.py` and `exchange/executor.py` | Archival recovery/debug only | Retained for guarded fallback and investigation workflows |
+| `live/trader.py` and `exchange/executor.py` | Archival recovery/debug only | `exchange/executor.py` is no longer required by operator tooling; it remains only for compatibility/tests while the final deletion tranche is still open |
 | `engine/core.py`, `engine/oms.py`, and `engine/risk.py` | Compatibility helpers, not production owners | Retained for archival tests, helper imports, and non-runtime tooling while the final Python cleanup tranche is still open |
 | `engine/promoted_config.py` | Frozen compatibility shim | Shells out to Rust effective-config resolution instead of owning config merges |
 

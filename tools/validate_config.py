@@ -10,12 +10,12 @@ import sys
 import yaml
 from pathlib import Path
 
-# Add project root so we can import strategy.mei_alpha_v1
+# Add project root so we can import strategy defaults
 _THIS_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _THIS_DIR.parent
 sys.path.insert(0, str(_PROJECT_DIR))
 
-from strategy.mei_alpha_v1 import _DEFAULT_STRATEGY_CONFIG  # noqa: E402
+from strategy.defaults import DEFAULT_STRATEGY_CONFIG  # noqa: E402
 
 # --- Rust defaults (from bt-core/src/config.rs) ---
 RUST_DEFAULTS = {
@@ -204,7 +204,7 @@ def main():
     yaml_path = _PROJECT_DIR / "config" / "strategy_overrides.yaml"
     yaml_global = load_yaml_global(yaml_path)
 
-    py_flat = flatten(_DEFAULT_STRATEGY_CONFIG)
+    py_flat = flatten(DEFAULT_STRATEGY_CONFIG)
     rust_flat = flatten(RUST_DEFAULTS)
     yaml_flat = flatten(yaml_global)
 

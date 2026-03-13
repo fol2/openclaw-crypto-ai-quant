@@ -160,13 +160,13 @@ def _reconstruct_positions_from_db(db_path: str) -> tuple[float, list[dict]]:
 
 
 # ---------------------------------------------------------------------------
-# Live state export (uses HyperliquidLiveExecutor)
+# Live state export (uses the operator client, not the legacy runtime adapter)
 # ---------------------------------------------------------------------------
 
 def _export_live() -> tuple[float, list[dict]]:
     """Export live positions via Hyperliquid API + live DB metadata."""
     sys.path.insert(0, PROJECT_DIR)
-    from exchange.executor import load_live_secrets, HyperliquidLiveExecutor
+    from exchange.operator_client import HyperliquidOperatorClient, load_live_secrets
 
     secrets_path = os.path.expanduser(
         str(os.getenv("AI_QUANT_SECRETS_PATH") or DEFAULT_SECRETS_PATH)
@@ -180,7 +180,7 @@ def _export_live() -> tuple[float, list[dict]]:
         sys.exit(1)
 
     secrets = load_live_secrets(secrets_path)
-    executor = HyperliquidLiveExecutor(
+    executor = HyperliquidOperatorClient(
         secret_key=secrets.secret_key,
         main_address=secrets.main_address,
     )

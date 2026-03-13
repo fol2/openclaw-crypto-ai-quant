@@ -77,10 +77,11 @@ def test_poll_fills_collects_all_partial_fills(monkeypatch: pytest.MonkeyPatch):
             return fills_by_call[idx]
 
     class _FakeExecutor:
-        main_address = "0xabc"
-
         def __init__(self):
-            self._info = _FakeInfo()
+            self._fills = _FakeInfo()
+
+        def user_fills_by_time(self, *_args, **_kwargs):
+            return self._fills.user_fills_by_time(*_args, **_kwargs)
 
     clock = itertools.count()
     monkeypatch.setattr(manual_trade.time, "sleep", lambda _secs: None)
@@ -135,10 +136,11 @@ def test_poll_fills_waits_for_delayed_sibling_fill_until_expected_size_is_reache
             return fills_by_call[idx]
 
     class _FakeExecutor:
-        main_address = "0xabc"
-
         def __init__(self):
-            self._info = _FakeInfo()
+            self._fills = _FakeInfo()
+
+        def user_fills_by_time(self, *_args, **_kwargs):
+            return self._fills.user_fills_by_time(*_args, **_kwargs)
 
     clock = itertools.count()
     monkeypatch.setattr(manual_trade.time, "sleep", lambda _secs: None)
@@ -181,10 +183,11 @@ def test_poll_fills_can_match_by_exchange_order_id_when_fill_lacks_cloid(
             return [fill]
 
     class _FakeExecutor:
-        main_address = "0xabc"
-
         def __init__(self):
-            self._info = _FakeInfo()
+            self._fills = _FakeInfo()
+
+        def user_fills_by_time(self, *_args, **_kwargs):
+            return self._fills.user_fills_by_time(*_args, **_kwargs)
 
     clock = itertools.count()
     monkeypatch.setattr(manual_trade.time, "sleep", lambda _secs: None)

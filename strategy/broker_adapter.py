@@ -10,7 +10,8 @@ Provides a ``BrokerAdapter`` class that:
    error handling.
 
 The adapter is exchange-client agnostic: it calls methods on a duck-typed
-``exchange_client`` (see ``HyperliquidLiveExecutor`` for the production impl).
+``exchange_client`` (see ``exchange.operator_client.HyperliquidOperatorClient``
+for the remaining Python compatibility implementation).
 """
 
 from __future__ import annotations
@@ -58,9 +59,10 @@ DEFAULT_MAX_QUANTITY = 1_000_000.0
 class ExchangeClient(Protocol):
     """Minimal interface expected from the exchange client.
 
-    The production implementation is ``HyperliquidLiveExecutor`` from
-    ``exchange.executor``.  For testing, any object satisfying this protocol
-    (or a ``MagicMock`` with appropriate return values) suffices.
+    The remaining Python compatibility implementation is
+    ``HyperliquidOperatorClient`` from ``exchange.operator_client``. For
+    testing, any object satisfying this protocol (or a ``MagicMock`` with
+    appropriate return values) suffices.
     """
 
     def market_open(
@@ -161,7 +163,7 @@ class BrokerAdapter:
     ----------
     exchange_client
         An object implementing the ``ExchangeClient`` protocol (e.g.
-        ``HyperliquidLiveExecutor``).
+        ``HyperliquidOperatorClient``).
     config : dict, optional
         Configuration overrides::
 

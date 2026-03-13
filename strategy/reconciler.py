@@ -1,7 +1,8 @@
 """AQC-816: Exchange-kernel position reconciliation.
 
 Compares kernel SSOT positions (from ``get_kernel_positions()``) with live
-exchange positions (from ``HyperliquidLiveExecutor.get_positions()``) and
+exchange positions (from the Python compatibility exchange client's
+``get_positions()`` output) and
 detects discrepancies such as size mismatches, ghost positions, missing
 kernel entries, and side mismatches.
 
@@ -96,7 +97,8 @@ def normalize_exchange_position(raw_pos: dict[str, Any]) -> dict[str, Any]:
         - ``unrealized_pnl``: unrealized P&L in USD (float)
         - ``margin_used``: margin used in USD (float)
 
-    Accepts both the ``HyperliquidLiveExecutor.get_positions()`` format
+    Accepts both the Python compatibility exchange client's
+    ``get_positions()`` format
     (``type`` = ``"LONG"``/``"SHORT"``) and the raw exchange format
     (``side`` = ``"long"``/``"short"``).
     """

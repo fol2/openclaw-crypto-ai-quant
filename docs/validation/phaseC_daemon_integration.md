@@ -128,9 +128,3 @@ AI_QUANT_PROMOTED_ROLE=fallback cargo run -p aiq-runtime -- paper daemon --lane 
 # Paper lane 3 → conservative role
 AI_QUANT_PROMOTED_ROLE=conservative cargo run -p aiq-runtime -- paper daemon --lane paper3 --project-dir "$PWD"
 ```
-
-## Historical Python Compatibility Example
-
-```bash
-AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 AI_QUANT_PROMOTED_ROLE=primary python -m engine.daemon
-```
