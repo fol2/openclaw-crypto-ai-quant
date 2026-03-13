@@ -264,16 +264,31 @@ mod tests {
         assert!(!resolved.effective_cfg.trade.enable_breakeven_stop);
         assert!(!resolved.effective_cfg.trade.enable_partial_tp);
         assert!(!resolved.effective_cfg.trade.enable_vol_buffered_trailing);
-        assert_eq!(resolved.effective_cfg.trade.trailing_start_atr_low_conf, 0.0);
-        assert_eq!(resolved.effective_cfg.trade.trailing_distance_atr_low_conf, 0.0);
-        assert_eq!(resolved.effective_cfg.trade.smart_exit_adx_exhaustion_lt, 0.0);
         assert_eq!(
-            resolved.effective_cfg.trade.smart_exit_adx_exhaustion_lt_low_conf,
+            resolved.effective_cfg.trade.trailing_start_atr_low_conf,
+            0.0
+        );
+        assert_eq!(
+            resolved.effective_cfg.trade.trailing_distance_atr_low_conf,
+            0.0
+        );
+        assert_eq!(
+            resolved.effective_cfg.trade.smart_exit_adx_exhaustion_lt,
+            0.0
+        );
+        assert_eq!(
+            resolved
+                .effective_cfg
+                .trade
+                .smart_exit_adx_exhaustion_lt_low_conf,
             0.0
         );
         assert!(!resolved.effective_cfg.trade.enable_rsi_overextension_exit);
         assert_eq!(resolved.active_profile, "parity_exit_isolation");
-        assert!(!resolved.behaviour_plan.exits.is_enabled("exit.take_profit.partial"));
+        assert!(!resolved
+            .behaviour_plan
+            .exits
+            .is_enabled("exit.take_profit.partial"));
         assert!(!resolved.behaviour_plan.exits.is_enabled("exit.smart.tsme"));
     }
 
@@ -314,8 +329,21 @@ mod tests {
         let resolved = resolve_execution_config(&cfg, None).expect("profile must resolve");
         assert!(!resolved.effective_cfg.filters.enable_anomaly_filter);
         assert!(!resolved.effective_cfg.filters.require_btc_alignment);
-        assert!(!resolved.effective_cfg.thresholds.entry.enable_pullback_entries);
-        assert!(resolved.effective_cfg.thresholds.entry.high_conf_volume_mult > 1.0e9);
+        assert!(
+            !resolved
+                .effective_cfg
+                .thresholds
+                .entry
+                .enable_pullback_entries
+        );
+        assert!(
+            resolved
+                .effective_cfg
+                .thresholds
+                .entry
+                .high_conf_volume_mult
+                > 1.0e9
+        );
         assert!(!resolved.effective_cfg.trade.reverse_entry_signal);
         assert!(!resolved.effective_cfg.market_regime.enable_auto_reverse);
     }

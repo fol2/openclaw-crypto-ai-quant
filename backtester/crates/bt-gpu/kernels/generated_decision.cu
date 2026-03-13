@@ -1139,22 +1139,24 @@ __device__ AllExitResult check_all_exits_codegen(
     result.exit_price = 0.0;
 
     // ── 1. Stop Loss ────────────────────────────────────────────────────
-    double sl_price = compute_sl_price_codegen(
-        cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
-    );
-    if (pos_type == 1) {  // POS_LONG
-        if (current_price <= sl_price) {
-            result.should_exit = true;
-            result.exit_code = 100;
-            result.exit_price = current_price;
-            return result;
-        }
-    } else {              // POS_SHORT
-        if (current_price >= sl_price) {
-            result.should_exit = true;
-            result.exit_code = 100;
-            result.exit_price = current_price;
-            return result;
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) != 0u) {
+        double sl_price = compute_sl_price_codegen(
+            cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
+        );
+        if (pos_type == 1) {  // POS_LONG
+            if (current_price <= sl_price) {
+                result.should_exit = true;
+                result.exit_code = 100;
+                result.exit_price = current_price;
+                return result;
+            }
+        } else {              // POS_SHORT
+            if (current_price >= sl_price) {
+                result.should_exit = true;
+                result.exit_code = 100;
+                result.exit_price = current_price;
+                return result;
+            }
         }
     }
 

@@ -742,11 +742,7 @@ fn ensure_gpu_behaviour_plan_supported(
 ) -> Result<(), String> {
     let production = bt_core::behaviour::ResolvedBehaviourPlan::production();
     ensure_default_group_order("gates", &plan.gates, &production.gates)?;
-    ensure_default_group_order(
-        "signal_modes",
-        &plan.signal_modes,
-        &production.signal_modes,
-    )?;
+    ensure_default_group_order("signal_modes", &plan.signal_modes, &production.signal_modes)?;
     ensure_default_group_order("engine", &plan.engine, &production.engine)?;
     ensure_default_group_order("exits", &plan.exits, &production.exits)?;
 
@@ -777,7 +773,11 @@ fn ensure_gpu_behaviour_plan_supported(
     ensure_supported_disabled_behaviours(
         "engine",
         &plan.engine,
-        &["engine.atr_floor", "engine.reverse_signal", "engine.regime_filter"],
+        &[
+            "engine.atr_floor",
+            "engine.reverse_signal",
+            "engine.regime_filter",
+        ],
     )?;
     ensure_supported_disabled_behaviours(
         "entry_sizing",
@@ -793,7 +793,10 @@ fn ensure_gpu_behaviour_plan_supported(
     ensure_supported_disabled_behaviours(
         "entry_progression",
         &plan.entry_progression,
-        &["entry.progression.pyramiding", "entry.progression.add_cooldown"],
+        &[
+            "entry.progression.pyramiding",
+            "entry.progression.add_cooldown",
+        ],
     )?;
     ensure_supported_disabled_behaviours(
         "risk",
@@ -839,9 +842,7 @@ fn build_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -
             "exit.stop_loss.slb" => mask &= !GPU_EXIT_MASK_STOP_LOSS_SLB,
             "exit.stop_loss.base" => mask &= !GPU_EXIT_MASK_STOP_LOSS_BASE,
             "exit.stop_loss.breakeven" => mask &= !GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
-            "exit.trailing.low_conf_override" => {
-                mask &= !GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE
-            }
+            "exit.trailing.low_conf_override" => mask &= !GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE,
             "exit.trailing.vol_buffer" => mask &= !GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
             "exit.trailing.base" => mask &= !GPU_EXIT_MASK_TRAILING_BASE,
             "exit.take_profit.partial" => mask &= !GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
@@ -1083,7 +1084,7 @@ impl GpuComboConfig {
 mod tests {
     use super::{
         GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
-        GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL, GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
+        GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN, GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
         GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE, GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
         GPU_SMART_EXIT_MASK_ALL,
     };
