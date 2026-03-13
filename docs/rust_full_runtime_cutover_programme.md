@@ -5,6 +5,7 @@
 **Primary goal:** Retire Python as a production runtime language and converge on one Rust-owned end-to-end engine for live, paper, backtest, CPU sweep, and the future GPU parity path.
 
 **Current ownership index:** `docs/current_authoritative_paths.md`
+**Final cleanup plan:** `docs/programmes/rust_runtime_final_cleanup_plan.md`
 
 This document now serves two purposes:
 

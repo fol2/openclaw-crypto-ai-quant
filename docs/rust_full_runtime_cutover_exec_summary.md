@@ -6,6 +6,7 @@
 **Execution checklist:** `docs/programmes/rust_runtime_phase0_cutover_checklist.md`
 **Phase 2 checklist:** `docs/programmes/rust_runtime_phase2_cutover_checklist.md`
 **Current ownership index:** `docs/current_authoritative_paths.md`
+**Final cleanup plan:** `docs/programmes/rust_runtime_final_cleanup_plan.md`
 
 ## 1. North Star
 
