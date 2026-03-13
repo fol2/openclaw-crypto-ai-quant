@@ -607,6 +607,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
     let settings_path = resolve_under_project(&project_dir, &args.settings);
     let config_path = resolve_under_project(&project_dir, &args.config);
     let settings = load_factory_defaults(&settings_path)?;
+    validate_selection_settings(&settings.selection)?;
     let profile_settings = settings
         .profiles
         .get(args.profile.as_str())
@@ -1656,6 +1657,30 @@ fn active_paper_targets(selection: &SelectionSettings) -> Vec<&PaperTarget> {
         .collect()
 }
 
+fn validate_selection_settings(selection: &SelectionSettings) -> Result<()> {
+    if selection.selected_roles.is_empty() {
+        return Ok(());
+    }
+    let known = selection
+        .paper_targets
+        .iter()
+        .map(|target| target.role.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let unknown = selection
+        .selected_roles
+        .iter()
+        .map(|role| role.to_ascii_lowercase())
+        .filter(|role| !known.contains(role))
+        .collect::<BTreeSet<_>>();
+    if !unknown.is_empty() {
+        bail!(
+            "unknown selection.selected_roles entries: {}",
+            unknown.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn write_reports(
     run_dir: &Path,
     validated: &[ValidationItem],
@@ -2083,5 +2108,13 @@ mod tests {
         let gate = build_gate_report("run", &items, &selected, &selection);
         assert!(!gate.blocked);
         assert_eq!(gate.slot_bindings.len(), 1);
+    }
+
+    #[test]
+    fn selection_validation_rejects_unknown_selected_roles() {
+        let mut selection = SelectionSettings::default();
+        selection.selected_roles = vec!["typo-primary".to_string()];
+        let err = validate_selection_settings(&selection).unwrap_err();
+        assert!(err.to_string().contains("unknown selection.selected_roles"));
     }
 }
