@@ -42,6 +42,13 @@ const MAX_TPE_OBSERVATIONS: usize = 1000;
 const PRUNED_OBSERVATIONS: usize = 500;
 const FAILED_TRIAL_TOTAL_PNL: f64 = -1.0e12;
 
+type TrialOverrideBatch = Vec<Vec<(String, f64)>>;
+type TrialRawValueBatch = Vec<Vec<f64>>;
+type FundingGpuBuffers = (
+    Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
+    Option<Arc<cudarc::driver::CudaSlice<f64>>>,
+);
+
 fn checked_num_bars_u32(num_bars: usize) -> Result<u32, String> {
     u32::try_from(num_bars).map_err(|_| format!("num_bars {num_bars} exceeds u32::MAX"))
 }
@@ -170,7 +177,7 @@ fn gate_is_active(axis: &AxisOptimizer, resolved_vals: &[f64]) -> bool {
     if let Some(g) = axis.gate {
         resolved_vals
             .get(g.parent_idx)
-            .map_or(true, |v| (*v - g.eq).abs() < 1e-9)
+            .is_none_or(|v| (*v - g.eq).abs() < 1e-9)
     } else {
         true
     }
@@ -334,7 +341,7 @@ fn sample_batch(
     axis_opts: &mut [AxisOptimizer],
     rng: &mut StdRng,
     batch_n: usize,
-) -> (Vec<Vec<(String, f64)>>, Vec<Vec<f64>>) {
+) -> (TrialOverrideBatch, TrialRawValueBatch) {
     let has_gated = axis_opts.iter().any(|a| a.gate.is_some());
 
     if !has_gated {
@@ -439,7 +446,7 @@ fn sample_batch_ungated(
     axis_opts: &mut [AxisOptimizer],
     rng: &mut StdRng,
     batch_n: usize,
-) -> (Vec<Vec<(String, f64)>>, Vec<Vec<f64>>) {
+) -> (TrialOverrideBatch, TrialRawValueBatch) {
     let axis_seeds: Vec<u64> = (0..axis_opts.len()).map(|_| rng.gen()).collect();
 
     let axis_samples: Vec<Vec<f64>> = axis_opts
@@ -462,7 +469,11 @@ fn sample_batch_ungated(
     let mut trial_overrides: Vec<Vec<(String, f64)>> = Vec::with_capacity(batch_n);
     let mut trial_raw_values: Vec<Vec<f64>> = Vec::with_capacity(batch_n);
 
-    for t in 0..batch_n {
+    let trial_indices = axis_samples
+        .first()
+        .into_iter()
+        .flat_map(|samples| samples.iter().enumerate());
+    for (t, _) in trial_indices {
         let mut raw_vals = Vec::with_capacity(axis_opts.len());
         let mut resolved_vals = Vec::with_capacity(axis_opts.len());
 
@@ -492,7 +503,7 @@ fn tell_results(
     obs_count: &mut usize,
 ) {
     for (i, result) in gpu_result.results.iter().enumerate() {
-        let pnl = result.total_pnl as f64;
+        let pnl = result.total_pnl;
         let objective = if crate::is_degenerate_overrides(&gpu_result.trial_overrides[i]) {
             1e18
         } else {
@@ -575,7 +586,7 @@ fn build_sweep_results(
     let mut out = Vec::with_capacity(gpu_results.len());
 
     for (i, result) in gpu_results.iter().enumerate() {
-        let pnl = result.total_pnl as f64;
+        let pnl = result.total_pnl;
         let overrides = &trial_overrides[i];
 
         let config_id = overrides
@@ -585,7 +596,7 @@ fn build_sweep_results(
             .join(",");
 
         let pf = if result.gross_loss.abs() > 0.001 {
-            result.gross_profit as f64 / result.gross_loss.abs() as f64
+            result.gross_profit / result.gross_loss.abs()
         } else if result.gross_profit > 0.0 {
             999.0
         } else {
@@ -607,12 +618,12 @@ fn build_sweep_results(
             config_id,
             output_mode: "gpu_tpe".to_string(),
             total_pnl: pnl,
-            final_balance: result.final_balance as f64,
+            final_balance: result.final_balance,
             total_trades: result.total_trades,
             total_wins: result.total_wins,
             win_rate: wr,
             profit_factor: pf,
-            max_drawdown_pct: result.max_drawdown_pct as f64,
+            max_drawdown_pct: result.max_drawdown_pct,
             overrides: overrides.clone(),
         });
     }
@@ -633,6 +644,7 @@ fn build_sweep_results(
 ///   3. GPU sends results → TPE thread tells batch 0, samples batch 1
 ///   4. GPU evaluates batch 1 while TPE samples batch 2 (full overlap)
 ///   5. Repeat until all trials done
+#[allow(clippy::too_many_arguments)]
 pub fn run_tpe_sweep(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
@@ -808,10 +820,9 @@ pub fn run_tpe_sweep(
             return TpeSweepOutcome::empty();
         }
     };
-    let (funding_spans_gpu, funding_rates_gpu): (
-        Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
-        Option<Arc<cudarc::driver::CudaSlice<f64>>>,
-    ) = if let Some(funding_events) = funding_events_host.as_ref() {
+    let (funding_spans_gpu, funding_rates_gpu): FundingGpuBuffers = if let Some(funding_events) =
+        funding_events_host.as_ref()
+    {
         let active_slots = funding_events
             .spans
             .iter()
@@ -1150,6 +1161,7 @@ pub fn run_tpe_sweep(
 
 /// Evaluate a batch of trials where all share the same indicator config
 /// (no indicator axes in the sweep). Single indicator dispatch, N trade combos.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_trade_only_batch(
     ds: &gpu_host::GpuDeviceState,
     candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
@@ -1263,6 +1275,7 @@ fn evaluate_trade_only_batch(
 
 /// Evaluate a batch of trials where indicator params may vary per trial.
 /// Uses Layer 1 (arena buffers) + Layer 2 (indicator config dedup).
+#[allow(clippy::too_many_arguments)]
 fn evaluate_mixed_batch_arena(
     ds: &gpu_host::GpuDeviceState,
     candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
@@ -1341,7 +1354,7 @@ fn evaluate_mixed_batch_arena(
 
     let mut all_results: Vec<buffers::GpuResult> = vec![buffers::GpuResult::zeroed(); n];
 
-    let num_groups = (num_unique + arena_cap - 1) / arena_cap;
+    let num_groups = num_unique.div_ceil(arena_cap);
     for group_idx in 0..num_groups {
         let group_start = group_idx * arena_cap;
         let group_end = (group_start + arena_cap).min(num_unique);
@@ -1459,6 +1472,7 @@ fn evaluate_mixed_batch_arena(
 }
 
 /// Dispatch indicator_kernel + breadth_kernel into pre-allocated arena buffers.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_indicator_arena(
     ds: &gpu_host::GpuDeviceState,
     candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
@@ -1492,7 +1506,7 @@ fn dispatch_indicator_arena(
         .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let ind_threads = k * num_symbols;
-    let ind_grid = (ind_threads + block_size - 1) / block_size;
+    let ind_grid = ind_threads.div_ceil(block_size);
 
     let ind_func: CudaFunction = ds
         .dev
@@ -1519,7 +1533,7 @@ fn dispatch_indicator_arena(
     .map_err(|e| format!("indicator kernel launch: {e}"))?;
 
     let br_threads = k * num_bars;
-    let br_grid = (br_threads + block_size - 1) / block_size;
+    let br_grid = br_threads.div_ceil(block_size);
 
     let br_func: CudaFunction = ds
         .dev
@@ -1549,6 +1563,7 @@ fn dispatch_indicator_arena(
 }
 
 /// Dispatch trade sweep kernel using pre-allocated arena snapshot/breadth/btc buffers.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_trade_arena(
     ds: &gpu_host::GpuDeviceState,
     candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
@@ -1576,7 +1591,7 @@ fn dispatch_trade_arena(
     let num_combos = u32::try_from(gpu_configs.len())
         .map_err(|_| format!("gpu_configs.len() {} exceeds u32::MAX", gpu_configs.len()))?;
     let block_size = 64u32;
-    let grid_size = (num_combos + block_size - 1) / block_size;
+    let grid_size = num_combos.div_ceil(block_size);
 
     let configs_gpu = ds
         .dev
@@ -1642,7 +1657,7 @@ fn dispatch_trade_arena(
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
     let trade_range = trade_end - trade_start;
-    let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
+    let num_chunks = trade_range.div_ceil(effective_chunk);
 
     for chunk_idx in 0..num_chunks {
         let chunk_start = trade_start + chunk_idx * effective_chunk;

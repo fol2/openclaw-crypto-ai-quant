@@ -4,8 +4,10 @@
 //! on the kernel's own `Position` type.  Glitch guard (AQC-712) blocks exits during
 //! extreme price deviations.  Smart exits (AQC-713) will be added in a later ticket.
 
+use crate::behaviour::ResolvedBehaviourPlan;
 use crate::decision_kernel::{Position, PositionSide};
 use crate::indicators::IndicatorSnapshot;
+use bt_signals::behaviour::{BehaviourGroupPlan, BehaviourTrace};
 use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -133,6 +135,23 @@ pub struct ExitEvaluation {
     pub exit_context: Option<crate::decision_kernel::ExitContext>,
     /// Exit tunnel boundaries (always Some when a position exists).
     pub exit_bounds: Option<ExitBounds>,
+    /// Behaviour-level trace for parity debugging.
+    pub behaviour_trace: Vec<BehaviourTrace>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StopLossState {
+    sl_mult: f64,
+    sl_price: Option<f64>,
+    breakeven_active: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrailingState {
+    start_atr: f64,
+    distance_atr: f64,
+    vol_buffer_active: bool,
+    base_seen: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -178,54 +197,42 @@ fn profit_atr(side: PositionSide, entry: f64, close: f64, atr: f64) -> f64 {
     diff / atr
 }
 
-/// Compute the dynamically-adjusted stop-loss price.
-/// Mirrors `exits/stop_loss.rs::compute_sl_price`.
-fn compute_sl_price(
+fn trace(id: &str, enabled: bool, status: &str, detail: impl Into<String>) -> BehaviourTrace {
+    BehaviourTrace {
+        group: "exits".to_string(),
+        id: id.to_string(),
+        enabled,
+        status: status.to_string(),
+        detail: detail.into(),
+    }
+}
+
+fn default_exit_behaviour_plan() -> BehaviourGroupPlan {
+    ResolvedBehaviourPlan::production().exits
+}
+
+fn compute_full_tp_price(side: PositionSide, entry: f64, atr: f64, params: &ExitParams) -> f64 {
+    match side {
+        PositionSide::Long => entry + (atr * params.tp_atr_mult),
+        PositionSide::Short => entry - (atr * params.tp_atr_mult),
+    }
+}
+
+fn recompute_sl_price(
     side: PositionSide,
     entry: f64,
     atr: f64,
     snap: &IndicatorSnapshot,
     params: &ExitParams,
+    state: &StopLossState,
 ) -> f64 {
-    // C5: ATR zero-guard — prevent NaN/Inf from division by zero
     let atr = atr.max(1e-12);
-    let mut sl_mult = params.sl_atr_mult;
-
-    // 1. ASE: ADX slope < 0 AND underwater → tighten 20%
-    let is_underwater = match side {
-        PositionSide::Long => snap.close < entry,
-        PositionSide::Short => snap.close > entry,
-    };
-    if snap.adx_slope < 0.0 && is_underwater {
-        sl_mult *= 0.8;
-    }
-
-    // 2. FTB: disabled in backtester (no-op)
-
-    // 3. DASE: ADX > 40 AND profitable > 0.5 ATR → widen 15%
-    if snap.adx > 40.0 {
-        let pa = match side {
-            PositionSide::Long => (snap.close - entry) / atr,
-            PositionSide::Short => (entry - snap.close) / atr,
-        };
-        if pa > 0.5 {
-            sl_mult *= 1.15;
-        }
-    }
-
-    // 4. SLB: ADX > 45 → widen 10%
-    if snap.adx > 45.0 {
-        sl_mult *= 1.10;
-    }
-
-    // Base SL price
     let mut sl_price = match side {
-        PositionSide::Long => entry - (atr * sl_mult),
-        PositionSide::Short => entry + (atr * sl_mult),
+        PositionSide::Long => entry - (atr * state.sl_mult),
+        PositionSide::Short => entry + (atr * state.sl_mult),
     };
 
-    // 5. Breakeven stop
-    if params.enable_breakeven_stop && params.breakeven_start_atr > 0.0 {
+    if state.breakeven_active && params.enable_breakeven_stop && params.breakeven_start_atr > 0.0 {
         let be_start = atr * params.breakeven_start_atr;
         let be_buffer = atr * params.breakeven_buffer_atr;
         match side {
@@ -243,6 +250,46 @@ fn compute_sl_price(
     }
 
     sl_price
+}
+
+fn build_exit_bounds(
+    pos: &Position,
+    params: &ExitParams,
+    behaviour_plan: &BehaviourGroupPlan,
+    entry: f64,
+    atr: f64,
+    sl_price: Option<f64>,
+) -> Option<ExitBounds> {
+    let trailing_sl = if behaviour_plan.is_enabled("exit.trailing.base") {
+        pos.trailing_sl
+    } else {
+        None
+    };
+    let lower_full = match (sl_price, trailing_sl) {
+        (Some(sl), Some(tsl)) => match pos.side {
+            PositionSide::Long => sl.max(tsl),
+            PositionSide::Short => sl.min(tsl),
+        },
+        (Some(sl), None) => sl,
+        (None, Some(tsl)) => tsl,
+        (None, None) => 0.0,
+    };
+    let upper_full = if behaviour_plan.is_enabled("exit.take_profit.full") {
+        compute_full_tp_price(pos.side, entry, atr, params)
+    } else {
+        0.0
+    };
+    let upper_partial = if behaviour_plan.is_enabled("exit.take_profit.partial") {
+        compute_partial_tp_price(pos, entry, atr, params)
+    } else {
+        None
+    };
+
+    Some(ExitBounds {
+        upper_full,
+        upper_partial,
+        lower_full,
+    })
 }
 
 fn maybe_debug_stop_snapshot(
@@ -293,10 +340,9 @@ fn maybe_debug_stop_snapshot(
 struct ComputeTrailingInput<'a> {
     side: PositionSide,
     atr: f64,
-    confidence: Option<u8>,
     current_trailing: Option<f64>,
     snap: &'a IndicatorSnapshot,
-    params: &'a ExitParams,
+    trailing_state: TrailingState,
     profit_atr_val: f64,
 }
 
@@ -304,25 +350,13 @@ fn compute_trailing(input: ComputeTrailingInput<'_>) -> Option<f64> {
     let ComputeTrailingInput {
         side,
         atr,
-        confidence,
         current_trailing,
         snap,
-        params,
+        trailing_state,
         profit_atr_val,
     } = input;
-    let is_low_conf = confidence == Some(0);
-
-    let mut trailing_start = params.trailing_start_atr;
-    let mut trailing_dist = params.trailing_distance_atr;
-
-    if is_low_conf {
-        if params.trailing_start_atr_low_conf > 0.0 {
-            trailing_start = params.trailing_start_atr_low_conf;
-        }
-        if params.trailing_distance_atr_low_conf > 0.0 {
-            trailing_dist = params.trailing_distance_atr_low_conf;
-        }
-    }
+    let trailing_start = trailing_state.start_atr;
+    let trailing_dist = trailing_state.distance_atr;
 
     // RSI Trend-Guard floor
     let min_trailing_dist = match side {
@@ -334,7 +368,7 @@ fn compute_trailing(input: ComputeTrailingInput<'_>) -> Option<f64> {
     let mut effective_dist = trailing_dist;
 
     // Vol-Buffered Trailing Stop (VBTS)
-    if params.enable_vol_buffered_trailing && snap.bb_width_ratio > 1.2 {
+    if trailing_state.vol_buffer_active && snap.bb_width_ratio > 1.2 {
         effective_dist *= 1.25;
     }
 
@@ -381,9 +415,7 @@ fn compute_trailing(input: ComputeTrailingInput<'_>) -> Option<f64> {
     Some(ratcheted)
 }
 
-/// Check take-profit conditions.
-/// Mirrors `exits/take_profit.rs::check_tp`.
-fn check_tp(
+fn check_take_profit_partial(
     side: PositionSide,
     entry: f64,
     atr: f64,
@@ -391,103 +423,91 @@ fn check_tp(
     tp1_taken: bool,
     snap: &IndicatorSnapshot,
     params: &ExitParams,
-) -> KernelExitResult {
-    let tp_mult = params.tp_atr_mult;
-    let tp_price = match side {
-        PositionSide::Long => entry + (atr * tp_mult),
-        PositionSide::Short => entry - (atr * tp_mult),
-    };
-
-    if params.enable_partial_tp {
-        if !tp1_taken {
-            let partial_mult = if params.tp_partial_atr_mult > 0.0 {
-                params.tp_partial_atr_mult
-            } else {
-                tp_mult
-            };
-            let partial_tp_price = match side {
-                PositionSide::Long => entry + (atr * partial_mult),
-                PositionSide::Short => entry - (atr * partial_mult),
-            };
-            let partial_hit = match side {
-                PositionSide::Long => snap.close >= partial_tp_price,
-                PositionSide::Short => snap.close <= partial_tp_price,
-            };
-
-            if partial_hit {
-                let pct = params.tp_partial_pct.clamp(0.0, 1.0);
-                if pct > 0.0 && pct < 1.0 {
-                    let remaining_notional = quantity * (1.0 - pct) * snap.close;
-                    if remaining_notional < params.tp_partial_min_notional_usd {
-                        return KernelExitResult::Hold;
-                    }
-                    return KernelExitResult::PartialClose {
-                        reason: "Take Profit (Partial)".to_string(),
-                        exit_price: snap.close,
-                        fraction: pct,
-                    };
-                }
-                // pct == 0 or >= 1.0 → fall through to full close
-            } else if params.tp_partial_atr_mult <= 0.0 {
-                return KernelExitResult::Hold;
-            } else {
-                // Fall through to check full TP
-            }
-        } else {
-            // tp1 already taken
-            if params.tp_partial_atr_mult > 0.0 {
-                let tp_hit = match side {
-                    PositionSide::Long => snap.close >= tp_price,
-                    PositionSide::Short => snap.close <= tp_price,
-                };
-                if tp_hit {
-                    return KernelExitResult::FullClose {
-                        reason: "Take Profit".to_string(),
-                        exit_price: snap.close,
-                    };
-                }
-            }
-            return KernelExitResult::Hold;
-        }
+) -> Option<KernelExitResult> {
+    if !params.enable_partial_tp || tp1_taken {
+        return None;
     }
 
-    // Full TP check
+    let tp_mult = params.tp_atr_mult;
+    let partial_mult = if params.tp_partial_atr_mult > 0.0 {
+        params.tp_partial_atr_mult
+    } else {
+        tp_mult
+    };
+    let partial_tp_price = match side {
+        PositionSide::Long => entry + (atr * partial_mult),
+        PositionSide::Short => entry - (atr * partial_mult),
+    };
+    let partial_hit = match side {
+        PositionSide::Long => snap.close >= partial_tp_price,
+        PositionSide::Short => snap.close <= partial_tp_price,
+    };
+
+    if !partial_hit {
+        return None;
+    }
+
+    let pct = params.tp_partial_pct.clamp(0.0, 1.0);
+    if pct > 0.0 && pct < 1.0 {
+        let remaining_notional = quantity * (1.0 - pct) * snap.close;
+        if remaining_notional < params.tp_partial_min_notional_usd {
+            return None;
+        }
+        return Some(KernelExitResult::PartialClose {
+            reason: "Take Profit (Partial)".to_string(),
+            exit_price: snap.close,
+            fraction: pct,
+        });
+    }
+
+    if pct >= 1.0 {
+        return Some(KernelExitResult::FullClose {
+            reason: "Take Profit".to_string(),
+            exit_price: snap.close,
+        });
+    }
+
+    None
+}
+
+fn check_take_profit_full(
+    side: PositionSide,
+    entry: f64,
+    atr: f64,
+    tp1_taken: bool,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+) -> Option<KernelExitResult> {
+    if params.enable_partial_tp && tp1_taken && params.tp_partial_atr_mult <= 0.0 {
+        return None;
+    }
+    let tp_price = compute_full_tp_price(side, entry, atr, params);
     let tp_hit = match side {
         PositionSide::Long => snap.close >= tp_price,
         PositionSide::Short => snap.close <= tp_price,
     };
     if tp_hit {
-        return KernelExitResult::FullClose {
+        return Some(KernelExitResult::FullClose {
             reason: "Take Profit".to_string(),
             exit_price: snap.close,
-        };
+        });
     }
 
-    KernelExitResult::Hold
+    None
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Smart exit evaluation (mirrors exits/smart_exits.rs)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Evaluate all smart exit conditions on a kernel position.
-///
-/// Check order matches the CPU-side `exits/smart_exits.rs::check()`:
-///   1. Trend Breakdown (EMA Cross) + TBB buffer
-///   2. Trend Exhaustion (ADX < threshold)
-///   3. EMA Macro Breakdown
-///   4. Stagnation Exit (low-vol + underwater, skip PAXG)
-///   5. Funding Headwind Exit
-///   6. TSME (Trend Saturation Momentum Exit)
-///   7. MMDE (MACD Persistent Divergence Exit)
-///   8. RSI Overextension Exit
-fn evaluate_smart_exits(
+fn check_smart_exit(
+    behaviour_id: &str,
     pos: &Position,
     snap: &IndicatorSnapshot,
     params: &ExitParams,
     profit_atr_val: f64,
     duration_hours: f64,
-) -> KernelExitResult {
+) -> Option<KernelExitResult> {
     let entry = pos.avg_entry_price;
     let atr = effective_atr(entry, pos.entry_atr);
 
@@ -505,7 +525,6 @@ fn evaluate_smart_exits(
     }
     .max(0.0);
 
-    // ── 1. Trend Breakdown (EMA Cross) with TBB buffer ──────────────────
     let ema_dev = if snap.ema_slow > 0.0 {
         (snap.ema_fast - snap.ema_slow).abs() / snap.ema_slow
     } else {
@@ -519,118 +538,133 @@ fn evaluate_smart_exits(
         snap.ema_fast > snap.ema_slow && !is_weak_cross
     };
 
-    // ── 2. Trend Exhaustion (ADX below threshold) ───────────────────────
     let exhausted = adx_exhaustion_lt > 0.0 && snap.adx < adx_exhaustion_lt;
 
-    if ema_cross_exit || exhausted {
-        let reason = if ema_cross_exit {
-            "Trend Breakdown (EMA Cross)".to_string()
-        } else {
-            format!("Trend Exhaustion (ADX < {adx_exhaustion_lt})")
-        };
-        return KernelExitResult::FullClose {
-            reason,
-            exit_price: snap.close,
-        };
-    }
-
-    // ── 3. EMA Macro Breakdown ──────────────────────────────────────────
-    if params.require_macro_alignment && snap.ema_macro > 0.0 {
-        if is_long && snap.close < snap.ema_macro {
-            return KernelExitResult::FullClose {
-                reason: "EMA Macro Breakdown".to_string(),
-                exit_price: snap.close,
-            };
-        }
-        if !is_long && snap.close > snap.ema_macro {
-            return KernelExitResult::FullClose {
-                reason: "EMA Macro Breakout".to_string(),
-                exit_price: snap.close,
-            };
-        }
-    }
-
-    // ── 4. Stagnation Exit (low-vol + underwater, skip PAXG) ────────────
-    if snap.atr < (atr * 0.70) {
-        let is_underwater = if is_long {
-            snap.close < entry
-        } else {
-            snap.close > entry
-        };
-        if is_underwater && pos.symbol.to_uppercase() != "PAXG" {
-            return KernelExitResult::FullClose {
-                reason: format!(
-                    "Stagnation Exit (Low Vol: {:.2} < {:.2})",
-                    snap.atr,
-                    atr * 0.70
-                ),
-                exit_price: snap.close,
-            };
-        }
-    }
-
-    // ── 5. Funding Headwind Exit ────────────────────────────────────────
-    if let Some(result) = check_funding_headwind_kernel(pos, snap, profit_atr_val, duration_hours) {
-        return result;
-    }
-
-    // ── 6. TSME (Trend Saturation Momentum Exit) ────────────────────────
-    if snap.adx > 50.0 {
-        let tsme_min_profit = params.tsme_min_profit_atr;
-        let gate_profit_ok = profit_atr_val >= tsme_min_profit;
-        let gate_slope_ok = if params.tsme_require_adx_slope_negative {
-            snap.adx_slope < 0.0
-        } else {
-            true
-        };
-
-        if gate_profit_ok && gate_slope_ok {
-            let is_exhausted = if is_long {
-                snap.macd_hist < snap.prev_macd_hist && snap.prev_macd_hist < snap.prev2_macd_hist
-            } else {
-                snap.macd_hist > snap.prev_macd_hist && snap.prev_macd_hist > snap.prev2_macd_hist
-            };
-
-            if is_exhausted {
-                return KernelExitResult::FullClose {
-                    reason: format!(
-                        "Trend Saturation Momentum Exhaustion (ADX: {:.1}, ADX_slope: {:.2})",
-                        snap.adx, snap.adx_slope
-                    ),
+    match behaviour_id {
+        "exit.smart.trend_breakdown" => {
+            if ema_cross_exit {
+                Some(KernelExitResult::FullClose {
+                    reason: "Trend Breakdown (EMA Cross)".to_string(),
                     exit_price: snap.close,
-                };
+                })
+            } else {
+                None
             }
         }
-    }
-
-    // ── 7. MMDE (MACD Persistent Divergence Exit) ───────────────────────
-    if profit_atr_val > 1.5 && snap.adx > 35.0 {
-        let is_diverging = if is_long {
-            snap.macd_hist < snap.prev_macd_hist
-                && snap.prev_macd_hist < snap.prev2_macd_hist
-                && snap.prev2_macd_hist < snap.prev3_macd_hist
-        } else {
-            snap.macd_hist > snap.prev_macd_hist
-                && snap.prev_macd_hist > snap.prev2_macd_hist
-                && snap.prev2_macd_hist > snap.prev3_macd_hist
-        };
-
-        if is_diverging {
-            return KernelExitResult::FullClose {
-                reason: format!("MACD Persistent Divergence (Profit: {profit_atr_val:.2} ATR)"),
-                exit_price: snap.close,
-            };
+        "exit.smart.trend_exhaustion" => {
+            if exhausted {
+                Some(KernelExitResult::FullClose {
+                    reason: format!("Trend Exhaustion (ADX < {adx_exhaustion_lt})"),
+                    exit_price: snap.close,
+                })
+            } else {
+                None
+            }
         }
-    }
-
-    // ── 8. RSI Overextension Exit ───────────────────────────────────────
-    if params.enable_rsi_overextension_exit {
-        if let Some(result) = check_rsi_overextension_kernel(pos, snap, params, profit_atr_val) {
-            return result;
+        "exit.smart.ema_macro_breakdown" => {
+            if !params.require_macro_alignment || snap.ema_macro <= 0.0 {
+                return None;
+            }
+            if is_long && snap.close < snap.ema_macro {
+                return Some(KernelExitResult::FullClose {
+                    reason: "EMA Macro Breakdown".to_string(),
+                    exit_price: snap.close,
+                });
+            }
+            if !is_long && snap.close > snap.ema_macro {
+                return Some(KernelExitResult::FullClose {
+                    reason: "EMA Macro Breakout".to_string(),
+                    exit_price: snap.close,
+                });
+            }
+            None
         }
-    }
+        "exit.smart.stagnation" => {
+            if snap.atr < (atr * 0.70) {
+                let is_underwater = if is_long {
+                    snap.close < entry
+                } else {
+                    snap.close > entry
+                };
+                if is_underwater && pos.symbol.to_uppercase() != "PAXG" {
+                    return Some(KernelExitResult::FullClose {
+                        reason: format!(
+                            "Stagnation Exit (Low Vol: {:.2} < {:.2})",
+                            snap.atr,
+                            atr * 0.70
+                        ),
+                        exit_price: snap.close,
+                    });
+                }
+            }
+            None
+        }
+        "exit.smart.funding_headwind" => {
+            check_funding_headwind_kernel(pos, snap, profit_atr_val, duration_hours)
+        }
+        "exit.smart.tsme" => {
+            if snap.adx > 50.0 {
+                let tsme_min_profit = params.tsme_min_profit_atr;
+                let gate_profit_ok = profit_atr_val >= tsme_min_profit;
+                let gate_slope_ok = if params.tsme_require_adx_slope_negative {
+                    snap.adx_slope < 0.0
+                } else {
+                    true
+                };
 
-    KernelExitResult::Hold
+                if gate_profit_ok && gate_slope_ok {
+                    let is_exhausted = if is_long {
+                        snap.macd_hist < snap.prev_macd_hist
+                            && snap.prev_macd_hist < snap.prev2_macd_hist
+                    } else {
+                        snap.macd_hist > snap.prev_macd_hist
+                            && snap.prev_macd_hist > snap.prev2_macd_hist
+                    };
+
+                    if is_exhausted {
+                        return Some(KernelExitResult::FullClose {
+                            reason: format!(
+                                "Trend Saturation Momentum Exhaustion (ADX: {:.1}, ADX_slope: {:.2})",
+                                snap.adx, snap.adx_slope
+                            ),
+                            exit_price: snap.close,
+                        });
+                    }
+                }
+            }
+            None
+        }
+        "exit.smart.mmde" => {
+            if profit_atr_val > 1.5 && snap.adx > 35.0 {
+                let is_diverging = if is_long {
+                    snap.macd_hist < snap.prev_macd_hist
+                        && snap.prev_macd_hist < snap.prev2_macd_hist
+                        && snap.prev2_macd_hist < snap.prev3_macd_hist
+                } else {
+                    snap.macd_hist > snap.prev_macd_hist
+                        && snap.prev_macd_hist > snap.prev2_macd_hist
+                        && snap.prev2_macd_hist > snap.prev3_macd_hist
+                };
+
+                if is_diverging {
+                    return Some(KernelExitResult::FullClose {
+                        reason: format!(
+                            "MACD Persistent Divergence (Profit: {profit_atr_val:.2} ATR)"
+                        ),
+                        exit_price: snap.close,
+                    });
+                }
+            }
+            None
+        }
+        "exit.smart.rsi_overextension" => {
+            if !params.enable_rsi_overextension_exit {
+                return None;
+            }
+            check_rsi_overextension_kernel(pos, snap, params, profit_atr_val)
+        }
+        _ => None,
+    }
 }
 
 /// Funding headwind sub-check for kernel positions.
@@ -858,9 +892,659 @@ fn check_rsi_overextension_kernel(
 // Public API
 // ═══════════════════════════════════════════════════════════════════════════
 
+use crate::decision_kernel::{ExitContext, ThresholdRecord};
+
+fn record_threshold(
+    thresholds: &mut Vec<ThresholdRecord>,
+    name: &str,
+    actual: f64,
+    threshold: f64,
+    passed: bool,
+) {
+    if let Some(existing) = thresholds.iter_mut().find(|record| record.name == name) {
+        existing.actual = actual;
+        existing.threshold = threshold;
+        existing.passed = passed;
+    } else {
+        thresholds.push(ThresholdRecord {
+            name: name.to_string(),
+            actual,
+            threshold,
+            passed,
+        });
+    }
+}
+
+fn stop_loss_triggered(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    current_time_ms: i64,
+    _behaviour_id: &str,
+    sl_price: f64,
+    thresholds: &mut Vec<ThresholdRecord>,
+) -> bool {
+    let sl_hit = match pos.side {
+        PositionSide::Long => snap.close <= sl_price,
+        PositionSide::Short => snap.close >= sl_price,
+    };
+    maybe_debug_stop_snapshot(
+        pos,
+        snap,
+        current_time_ms,
+        pos.avg_entry_price,
+        effective_atr(pos.avg_entry_price, pos.entry_atr),
+        sl_price,
+        sl_hit,
+    );
+    let sl_distance = match pos.side {
+        PositionSide::Long => snap.close - sl_price,
+        PositionSide::Short => sl_price - snap.close,
+    };
+    record_threshold(thresholds, "sl_distance", sl_distance, 0.0, !sl_hit);
+    sl_hit
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_exit_evaluation(
+    pos: &Position,
+    params: &ExitParams,
+    behaviour_plan: &BehaviourGroupPlan,
+    entry: f64,
+    atr: f64,
+    pa: f64,
+    duration_bars: u64,
+    result: KernelExitResult,
+    exit_type: &str,
+    exit_reason: String,
+    thresholds: Vec<ThresholdRecord>,
+    sl_price: Option<f64>,
+    behaviour_trace: Vec<BehaviourTrace>,
+) -> ExitEvaluation {
+    let tp_price = if behaviour_plan.is_enabled("exit.take_profit.full") {
+        Some(compute_full_tp_price(pos.side, entry, atr, params))
+    } else {
+        None
+    };
+    let exit_bounds = build_exit_bounds(pos, params, behaviour_plan, entry, atr, sl_price);
+    ExitEvaluation {
+        result: result.clone(),
+        threshold_records: thresholds,
+        exit_context: Some(ExitContext {
+            exit_type: exit_type.to_string(),
+            exit_reason,
+            exit_price: match result {
+                KernelExitResult::Hold => snap_unreachable_exit_price(),
+                KernelExitResult::FullClose { exit_price, .. }
+                | KernelExitResult::PartialClose { exit_price, .. } => exit_price,
+            },
+            entry_price: entry,
+            sl_price,
+            tp_price,
+            trailing_sl: pos.trailing_sl,
+            profit_atr: pa,
+            duration_bars,
+        }),
+        exit_bounds,
+        behaviour_trace,
+    }
+}
+
+fn snap_unreachable_exit_price() -> f64 {
+    0.0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_stop_loss_behaviour(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    behaviour_plan: &BehaviourGroupPlan,
+    current_time_ms: i64,
+    entry: f64,
+    atr: f64,
+    pa: f64,
+    duration_bars: u64,
+    behaviour_id: &str,
+    state: &mut StopLossState,
+    thresholds: &mut Vec<ThresholdRecord>,
+    behaviour_trace: &mut Vec<BehaviourTrace>,
+) -> Option<ExitEvaluation> {
+    let enabled = behaviour_plan.is_enabled(behaviour_id);
+    if !enabled {
+        behaviour_trace.push(trace(
+            behaviour_id,
+            false,
+            "disabled",
+            "disabled by behaviour plan",
+        ));
+        return None;
+    }
+
+    match behaviour_id {
+        "exit.stop_loss.base" => {
+            state.sl_price = Some(recompute_sl_price(
+                pos.side, entry, atr, snap, params, state,
+            ));
+            let sl_price = state.sl_price.expect("base stop-loss price must exist");
+            behaviour_trace.push(trace(
+                behaviour_id,
+                true,
+                "executed",
+                format!("sl_mult={:.4} sl_price={sl_price:.4}", state.sl_mult),
+            ));
+            if stop_loss_triggered(
+                pos,
+                snap,
+                current_time_ms,
+                behaviour_id,
+                sl_price,
+                thresholds,
+            ) {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "triggered",
+                    format!("close {:.4} breached sl {:.4}", snap.close, sl_price),
+                ));
+                let result = KernelExitResult::FullClose {
+                    reason: "Stop Loss".to_string(),
+                    exit_price: snap.close,
+                };
+                return Some(build_exit_evaluation(
+                    pos,
+                    params,
+                    behaviour_plan,
+                    entry,
+                    atr,
+                    pa,
+                    duration_bars,
+                    result,
+                    "stop_loss",
+                    format!("SL at {sl_price:.4}, close {:.4}", snap.close),
+                    thresholds.clone(),
+                    state.sl_price,
+                    behaviour_trace.clone(),
+                ));
+            }
+        }
+        "exit.stop_loss.ase" => {
+            let underwater = match pos.side {
+                PositionSide::Long => snap.close < entry,
+                PositionSide::Short => snap.close > entry,
+            };
+            if snap.adx_slope < 0.0 && underwater {
+                state.sl_mult *= 0.8;
+                if state.sl_price.is_some() {
+                    state.sl_price = Some(recompute_sl_price(
+                        pos.side, entry, atr, snap, params, state,
+                    ));
+                }
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "executed",
+                    format!("tightened sl_mult to {:.4}", state.sl_mult),
+                ));
+            } else {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "skipped",
+                    "ASE preconditions did not pass",
+                ));
+            }
+        }
+        "exit.stop_loss.dase" => {
+            if snap.adx > 40.0 && pa > 0.5 {
+                state.sl_mult *= 1.15;
+                if state.sl_price.is_some() {
+                    state.sl_price = Some(recompute_sl_price(
+                        pos.side, entry, atr, snap, params, state,
+                    ));
+                }
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "executed",
+                    format!("widened sl_mult to {:.4}", state.sl_mult),
+                ));
+            } else {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "skipped",
+                    "DASE preconditions did not pass",
+                ));
+            }
+        }
+        "exit.stop_loss.slb" => {
+            if snap.adx > 45.0 {
+                state.sl_mult *= 1.10;
+                if state.sl_price.is_some() {
+                    state.sl_price = Some(recompute_sl_price(
+                        pos.side, entry, atr, snap, params, state,
+                    ));
+                }
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "executed",
+                    format!("buffered sl_mult to {:.4}", state.sl_mult),
+                ));
+            } else {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "skipped",
+                    "SLB preconditions did not pass",
+                ));
+            }
+        }
+        "exit.stop_loss.breakeven" => {
+            if !params.enable_breakeven_stop || params.breakeven_start_atr <= 0.0 {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "config_disabled",
+                    "breakeven stop disabled in params",
+                ));
+                return None;
+            }
+            let be_start = atr * params.breakeven_start_atr;
+            let active = match pos.side {
+                PositionSide::Long => (snap.close - entry) >= be_start,
+                PositionSide::Short => (entry - snap.close) >= be_start,
+            };
+            state.breakeven_active = active;
+            if state.sl_price.is_some() {
+                state.sl_price = Some(recompute_sl_price(
+                    pos.side, entry, atr, snap, params, state,
+                ));
+            }
+            behaviour_trace.push(trace(
+                behaviour_id,
+                true,
+                if active { "executed" } else { "skipped" },
+                format!("breakeven_active={active}"),
+            ));
+        }
+        _ => {}
+    }
+
+    if let Some(sl_price) = state.sl_price {
+        if behaviour_id != "exit.stop_loss.base"
+            && stop_loss_triggered(
+                pos,
+                snap,
+                current_time_ms,
+                behaviour_id,
+                sl_price,
+                thresholds,
+            )
+        {
+            behaviour_trace.push(trace(
+                behaviour_id,
+                true,
+                "triggered",
+                format!("close {:.4} breached sl {:.4}", snap.close, sl_price),
+            ));
+            let result = KernelExitResult::FullClose {
+                reason: "Stop Loss".to_string(),
+                exit_price: snap.close,
+            };
+            return Some(build_exit_evaluation(
+                pos,
+                params,
+                behaviour_plan,
+                entry,
+                atr,
+                pa,
+                duration_bars,
+                result,
+                "stop_loss",
+                format!("SL at {sl_price:.4}, close {:.4}", snap.close),
+                thresholds.clone(),
+                state.sl_price,
+                behaviour_trace.clone(),
+            ));
+        }
+    }
+
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_trailing_behaviour(
+    pos: &mut Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    behaviour_plan: &BehaviourGroupPlan,
+    entry: f64,
+    atr: f64,
+    pa: f64,
+    duration_bars: u64,
+    behaviour_id: &str,
+    state: &mut TrailingState,
+    sl_price: Option<f64>,
+    thresholds: &mut Vec<ThresholdRecord>,
+    behaviour_trace: &mut Vec<BehaviourTrace>,
+) -> Option<ExitEvaluation> {
+    let enabled = behaviour_plan.is_enabled(behaviour_id);
+    if !enabled {
+        behaviour_trace.push(trace(
+            behaviour_id,
+            false,
+            "disabled",
+            "disabled by behaviour plan",
+        ));
+        return None;
+    }
+
+    match behaviour_id {
+        "exit.trailing.low_conf_override" => {
+            if pos.confidence == Some(0) {
+                if params.trailing_start_atr_low_conf > 0.0 {
+                    state.start_atr = params.trailing_start_atr_low_conf;
+                }
+                if params.trailing_distance_atr_low_conf > 0.0 {
+                    state.distance_atr = params.trailing_distance_atr_low_conf;
+                }
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "executed",
+                    format!(
+                        "start_atr={:.4} distance_atr={:.4}",
+                        state.start_atr, state.distance_atr
+                    ),
+                ));
+            } else {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "skipped",
+                    "position is not low confidence",
+                ));
+            }
+        }
+        "exit.trailing.vol_buffer" => {
+            if !params.enable_vol_buffered_trailing {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "config_disabled",
+                    "vol-buffered trailing disabled in params",
+                ));
+            } else {
+                state.vol_buffer_active = true;
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "executed",
+                    format!("bb_width_ratio={:.4}", snap.bb_width_ratio),
+                ));
+            }
+        }
+        "exit.trailing.base" => {
+            state.base_seen = true;
+            behaviour_trace.push(trace(
+                behaviour_id,
+                true,
+                "executed",
+                format!(
+                    "start_atr={:.4} distance_atr={:.4} current_trailing={:?}",
+                    state.start_atr, state.distance_atr, pos.trailing_sl
+                ),
+            ));
+        }
+        _ => {}
+    }
+
+    if !state.base_seen {
+        return None;
+    }
+
+    let new_tsl = compute_trailing(ComputeTrailingInput {
+        side: pos.side,
+        atr,
+        current_trailing: pos.trailing_sl,
+        snap,
+        trailing_state: *state,
+        profit_atr_val: pa,
+    });
+    pos.trailing_sl = new_tsl;
+
+    if let Some(tsl_price) = new_tsl {
+        let triggered = match pos.side {
+            PositionSide::Long => snap.close <= tsl_price,
+            PositionSide::Short => snap.close >= tsl_price,
+        };
+        let tsl_distance = match pos.side {
+            PositionSide::Long => snap.close - tsl_price,
+            PositionSide::Short => tsl_price - snap.close,
+        };
+        record_threshold(
+            thresholds,
+            "trailing_sl_distance",
+            tsl_distance,
+            0.0,
+            !triggered,
+        );
+        if triggered {
+            behaviour_trace.push(trace(
+                behaviour_id,
+                true,
+                "triggered",
+                format!("close {:.4} breached trailing {:.4}", snap.close, tsl_price),
+            ));
+            let result = KernelExitResult::FullClose {
+                reason: "Trailing Stop".to_string(),
+                exit_price: snap.close,
+            };
+            return Some(build_exit_evaluation(
+                pos,
+                params,
+                behaviour_plan,
+                entry,
+                atr,
+                pa,
+                duration_bars,
+                result,
+                "trailing",
+                format!("Trailing SL at {tsl_price:.4}, close {:.4}", snap.close),
+                thresholds.clone(),
+                sl_price,
+                behaviour_trace.clone(),
+            ));
+        }
+    }
+
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_take_profit_behaviour(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    behaviour_plan: &BehaviourGroupPlan,
+    entry: f64,
+    atr: f64,
+    pa: f64,
+    duration_bars: u64,
+    behaviour_id: &str,
+    sl_price: Option<f64>,
+    thresholds: &mut Vec<ThresholdRecord>,
+    behaviour_trace: &mut Vec<BehaviourTrace>,
+) -> Option<ExitEvaluation> {
+    let enabled = behaviour_plan.is_enabled(behaviour_id);
+    if !enabled {
+        behaviour_trace.push(trace(
+            behaviour_id,
+            false,
+            "disabled",
+            "disabled by behaviour plan",
+        ));
+        return None;
+    }
+
+    let result = match behaviour_id {
+        "exit.take_profit.partial" => {
+            if !params.enable_partial_tp {
+                behaviour_trace.push(trace(
+                    behaviour_id,
+                    true,
+                    "config_disabled",
+                    "partial take-profit disabled in params",
+                ));
+                return None;
+            }
+            check_take_profit_partial(
+                pos.side,
+                entry,
+                atr,
+                pos.quantity,
+                pos.tp1_taken,
+                snap,
+                params,
+            )
+        }
+        "exit.take_profit.full" => {
+            check_take_profit_full(pos.side, entry, atr, pos.tp1_taken, snap, params)
+        }
+        _ => None,
+    };
+
+    let threshold_price = if behaviour_id == "exit.take_profit.partial" {
+        compute_partial_tp_price(pos, entry, atr, params)
+            .unwrap_or_else(|| compute_full_tp_price(pos.side, entry, atr, params))
+    } else {
+        compute_full_tp_price(pos.side, entry, atr, params)
+    };
+    let distance = match pos.side {
+        PositionSide::Long => threshold_price - snap.close,
+        PositionSide::Short => snap.close - threshold_price,
+    };
+    record_threshold(thresholds, "tp_distance", distance, 0.0, distance > 0.0);
+
+    if let Some(result) = result {
+        let (exit_type, exit_reason) = match &result {
+            KernelExitResult::PartialClose { reason, .. } => {
+                ("take_profit_partial", reason.clone())
+            }
+            KernelExitResult::FullClose { reason, .. } => ("take_profit", reason.clone()),
+            KernelExitResult::Hold => unreachable!(),
+        };
+        behaviour_trace.push(trace(behaviour_id, true, "triggered", exit_reason.clone()));
+        return Some(build_exit_evaluation(
+            pos,
+            params,
+            behaviour_plan,
+            entry,
+            atr,
+            pa,
+            duration_bars,
+            result,
+            exit_type,
+            exit_reason,
+            thresholds.clone(),
+            sl_price,
+            behaviour_trace.clone(),
+        ));
+    }
+
+    behaviour_trace.push(trace(
+        behaviour_id,
+        true,
+        "executed",
+        "take-profit threshold not reached",
+    ));
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_smart_exit_behaviour(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    behaviour_plan: &BehaviourGroupPlan,
+    entry: f64,
+    atr: f64,
+    pa: f64,
+    duration_bars: u64,
+    duration_hours: f64,
+    behaviour_id: &str,
+    sl_price: Option<f64>,
+    behaviour_trace: &mut Vec<BehaviourTrace>,
+) -> Option<ExitEvaluation> {
+    let enabled = behaviour_plan.is_enabled(behaviour_id);
+    if !enabled {
+        behaviour_trace.push(trace(
+            behaviour_id,
+            false,
+            "disabled",
+            "disabled by behaviour plan",
+        ));
+        return None;
+    }
+
+    if behaviour_id == "exit.smart.ema_macro_breakdown"
+        && (!params.require_macro_alignment || snap.ema_macro <= 0.0)
+    {
+        behaviour_trace.push(trace(
+            behaviour_id,
+            true,
+            "config_disabled",
+            "macro alignment exit inactive in params/snapshot",
+        ));
+        return None;
+    }
+    if behaviour_id == "exit.smart.rsi_overextension" && !params.enable_rsi_overextension_exit {
+        behaviour_trace.push(trace(
+            behaviour_id,
+            true,
+            "config_disabled",
+            "RSI overextension exit disabled in params",
+        ));
+        return None;
+    }
+
+    if let Some(result) = check_smart_exit(behaviour_id, pos, snap, params, pa, duration_hours) {
+        let reason = match &result {
+            KernelExitResult::FullClose { reason, .. } => reason.clone(),
+            KernelExitResult::PartialClose { reason, .. } => reason.clone(),
+            KernelExitResult::Hold => String::new(),
+        };
+        behaviour_trace.push(trace(behaviour_id, true, "triggered", reason.clone()));
+        return Some(build_exit_evaluation(
+            pos,
+            params,
+            behaviour_plan,
+            entry,
+            atr,
+            pa,
+            duration_bars,
+            result,
+            "smart_exit",
+            reason,
+            Vec::new(),
+            sl_price,
+            behaviour_trace.clone(),
+        ));
+    }
+
+    behaviour_trace.push(trace(
+        behaviour_id,
+        true,
+        "executed",
+        "smart exit did not trigger",
+    ));
+    None
+}
+
 /// Evaluate exit conditions for an existing kernel position.
 ///
-/// Priority: Glitch Guard > Stop Loss > Trailing Stop > Take Profit.
+/// Priority is resolved by the active behaviour plan order after the glitch guard.
 /// Updates `pos.trailing_sl` in-place (ratcheted).
 pub fn evaluate_exits(
     pos: &mut Position,
@@ -871,21 +1555,50 @@ pub fn evaluate_exits(
     evaluate_exits_with_diagnostics(pos, snap, params, current_time_ms).result
 }
 
+pub fn evaluate_exits_with_behaviour_plan(
+    pos: &mut Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    current_time_ms: i64,
+    behaviour_plan: &BehaviourGroupPlan,
+) -> KernelExitResult {
+    evaluate_exits_with_behaviour_plan_and_diagnostics(
+        pos,
+        snap,
+        params,
+        current_time_ms,
+        behaviour_plan,
+    )
+    .result
+}
+
 /// Evaluate exit conditions and return enriched diagnostics (threshold records + exit context).
-///
-/// Same logic as `evaluate_exits`, but bundles threshold records for every
-/// price-level check and an `ExitContext` when an exit fires.
 pub fn evaluate_exits_with_diagnostics(
     pos: &mut Position,
     snap: &IndicatorSnapshot,
     params: &ExitParams,
     current_time_ms: i64,
 ) -> ExitEvaluation {
-    use crate::decision_kernel::{ExitContext, ThresholdRecord};
+    let behaviour_plan = default_exit_behaviour_plan();
+    evaluate_exits_with_behaviour_plan_and_diagnostics(
+        pos,
+        snap,
+        params,
+        current_time_ms,
+        &behaviour_plan,
+    )
+}
 
-    let mut thresholds: Vec<ThresholdRecord> = Vec::new();
+pub fn evaluate_exits_with_behaviour_plan_and_diagnostics(
+    pos: &mut Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    current_time_ms: i64,
+    behaviour_plan: &BehaviourGroupPlan,
+) -> ExitEvaluation {
+    let mut thresholds = Vec::new();
+    let mut behaviour_trace = Vec::new();
 
-    // ── 0. Glitch guard — block exits during extreme price deviations ───
     if params.block_exits_on_extreme_dev && snap.prev_close > 0.0 {
         let price_change_pct = (snap.close - snap.prev_close).abs() / snap.prev_close;
         let atr_dev = if snap.atr > 0.0 {
@@ -909,34 +1622,36 @@ pub fn evaluate_exits_with_diagnostics(
             passed: atr_dev <= params.glitch_atr_mult,
         });
         if is_glitch {
-            // Compute bounds even on glitch hold so the tunnel is visible.
             let entry = pos.avg_entry_price;
             let atr = effective_atr(entry, pos.entry_atr);
-            let sl_price = compute_sl_price(pos.side, entry, atr, snap, params);
-            let tp_price_val = match pos.side {
-                PositionSide::Long => entry + (atr * params.tp_atr_mult),
-                PositionSide::Short => entry - (atr * params.tp_atr_mult),
+            let mut stop_state = StopLossState {
+                sl_mult: params.sl_atr_mult,
+                sl_price: None,
+                breakeven_active: false,
             };
-            let lower = match pos.side {
-                PositionSide::Long => match pos.trailing_sl {
-                    Some(tsl) => sl_price.max(tsl),
-                    None => sl_price,
-                },
-                PositionSide::Short => match pos.trailing_sl {
-                    Some(tsl) => sl_price.min(tsl),
-                    None => sl_price,
-                },
-            };
-            let partial = compute_partial_tp_price(pos, entry, atr, params);
+            if behaviour_plan.is_enabled("exit.stop_loss.base") {
+                stop_state.sl_price = Some(recompute_sl_price(
+                    pos.side,
+                    entry,
+                    atr,
+                    snap,
+                    params,
+                    &stop_state,
+                ));
+            }
             return ExitEvaluation {
                 result: KernelExitResult::Hold,
                 threshold_records: thresholds,
                 exit_context: None,
-                exit_bounds: Some(ExitBounds {
-                    upper_full: tp_price_val,
-                    upper_partial: partial,
-                    lower_full: lower,
-                }),
+                exit_bounds: build_exit_bounds(
+                    pos,
+                    params,
+                    behaviour_plan,
+                    entry,
+                    atr,
+                    stop_state.sl_price,
+                ),
+                behaviour_trace,
             };
         }
     }
@@ -944,243 +1659,127 @@ pub fn evaluate_exits_with_diagnostics(
     let entry = pos.avg_entry_price;
     let atr = effective_atr(entry, pos.entry_atr);
     let pa = profit_atr(pos.side, entry, snap.close, atr);
-
-    // Compute duration_bars from timestamp difference (approximate as step count).
     let duration_bars = if current_time_ms > pos.opened_at_ms {
-        // Each bar is assumed to be one step; use ms difference / assumed bar duration.
-        // For diagnostics, store the raw step count from time difference.
         ((current_time_ms - pos.opened_at_ms) / 1000).max(0) as u64
     } else {
         0
     };
-
-    // ── 1. Stop Loss ────────────────────────────────────────────────────
-    let sl_price = compute_sl_price(pos.side, entry, atr, snap, params);
-    let sl_hit = match pos.side {
-        PositionSide::Long => snap.close <= sl_price,
-        PositionSide::Short => snap.close >= sl_price,
-    };
-    maybe_debug_stop_snapshot(pos, snap, current_time_ms, entry, atr, sl_price, sl_hit);
-    let sl_distance = match pos.side {
-        PositionSide::Long => snap.close - sl_price,
-        PositionSide::Short => sl_price - snap.close,
-    };
-    thresholds.push(ThresholdRecord {
-        name: "sl_distance".into(),
-        actual: sl_distance,
-        threshold: 0.0,
-        passed: !sl_hit,
-    });
-    if sl_hit {
-        let tp_price_val = match pos.side {
-            PositionSide::Long => entry + (atr * params.tp_atr_mult),
-            PositionSide::Short => entry - (atr * params.tp_atr_mult),
-        };
-        let lower = match pos.side {
-            PositionSide::Long => match pos.trailing_sl {
-                Some(tsl) => sl_price.max(tsl),
-                None => sl_price,
-            },
-            PositionSide::Short => match pos.trailing_sl {
-                Some(tsl) => sl_price.min(tsl),
-                None => sl_price,
-            },
-        };
-        let partial = compute_partial_tp_price(pos, entry, atr, params);
-        return ExitEvaluation {
-            result: KernelExitResult::FullClose {
-                reason: "Stop Loss".to_string(),
-                exit_price: snap.close,
-            },
-            threshold_records: thresholds,
-            exit_context: Some(ExitContext {
-                exit_type: "stop_loss".into(),
-                exit_reason: format!("SL at {sl_price:.4}, close {:.4}", snap.close),
-                exit_price: snap.close,
-                entry_price: entry,
-                sl_price: Some(sl_price),
-                tp_price: Some(tp_price_val),
-                trailing_sl: pos.trailing_sl,
-                profit_atr: pa,
-                duration_bars,
-            }),
-            exit_bounds: Some(ExitBounds {
-                upper_full: tp_price_val,
-                upper_partial: partial,
-                lower_full: lower,
-            }),
-        };
-    }
-
-    // ── 2. Trailing Stop ────────────────────────────────────────────────
-    let new_tsl = compute_trailing(ComputeTrailingInput {
-        side: pos.side,
-        atr,
-        confidence: pos.confidence,
-        current_trailing: pos.trailing_sl,
-        snap,
-        params,
-        profit_atr_val: pa,
-    });
-    pos.trailing_sl = new_tsl;
-
-    if let Some(tsl_price) = new_tsl {
-        let triggered = match pos.side {
-            PositionSide::Long => snap.close <= tsl_price,
-            PositionSide::Short => snap.close >= tsl_price,
-        };
-        let tsl_distance = match pos.side {
-            PositionSide::Long => snap.close - tsl_price,
-            PositionSide::Short => tsl_price - snap.close,
-        };
-        thresholds.push(ThresholdRecord {
-            name: "trailing_sl_distance".into(),
-            actual: tsl_distance,
-            threshold: 0.0,
-            passed: !triggered,
-        });
-        if triggered {
-            let tp_price_val = match pos.side {
-                PositionSide::Long => entry + (atr * params.tp_atr_mult),
-                PositionSide::Short => entry - (atr * params.tp_atr_mult),
-            };
-            let lower = match pos.side {
-                PositionSide::Long => sl_price.max(tsl_price),
-                PositionSide::Short => sl_price.min(tsl_price),
-            };
-            let partial = compute_partial_tp_price(pos, entry, atr, params);
-            return ExitEvaluation {
-                result: KernelExitResult::FullClose {
-                    reason: "Trailing Stop".to_string(),
-                    exit_price: snap.close,
-                },
-                threshold_records: thresholds,
-                exit_context: Some(ExitContext {
-                    exit_type: "trailing".into(),
-                    exit_reason: format!("Trailing SL at {tsl_price:.4}, close {:.4}", snap.close),
-                    exit_price: snap.close,
-                    entry_price: entry,
-                    sl_price: Some(sl_price),
-                    tp_price: Some(tp_price_val),
-                    trailing_sl: Some(tsl_price),
-                    profit_atr: pa,
-                    duration_bars,
-                }),
-                exit_bounds: Some(ExitBounds {
-                    upper_full: tp_price_val,
-                    upper_partial: partial,
-                    lower_full: lower,
-                }),
-            };
-        }
-    }
-
-    // ── Compute exit bounds (used by remaining return paths) ─────────
-    let tp_price_val = match pos.side {
-        PositionSide::Long => entry + (atr * params.tp_atr_mult),
-        PositionSide::Short => entry - (atr * params.tp_atr_mult),
-    };
-    let bounds_lower = match pos.side {
-        PositionSide::Long => match new_tsl {
-            Some(tsl) => sl_price.max(tsl),
-            None => sl_price,
-        },
-        PositionSide::Short => match new_tsl {
-            Some(tsl) => sl_price.min(tsl),
-            None => sl_price,
-        },
-    };
-    let bounds_partial = compute_partial_tp_price(pos, entry, atr, params);
-    let exit_bounds = Some(ExitBounds {
-        upper_full: tp_price_val,
-        upper_partial: bounds_partial,
-        lower_full: bounds_lower,
-    });
-
-    // ── 3. Take Profit ──────────────────────────────────────────────────
-    // (tp_price_val already computed above for bounds)
-    let tp_distance = match pos.side {
-        PositionSide::Long => tp_price_val - snap.close,
-        PositionSide::Short => snap.close - tp_price_val,
-    };
-    thresholds.push(ThresholdRecord {
-        name: "tp_distance".into(),
-        actual: tp_distance,
-        threshold: 0.0,
-        passed: tp_distance > 0.0, // not yet hit
-    });
-    let tp_result = check_tp(
-        pos.side,
-        entry,
-        atr,
-        pos.quantity,
-        pos.tp1_taken,
-        snap,
-        params,
-    );
-    if tp_result != KernelExitResult::Hold {
-        let (exit_type, exit_reason) = match &tp_result {
-            KernelExitResult::PartialClose { reason, .. } => {
-                ("take_profit_partial".to_string(), reason.clone())
-            }
-            KernelExitResult::FullClose { reason, .. } => {
-                ("take_profit".to_string(), reason.clone())
-            }
-            _ => unreachable!(),
-        };
-        return ExitEvaluation {
-            result: tp_result,
-            threshold_records: thresholds,
-            exit_context: Some(ExitContext {
-                exit_type,
-                exit_reason,
-                exit_price: snap.close,
-                entry_price: entry,
-                sl_price: Some(sl_price),
-                tp_price: Some(tp_price_val),
-                trailing_sl: pos.trailing_sl,
-                profit_atr: pa,
-                duration_bars,
-            }),
-            exit_bounds: exit_bounds.clone(),
-        };
-    }
-
-    // ── 4. Smart Exits ──────────────────────────────────────────────────
     let duration_hours = if current_time_ms > pos.opened_at_ms {
         (current_time_ms - pos.opened_at_ms) as f64 / 3_600_000.0
     } else {
         0.0
     };
-    let smart_result = evaluate_smart_exits(pos, snap, params, pa, duration_hours);
-    if smart_result != KernelExitResult::Hold {
-        let reason_str = match &smart_result {
-            KernelExitResult::FullClose { reason, .. } => reason.clone(),
-            _ => String::new(),
-        };
-        return ExitEvaluation {
-            result: smart_result,
-            threshold_records: thresholds,
-            exit_context: Some(ExitContext {
-                exit_type: "smart_exit".into(),
-                exit_reason: reason_str,
-                exit_price: snap.close,
-                entry_price: entry,
-                sl_price: Some(sl_price),
-                tp_price: Some(tp_price_val),
-                trailing_sl: pos.trailing_sl,
-                profit_atr: pa,
+
+    let mut stop_state = StopLossState {
+        sl_mult: params.sl_atr_mult,
+        sl_price: None,
+        breakeven_active: false,
+    };
+    let mut trailing_state = TrailingState {
+        start_atr: params.trailing_start_atr,
+        distance_atr: params.trailing_distance_atr,
+        vol_buffer_active: false,
+        base_seen: false,
+    };
+
+    for behaviour_id in behaviour_plan.ordered_ids() {
+        if behaviour_id.starts_with("exit.stop_loss.") {
+            if let Some(eval) = evaluate_stop_loss_behaviour(
+                pos,
+                snap,
+                params,
+                behaviour_plan,
+                current_time_ms,
+                entry,
+                atr,
+                pa,
                 duration_bars,
-            }),
-            exit_bounds: exit_bounds.clone(),
-        };
+                behaviour_id,
+                &mut stop_state,
+                &mut thresholds,
+                &mut behaviour_trace,
+            ) {
+                return eval;
+            }
+            continue;
+        }
+
+        if behaviour_id.starts_with("exit.trailing.") {
+            if let Some(eval) = evaluate_trailing_behaviour(
+                pos,
+                snap,
+                params,
+                behaviour_plan,
+                entry,
+                atr,
+                pa,
+                duration_bars,
+                behaviour_id,
+                &mut trailing_state,
+                stop_state.sl_price,
+                &mut thresholds,
+                &mut behaviour_trace,
+            ) {
+                return eval;
+            }
+            continue;
+        }
+
+        if behaviour_id.starts_with("exit.take_profit.") {
+            if let Some(eval) = evaluate_take_profit_behaviour(
+                pos,
+                snap,
+                params,
+                behaviour_plan,
+                entry,
+                atr,
+                pa,
+                duration_bars,
+                behaviour_id,
+                stop_state.sl_price,
+                &mut thresholds,
+                &mut behaviour_trace,
+            ) {
+                return eval;
+            }
+            continue;
+        }
+
+        if behaviour_id.starts_with("exit.smart.") {
+            if let Some(eval) = evaluate_smart_exit_behaviour(
+                pos,
+                snap,
+                params,
+                behaviour_plan,
+                entry,
+                atr,
+                pa,
+                duration_bars,
+                duration_hours,
+                behaviour_id,
+                stop_state.sl_price,
+                &mut behaviour_trace,
+            ) {
+                let mut eval = eval;
+                eval.threshold_records = thresholds;
+                return eval;
+            }
+        }
     }
 
     ExitEvaluation {
         result: KernelExitResult::Hold,
         threshold_records: thresholds,
         exit_context: None,
-        exit_bounds,
+        exit_bounds: build_exit_bounds(
+            pos,
+            params,
+            behaviour_plan,
+            entry,
+            atr,
+            stop_state.sl_price,
+        ),
+        behaviour_trace,
     }
 }
 
@@ -1278,6 +1877,27 @@ mod tests {
 
     fn default_params() -> ExitParams {
         ExitParams::default()
+    }
+
+    fn custom_plan(order: &[&str], disabled: &[&str]) -> BehaviourGroupPlan {
+        let base = default_exit_behaviour_plan();
+        let mut items = Vec::new();
+        for requested in order {
+            if let Some(item) = base.item(requested) {
+                items.push(item.clone());
+            }
+        }
+        for item in base.items {
+            if !order.iter().any(|requested| *requested == item.id) {
+                items.push(item);
+            }
+        }
+        for item in &mut items {
+            if disabled.iter().any(|requested| *requested == item.id) {
+                item.enabled = false;
+            }
+        }
+        BehaviourGroupPlan { items }
     }
 
     // ── Stop Loss tests ─────────────────────────────────────────────────
@@ -1521,6 +2141,97 @@ mod tests {
         match result {
             KernelExitResult::FullClose { reason, .. } => assert_eq!(reason, "Take Profit"),
             other => panic!("Expected full close at full TP, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn behaviour_plan_can_disable_stop_loss_base() {
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(97.5);
+        let plan = custom_plan(&[], &["exit.stop_loss.base"]);
+
+        let result =
+            evaluate_exits_with_behaviour_plan(&mut pos, &snap, &default_params(), 0, &plan);
+        assert_eq!(result, KernelExitResult::Hold);
+
+        let mut pos = long_pos(100.0);
+        let eval = evaluate_exits_with_behaviour_plan_and_diagnostics(
+            &mut pos,
+            &snap,
+            &default_params(),
+            0,
+            &plan,
+        );
+        assert!(eval
+            .behaviour_trace
+            .iter()
+            .any(|item| item.id == "exit.stop_loss.base" && item.status == "disabled"));
+    }
+
+    #[test]
+    fn behaviour_plan_can_reorder_full_tp_ahead_of_partial() {
+        let snap = default_snap(104.0);
+
+        let mut default_pos = long_pos(100.0);
+        let default_result = evaluate_exits(&mut default_pos, &snap, &default_params(), 0);
+        match default_result {
+            KernelExitResult::PartialClose { ref reason, .. } => {
+                assert_eq!(reason, "Take Profit (Partial)")
+            }
+            other => panic!("Expected default partial TP, got {:?}", other),
+        }
+
+        let mut reordered_pos = long_pos(100.0);
+        let plan = custom_plan(&["exit.take_profit.full", "exit.take_profit.partial"], &[]);
+        let reordered_result = evaluate_exits_with_behaviour_plan(
+            &mut reordered_pos,
+            &snap,
+            &default_params(),
+            0,
+            &plan,
+        );
+        match reordered_result {
+            KernelExitResult::FullClose { ref reason, .. } => assert_eq!(reason, "Take Profit"),
+            other => panic!("Expected reordered full TP, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn behaviour_plan_can_reorder_smart_exit_ahead_of_take_profit() {
+        let mut snap = default_snap(104.5);
+        snap.ema_fast = 95.0;
+        snap.ema_slow = 105.0;
+
+        let mut default_pos = long_pos(100.0);
+        let default_result = evaluate_exits(&mut default_pos, &snap, &default_params(), 0);
+        match default_result {
+            KernelExitResult::PartialClose { ref reason, .. } => {
+                assert_eq!(reason, "Take Profit (Partial)")
+            }
+            other => panic!("Expected default TP priority, got {:?}", other),
+        }
+
+        let mut reordered_pos = long_pos(100.0);
+        let plan = custom_plan(
+            &[
+                "exit.smart.trend_breakdown",
+                "exit.take_profit.partial",
+                "exit.take_profit.full",
+            ],
+            &[],
+        );
+        let reordered_result = evaluate_exits_with_behaviour_plan(
+            &mut reordered_pos,
+            &snap,
+            &default_params(),
+            0,
+            &plan,
+        );
+        match reordered_result {
+            KernelExitResult::FullClose { ref reason, .. } => {
+                assert!(reason.contains("Trend Breakdown"), "got: {reason}");
+            }
+            other => panic!("Expected reordered smart exit priority, got {:?}", other),
         }
     }
 

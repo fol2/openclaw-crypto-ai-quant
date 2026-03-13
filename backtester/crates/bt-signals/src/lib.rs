@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::fmt;
 use std::str::FromStr;
 
+pub mod behaviour;
 pub mod confidence;
 pub mod entry;
 pub mod gates;

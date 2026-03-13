@@ -11,7 +11,7 @@ Historical Python runtime and tooling surfaces have been removed from the tree.
 | Component | Path | Purpose |
 |---|---|---|
 | Runtime CLI | `runtime/aiq-runtime` | Paper/live control plane, daemon ownership, snapshots, service inspection |
-| Runtime core | `runtime/aiq-runtime-core` | Shared runtime pipeline and bootstrap contracts |
+| Runtime core | `runtime/aiq-runtime-core` | Shared stage + behaviour pipeline and bootstrap contracts |
 | Backtester CLI | `backtester/crates/bt-cli` | Replay, sweep, and indicator dump commands |
 | Backtester core | `backtester/crates/bt-core` | Simulation engine, config, indicators, state |
 | GPU sweep | `backtester/crates/bt-gpu` | CUDA sweep acceleration and parity helpers |
@@ -61,6 +61,19 @@ Optional local helpers used by some scripts:
 - `jq`
 - `sqlite3`
 - CUDA toolkit for GPU sweeps
+
+## Behaviour-Modular Runtime
+
+The Rust runtime now supports both:
+
+- **stage-modular control** for coarse pipeline ownership
+- **behaviour-modular control** for fine-grained decision behaviour debugging
+
+Behaviour profiles live under `pipeline.profiles.<name>.behaviours` and can
+explicitly reorder or disable gate, signal, exit, sizing, progression, and risk
+behaviours without editing Rust code. Exit behaviour plans now control the
+actual stop-loss, trailing, take-profit, and smart-exit sequence rather than
+stopping at stage-level ownership.
 
 ## Operations
 

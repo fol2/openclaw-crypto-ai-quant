@@ -311,9 +311,9 @@ pub fn prepare_sub_bar_candles(
     }
 
     // Sort per (bar, symbol) slice once up-front (needed for deterministic packing).
-    for bar_idx in 0..num_bars {
-        for sym_idx in 0..num_symbols {
-            sub_bars_by_bar_sym[bar_idx][sym_idx].sort_by_key(|b| b.t);
+    for bar_buckets in sub_bars_by_bar_sym.iter_mut().take(num_bars) {
+        for symbol_buckets in bar_buckets.iter_mut().take(num_symbols) {
+            symbol_buckets.sort_by_key(|b| b.t);
         }
     }
 
@@ -321,15 +321,15 @@ pub fn prepare_sub_bar_candles(
     // This defines the per-bar "tick timeline" used by the GPU kernel for ranked entry processing.
     let mut union_ts_by_bar: Vec<Vec<i64>> = vec![Vec::new(); num_bars];
     let mut max_sub: usize = 0;
-    for bar_idx in 0..num_bars {
+    for (bar_idx, union_ts_slot) in union_ts_by_bar.iter_mut().enumerate().take(num_bars) {
         let mut union_ts: Vec<i64> = Vec::new();
-        for sym_idx in 0..num_symbols {
-            union_ts.extend(sub_bars_by_bar_sym[bar_idx][sym_idx].iter().map(|b| b.t));
+        for symbol_buckets in sub_bars_by_bar_sym[bar_idx].iter().take(num_symbols) {
+            union_ts.extend(symbol_buckets.iter().map(|b| b.t));
         }
         union_ts.sort_unstable();
         union_ts.dedup();
         max_sub = max_sub.max(union_ts.len());
-        union_ts_by_bar[bar_idx] = union_ts;
+        *union_ts_slot = union_ts;
     }
 
     if max_sub == 0 {
@@ -447,12 +447,12 @@ mod tests {
         assert_eq!(out.timestamps, vec![1_000, 2_000]);
 
         // Missing slot: BBB at bar0 has close=0 but t_sec should still be stamped.
-        let bbb_bar0 = out.candles[0 * out.num_symbols + 1];
+        let bbb_bar0 = out.candles[1];
         assert_eq!(bbb_bar0.close, 0.0);
         assert_eq!(bbb_bar0.t_sec, 1u32);
 
         // Missing slot: AAA at bar1 has close=0 but t_sec should still be stamped.
-        let aaa_bar1 = out.candles[1 * out.num_symbols + 0];
+        let aaa_bar1 = out.candles[out.num_symbols];
         assert_eq!(aaa_bar1.close, 0.0);
         assert_eq!(aaa_bar1.t_sec, 2u32);
     }
@@ -467,7 +467,7 @@ mod tests {
         // the wrong indicator snapshot and can flip sl_atr_mult directional behaviour.
         // Include boundary cases: <= first ts (ignored), exact boundaries, between boundaries,
         // and beyond the last timestamp (should map to last bar).
-        let sub_times = vec![900_i64, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500];
+        let sub_times = [900_i64, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500];
         let mut sub: CandleData = CandleData::default();
         sub.insert(
             "ETH".to_string(),

@@ -18,19 +18,6 @@ fn bar_1h(t: i64, close: f64) -> OhlcvBar {
     }
 }
 
-fn bar_3m(t: i64, close: f64) -> OhlcvBar {
-    OhlcvBar {
-        t,
-        t_close: t + 180_000,
-        o: close,
-        h: close,
-        l: close,
-        c: close,
-        v: 1_000.0,
-        n: 1,
-    }
-}
-
 #[test]
 fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
     if let Err(e) = CudaDevice::new(0) {
@@ -49,9 +36,6 @@ fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
     }
     let mut candles: CandleData = FxHashMap::default();
     candles.insert("BTC".to_string(), bars_1h);
-
-    // No sub-bar exit candles — let trades close via SL/trailing on main bars.
-    let exit_candles: CandleData = FxHashMap::default();
 
     let mut cfg = StrategyConfig::default();
 

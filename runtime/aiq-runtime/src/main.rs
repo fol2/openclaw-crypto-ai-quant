@@ -902,6 +902,32 @@ fn run_bootstrap(args: CommonArgs) -> Result<()> {
                 if stage.enabled { "enabled" } else { "disabled" }
             );
         }
+        println!("behaviours:");
+        for (group, plan) in [
+            ("gates", &bootstrap.pipeline.behaviours.gates),
+            ("signal_modes", &bootstrap.pipeline.behaviours.signal_modes),
+            (
+                "signal_confidence",
+                &bootstrap.pipeline.behaviours.signal_confidence,
+            ),
+            ("exits", &bootstrap.pipeline.behaviours.exits),
+            ("engine", &bootstrap.pipeline.behaviours.engine),
+            ("entry_sizing", &bootstrap.pipeline.behaviours.entry_sizing),
+            (
+                "entry_progression",
+                &bootstrap.pipeline.behaviours.entry_progression,
+            ),
+            ("risk", &bootstrap.pipeline.behaviours.risk),
+        ] {
+            println!("  - {group}:");
+            for item in &plan.items {
+                println!(
+                    "      * {} [{}]",
+                    item.id,
+                    if item.enabled { "enabled" } else { "disabled" }
+                );
+            }
+        }
     }
 
     Ok(())

@@ -1033,6 +1033,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_cpu_single(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
@@ -1063,6 +1064,7 @@ fn run_cpu_single(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_cpu_single_with_trade_events(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
@@ -1195,6 +1197,7 @@ verify with `nvidia-smi` in the same environment",
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gpu_single_with_trace(
     cfg: &StrategyConfig,
     spec: &SweepSpec,

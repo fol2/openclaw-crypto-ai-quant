@@ -45,6 +45,11 @@ pub use layout::GpuSweepResult;
 /// Bar chunk size for TDR mitigation in trade kernel.
 const BAR_CHUNK_SIZE: u32 = 500;
 
+type FundingGpuBuffers = (
+    Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
+    Option<Arc<cudarc::driver::CudaSlice<f64>>>,
+);
+
 /// Build deterministic symbol ordering and enforce GPU kernel symbol cap.
 pub(crate) fn sorted_symbols_with_kernel_cap(
     candles: &CandleData,
@@ -159,6 +164,7 @@ pub fn run_gpu_sweep_with_states(
     (results, states.unwrap_or_default(), symbols)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gpu_sweep_internal(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
@@ -297,10 +303,9 @@ fn run_gpu_sweep_internal(
         "[GPU] Raw candles uploaded: {:.1} MB (one-time)",
         candle_upload_mb
     );
-    let (funding_spans_gpu, funding_rates_gpu): (
-        Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
-        Option<Arc<cudarc::driver::CudaSlice<f64>>>,
-    ) = if let Some(funding_events) = funding_events_host.as_ref() {
+    let (funding_spans_gpu, funding_rates_gpu): FundingGpuBuffers = if let Some(funding_events) =
+        funding_events_host.as_ref()
+    {
         let active_slots = funding_events
             .spans
             .iter()
@@ -711,7 +716,7 @@ fn run_gpu_sweep_internal(
                 .join(",");
 
             let pf = if result.gross_loss.abs() > 0.001 {
-                result.gross_profit as f64 / result.gross_loss.abs() as f64
+                result.gross_profit / result.gross_loss.abs()
             } else if result.gross_profit > 0.0 {
                 999.0
             } else {
@@ -727,13 +732,13 @@ fn run_gpu_sweep_internal(
             let mapped = GpuSweepResult {
                 config_id,
                 output_mode: "gpu".to_string(),
-                total_pnl: result.total_pnl as f64,
-                final_balance: result.final_balance as f64,
+                total_pnl: result.total_pnl,
+                final_balance: result.final_balance,
                 total_trades: result.total_trades,
                 total_wins: result.total_wins,
                 win_rate: wr,
                 profit_factor: pf,
-                max_drawdown_pct: result.max_drawdown_pct as f64,
+                max_drawdown_pct: result.max_drawdown_pct,
                 overrides: all_overrides,
             };
             let state_opt = gpu_states.as_ref().map(|states| states[i]);

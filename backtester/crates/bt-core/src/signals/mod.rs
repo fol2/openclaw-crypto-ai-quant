@@ -1,3 +1,4 @@
+pub use bt_signals::behaviour;
 pub use bt_signals::{confidence, entry, gates};
 
 use bt_signals::{

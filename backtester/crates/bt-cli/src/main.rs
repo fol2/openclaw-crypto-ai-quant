@@ -1001,7 +1001,6 @@ struct ActiveTrade {
     max_high: f64,
     min_low: f64,
     exit_seq: u32,
-    open_count_for_symbol: u32,
 }
 
 fn csv_escape(s: &str) -> String {
@@ -1109,7 +1108,6 @@ fn build_trade_export_rows(
                 max_high: pos.entry_price,
                 min_low: pos.entry_price,
                 exit_seq: 0,
-                open_count_for_symbol: 1,
             }
         });
 
@@ -1147,7 +1145,6 @@ fn build_trade_export_rows(
                     max_high: tr.price,
                     min_low: tr.price,
                     exit_seq: 0,
-                    open_count_for_symbol,
                 };
 
                 // Include the entry candle bar at this timestamp.
@@ -2405,8 +2402,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     let display_n = args.top_n.unwrap_or(10).min(results.len());
     eprintln!("\n--- Top {display_n} results (by total PnL) ---\n");
     eprintln!(
-        "{:>5}  {:>10}  {:>12}  {:>8}  {:>8}  {:>8}  {:>10}  {}",
-        "Rank", "Config", "PnL", "WR%", "Trades", "Sharpe", "MaxDD%", "Overrides",
+        "{:>5}  {:>10}  {:>12}  {:>8}  {:>8}  {:>8}  {:>10}  Overrides",
+        "Rank", "Config", "PnL", "WR%", "Trades", "Sharpe", "MaxDD%",
     );
     eprintln!("{}", "-".repeat(100));
 
@@ -3019,6 +3016,7 @@ mod tests {
         assert!((eth.max_drawdown_usd - 6.0).abs() < 1e-9);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tr_full(
         ts: i64,
         symbol: &str,

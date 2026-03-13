@@ -3,6 +3,10 @@
 //! Faithfully mirrors `mei_alpha_v1.analyze()` lines 3539-3690.
 
 use super::gates::GateResult;
+use crate::behaviour::{
+    resolve_group_plan, BehaviourGroupPlan, BehaviourTrace, DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS,
+    DEFAULT_SIGNAL_MODE_BEHAVIOURS,
+};
 use crate::{
     Confidence, IndicatorSnapshotLike, MacdMode, Signal, SignalConfigLike, SnapshotView,
     ThresholdsView,
@@ -11,6 +15,14 @@ use crate::{
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignalEvaluationReport {
+    pub signal: Signal,
+    pub confidence: Confidence,
+    pub entry_adx_threshold: f64,
+    pub behaviour_trace: Vec<BehaviourTrace>,
+}
 
 /// Generate a trading signal from a gate result and indicator snapshot.
 ///
@@ -35,56 +47,212 @@ where
     S: IndicatorSnapshotLike,
     C: SignalConfigLike,
 {
+    let report = generate_signal_with_behaviour_plan(
+        snap,
+        gates,
+        cfg,
+        ema_slow_slope_pct,
+        &default_signal_mode_plan(),
+        &default_signal_confidence_plan(),
+    );
+    (report.signal, report.confidence, report.entry_adx_threshold)
+}
+
+pub fn generate_signal_with_behaviour_plan<S, C>(
+    snap: &S,
+    gates: &GateResult,
+    cfg: &C,
+    ema_slow_slope_pct: f64,
+    signal_modes: &BehaviourGroupPlan,
+    signal_confidence: &BehaviourGroupPlan,
+) -> SignalEvaluationReport
+where
+    S: IndicatorSnapshotLike,
+    C: SignalConfigLike,
+{
     let snap = snap.snapshot_view();
     let thresholds = cfg.thresholds_view();
     let thr_entry = thresholds.entry;
+    let mut behaviour_trace = Vec::new();
 
-    // =================================================================
-    // Mode 1: Standard trend entry  (Python lines 3539-3605)
-    // =================================================================
-    if gates.all_gates_pass {
-        if let Some((sig, conf)) = try_standard_entry(&snap, gates, &thresholds) {
-            return (sig, conf, gates.effective_min_adx);
-        }
-    }
-
-    // =================================================================
-    // Mode 2: Pullback continuation  (Python lines 3607-3657)
-    // =================================================================
-    if thr_entry.enable_pullback_entries {
-        let pullback_gates_ok = !gates.is_anomaly
-            && !gates.is_extended
-            && !gates.is_ranging
-            && gates.vol_confirm
-            && snap.adx >= thr_entry.pullback_min_adx;
-
-        if pullback_gates_ok {
-            if let Some((sig, conf)) = try_pullback_entry(&snap, gates, &thresholds) {
-                return (sig, conf, thr_entry.pullback_min_adx);
+    for behaviour_id in signal_modes.ordered_ids() {
+        match behaviour_id {
+            "signal.mode.standard_trend" => {
+                if !signal_modes.is_enabled(behaviour_id) {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        false,
+                        "disabled",
+                        "standard trend mode disabled by behaviour plan".to_string(),
+                    ));
+                    continue;
+                }
+                if !gates.all_gates_pass {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "skipped",
+                        "standard trend precondition all_gates_pass=false".to_string(),
+                    ));
+                    continue;
+                }
+                if let Some((sig, conf)) =
+                    try_standard_entry(&snap, gates, &thresholds, signal_confidence)
+                {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "executed",
+                        format!("signal={sig:?} confidence={conf:?}"),
+                    ));
+                    return SignalEvaluationReport {
+                        signal: sig,
+                        confidence: conf,
+                        entry_adx_threshold: gates.effective_min_adx,
+                        behaviour_trace,
+                    };
+                }
+                behaviour_trace.push(trace(
+                    "signal_modes",
+                    behaviour_id,
+                    true,
+                    "executed",
+                    "standard trend mode did not emit a signal".to_string(),
+                ));
             }
-        }
-    }
-
-    // =================================================================
-    // Mode 3: Slow drift  (Python lines 3659-3690)
-    // =================================================================
-    if thr_entry.enable_slow_drift_entries {
-        let slow_gates_ok = !gates.is_anomaly
-            && !gates.is_extended
-            && !gates.is_ranging
-            && gates.vol_confirm
-            && snap.adx >= thr_entry.slow_drift_min_adx;
-
-        if slow_gates_ok {
-            if let Some((sig, conf)) =
-                try_slow_drift_entry(&snap, gates, &thresholds, ema_slow_slope_pct)
-            {
-                return (sig, conf, thr_entry.slow_drift_min_adx);
+            "signal.mode.pullback" => {
+                let pullback_gates_ok = !gates.is_anomaly
+                    && !gates.is_extended
+                    && !gates.is_ranging
+                    && gates.vol_confirm
+                    && snap.adx >= thr_entry.pullback_min_adx;
+                if !signal_modes.is_enabled(behaviour_id) {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        false,
+                        "disabled",
+                        "pullback mode disabled by behaviour plan".to_string(),
+                    ));
+                    continue;
+                }
+                if !thr_entry.enable_pullback_entries {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "config_disabled",
+                        "pullback mode disabled in thresholds".to_string(),
+                    ));
+                    continue;
+                }
+                if !pullback_gates_ok {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "skipped",
+                        "pullback preconditions did not pass".to_string(),
+                    ));
+                    continue;
+                }
+                if let Some((sig, conf)) = try_pullback_entry(&snap, gates, &thresholds) {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "executed",
+                        format!("signal={sig:?} confidence={conf:?}"),
+                    ));
+                    return SignalEvaluationReport {
+                        signal: sig,
+                        confidence: conf,
+                        entry_adx_threshold: thr_entry.pullback_min_adx,
+                        behaviour_trace,
+                    };
+                }
+                behaviour_trace.push(trace(
+                    "signal_modes",
+                    behaviour_id,
+                    true,
+                    "executed",
+                    "pullback mode did not emit a signal".to_string(),
+                ));
             }
+            "signal.mode.slow_drift" => {
+                let slow_gates_ok = !gates.is_anomaly
+                    && !gates.is_extended
+                    && !gates.is_ranging
+                    && gates.vol_confirm
+                    && snap.adx >= thr_entry.slow_drift_min_adx;
+                if !signal_modes.is_enabled(behaviour_id) {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        false,
+                        "disabled",
+                        "slow-drift mode disabled by behaviour plan".to_string(),
+                    ));
+                    continue;
+                }
+                if !thr_entry.enable_slow_drift_entries {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "config_disabled",
+                        "slow-drift mode disabled in thresholds".to_string(),
+                    ));
+                    continue;
+                }
+                if !slow_gates_ok {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "skipped",
+                        "slow-drift preconditions did not pass".to_string(),
+                    ));
+                    continue;
+                }
+                if let Some((sig, conf)) =
+                    try_slow_drift_entry(&snap, gates, &thresholds, ema_slow_slope_pct)
+                {
+                    behaviour_trace.push(trace(
+                        "signal_modes",
+                        behaviour_id,
+                        true,
+                        "executed",
+                        format!("signal={sig:?} confidence={conf:?}"),
+                    ));
+                    return SignalEvaluationReport {
+                        signal: sig,
+                        confidence: conf,
+                        entry_adx_threshold: thr_entry.slow_drift_min_adx,
+                        behaviour_trace,
+                    };
+                }
+                behaviour_trace.push(trace(
+                    "signal_modes",
+                    behaviour_id,
+                    true,
+                    "executed",
+                    "slow-drift mode did not emit a signal".to_string(),
+                ));
+            }
+            _ => {}
         }
     }
 
-    (Signal::Neutral, Confidence::Low, 0.0)
+    SignalEvaluationReport {
+        signal: Signal::Neutral,
+        confidence: Confidence::Low,
+        entry_adx_threshold: 0.0,
+        behaviour_trace,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +277,7 @@ fn try_standard_entry(
     snap: &SnapshotView,
     gates: &GateResult,
     thresholds: &ThresholdsView,
+    signal_confidence: &BehaviourGroupPlan,
 ) -> Option<(Signal, Confidence)> {
     let thr_entry = thresholds.entry;
     let stoch_thr = thresholds.stoch_rsi;
@@ -126,7 +295,10 @@ fn try_standard_entry(
                     true
                 };
                 if stoch_ok && gates.btc_ok_long {
-                    let conf = if snap.volume > snap.vol_sma * high_conf_mult {
+                    let conf = if signal_confidence
+                        .is_enabled("signal.confidence.high_volume_upgrade")
+                        && snap.volume > snap.vol_sma * high_conf_mult
+                    {
                         Confidence::High
                     } else {
                         Confidence::Medium
@@ -149,7 +321,9 @@ fn try_standard_entry(
                 true
             };
             if stoch_ok && gates.btc_ok_short {
-                let conf = if snap.volume > snap.vol_sma * high_conf_mult {
+                let conf = if signal_confidence.is_enabled("signal.confidence.high_volume_upgrade")
+                    && snap.volume > snap.vol_sma * high_conf_mult
+                {
                     Confidence::High
                 } else {
                     Confidence::Medium
@@ -160,6 +334,38 @@ fn try_standard_entry(
     }
 
     None
+}
+
+fn default_signal_mode_plan() -> BehaviourGroupPlan {
+    resolve_group_plan(
+        "production.behaviours.signal_modes",
+        &DEFAULT_SIGNAL_MODE_BEHAVIOURS,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("default signal mode plan must resolve")
+}
+
+fn default_signal_confidence_plan() -> BehaviourGroupPlan {
+    resolve_group_plan(
+        "production.behaviours.signal_confidence",
+        &DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("default signal confidence plan must resolve")
+}
+
+fn trace(group: &str, id: &str, enabled: bool, status: &str, detail: String) -> BehaviourTrace {
+    BehaviourTrace {
+        group: group.to_string(),
+        id: id.to_string(),
+        enabled,
+        status: status.to_string(),
+        detail,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +520,9 @@ fn check_macd_short(mode: MacdMode, macd_hist: f64, prev_macd_hist: f64) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::behaviour::{
+        resolve_group_plan, DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS, DEFAULT_SIGNAL_MODE_BEHAVIOURS,
+    };
     use crate::gates::check_gates;
     use crate::{MacdMode, SignalConfigView, SnapshotView};
 
@@ -441,6 +650,41 @@ mod tests {
         let (sig, conf) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Buy);
         assert_eq!(conf, Confidence::High);
+    }
+
+    #[test]
+    fn test_behaviour_plan_can_disable_high_volume_upgrade() {
+        let mut snap = bullish_snap();
+        snap.volume = 3000.0;
+        let cfg = SignalConfigView::default();
+        let gates = check_gates(&snap, &cfg, "ETH", Some(true), 0.001);
+        let modes = resolve_group_plan(
+            "test.signal_modes",
+            &DEFAULT_SIGNAL_MODE_BEHAVIOURS,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let confidence_plan = resolve_group_plan(
+            "test.signal_confidence",
+            &DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS,
+            &[],
+            &[],
+            &["signal.confidence.high_volume_upgrade".to_string()],
+        )
+        .unwrap();
+
+        let report = generate_signal_with_behaviour_plan(
+            &snap,
+            &gates,
+            &cfg,
+            0.001,
+            &modes,
+            &confidence_plan,
+        );
+        assert_eq!(report.signal, Signal::Buy);
+        assert_eq!(report.confidence, Confidence::Medium);
     }
 
     #[test]

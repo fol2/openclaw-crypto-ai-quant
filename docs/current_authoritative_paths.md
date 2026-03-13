@@ -7,6 +7,7 @@
 | Paper runtime | `runtime/aiq-runtime` (`paper ...`) |
 | Live runtime | `runtime/aiq-runtime` (`live ...`) |
 | Snapshot export/seed | `runtime/aiq-runtime` (`snapshot ...`) |
+| Stage + behaviour plan inspection | `runtime/aiq-runtime` (`pipeline ...`) |
 | Paper lane wrappers | `scripts/run_paper.sh`, `scripts/run_paper_lane.sh` |
 | Live wrapper | `scripts/run_live.sh` |
 
@@ -31,3 +32,11 @@
 
 Legacy alternate-language runtime, tool, and test surfaces have been removed
 from the repository and are no longer part of the active trust chain.
+
+The runtime no longer stops at stage-level modularity. Behaviour-level execution
+control beneath gates, signal modes, exits, sizing, progression, and risk is
+owned by the Rust config/runtime contract.
+
+That includes real exit orchestration: stop-loss, trailing, take-profit, and
+smart-exit ordering is now resolved from Rust behaviour plans and surfaced in
+runtime diagnostics/behaviour traces.

@@ -3,6 +3,7 @@ use aiq_runtime_core::{PipelinePlan, StageId};
 use anyhow::Result;
 use bt_core::config::Confidence;
 use bt_core::decision_kernel::{OrderIntentKind, PositionSide, StrategyState};
+use bt_core::signals::behaviour::BehaviourTrace;
 use serde::Serialize;
 
 use crate::paper_config::PaperEffectiveConfig;
@@ -46,6 +47,7 @@ pub struct LiveActionPlan {
     pub reason_code: String,
     pub entry_adx_threshold: Option<f64>,
     pub score: Option<f64>,
+    pub behaviour_trace: Vec<BehaviourTrace>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -209,15 +211,16 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
                 last_add_time_ms: 0,
                 entry_adx_threshold: position.entry_adx_threshold.unwrap_or(0.0),
             });
-        let prepared = prepare_symbol_step(
-            &config,
-            prior_position.as_ref(),
-            input.candles_db,
+        let prepared = prepare_symbol_step(crate::paper_run_once::PrepareSymbolStepInput {
+            config: &config,
+            profile_override: Some(input.runtime_bootstrap.pipeline.profile.as_str()),
+            prior_position: prior_position.as_ref(),
+            candles_db: input.candles_db,
             symbol,
-            &input.btc_symbol.trim().to_ascii_uppercase(),
-            input.lookback_bars,
-            Some(input.step_close_ts_ms),
-        )?;
+            btc_symbol: &input.btc_symbol.trim().to_ascii_uppercase(),
+            lookback_bars: input.lookback_bars,
+            step_close_ts_ms: Some(input.step_close_ts_ms),
+        })?;
         let pre_state = current_state.clone();
         let (decision, execution_plan) =
             execute_prepared_symbol_step(&pre_state, &prepared, input.step_close_ts_ms);
@@ -426,6 +429,14 @@ fn build_live_action_plan(execution: PlannedExecution) -> Option<LiveActionPlan>
         reason_code: intent.reason_code.clone(),
         entry_adx_threshold,
         score: execution.score,
+        behaviour_trace: execution
+            .prepared
+            .gate_behaviour_trace
+            .iter()
+            .chain(execution.prepared.signal_behaviour_trace.iter())
+            .cloned()
+            .chain(execution.decision.diagnostics.behaviour_trace.clone())
+            .collect(),
         warnings: execution
             .warnings
             .into_iter()

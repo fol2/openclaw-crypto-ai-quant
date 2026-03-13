@@ -1,3 +1,4 @@
+use bt_core::behaviour::ResolvedBehaviourPlan;
 use bt_core::config::{PipelineProfileConfig, StrategyConfig};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -235,6 +236,7 @@ pub struct PipelinePlan {
     pub state_backend: String,
     pub audit_sink: String,
     pub stages: Vec<StagePlan>,
+    pub behaviours: ResolvedBehaviourPlan,
 }
 
 impl PipelinePlan {
@@ -269,6 +271,8 @@ pub enum PipelineResolveError {
     ConflictingStage { profile: String, stage: String },
     #[error("profile `{profile}` stage_order must be a complete permutation of all known stages")]
     IncompleteStageOrder { profile: String },
+    #[error("invalid behaviour plan for profile `{profile}`: {reason}")]
+    BehaviourPlan { profile: String, reason: String },
 }
 
 pub fn resolve_pipeline(
@@ -333,11 +337,17 @@ pub fn resolve_pipeline(
         .collect();
 
     Ok(PipelinePlan {
-        profile,
+        profile: profile.clone(),
         ranker,
         state_backend: config.runtime.state_backend.trim().to_string(),
         audit_sink: config.runtime.audit_sink.trim().to_string(),
         stages,
+        behaviours: config
+            .resolve_behaviour_plan(Some(profile.as_str()))
+            .map_err(|err| PipelineResolveError::BehaviourPlan {
+                profile: profile.clone(),
+                reason: err.to_string(),
+            })?,
     })
 }
 
@@ -508,6 +518,7 @@ mod tests {
                 ],
                 enabled_stages: Vec::new(),
                 disabled_stages: vec!["broker_execution".to_string()],
+                ..PipelineProfileConfig::default()
             },
         )]);
 
@@ -524,6 +535,49 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+        assert!(plan.behaviours.gates.is_enabled("gate.ranging_vote"));
+    }
+
+    #[test]
+    fn resolves_custom_behaviour_profile_overrides() {
+        let registry = StageRegistry::default();
+        let mut config = config_with_runtime();
+        config.runtime.profile = "behaviour_probe".to_string();
+        config.pipeline.profiles = BTreeMap::from([(
+            "behaviour_probe".to_string(),
+            PipelineProfileConfig {
+                behaviours: bt_core::config::BehaviourProfileConfig {
+                    signal_modes: bt_core::config::BehaviourGroupConfig {
+                        order: vec![
+                            "signal.mode.slow_drift".to_string(),
+                            "signal.mode.standard_trend".to_string(),
+                        ],
+                        enabled: vec![],
+                        disabled: vec!["signal.mode.pullback".to_string()],
+                    },
+                    gates: bt_core::config::BehaviourGroupConfig {
+                        order: vec![],
+                        enabled: vec![],
+                        disabled: vec!["gate.alignment.btc".to_string()],
+                    },
+                    ..bt_core::config::BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        )]);
+
+        let plan = resolve_pipeline(&config, None, &registry).unwrap();
+
+        assert_eq!(plan.profile, "behaviour_probe");
+        assert_eq!(
+            plan.behaviours.signal_modes.items[0].id,
+            "signal.mode.slow_drift"
+        );
+        assert!(!plan
+            .behaviours
+            .signal_modes
+            .is_enabled("signal.mode.pullback"));
+        assert!(!plan.behaviours.gates.is_enabled("gate.alignment.btc"));
     }
 
     #[test]

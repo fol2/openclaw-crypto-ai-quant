@@ -14,7 +14,7 @@
 
 #pragma once
 
-// SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"6971a3a32cd759a171401243b5f5ba3ec62dde916658a4ebbef39f8cb8a30d02","../bt-core/src/exits/smart_exits.rs":"20c5f62e408df61ad7fb06bebc397b1db98270a1499bd2115f1bfe2b9c44d22f","../bt-core/src/exits/stop_loss.rs":"971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63","../bt-core/src/exits/take_profit.rs":"97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"678516374f4ba66145f5a6e2a288a3f77e4f125153fcf0914201e9a83592cfb9","../bt-signals/src/gates.rs":"bb0a731c877d26fec35dab4182790be746196ac9ed9c169d2f7b12275c69a08d"}
+// SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"6971a3a32cd759a171401243b5f5ba3ec62dde916658a4ebbef39f8cb8a30d02","../bt-core/src/exits/smart_exits.rs":"20c5f62e408df61ad7fb06bebc397b1db98270a1499bd2115f1bfe2b9c44d22f","../bt-core/src/exits/stop_loss.rs":"971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63","../bt-core/src/exits/take_profit.rs":"97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"dbfecf1ff50ea6c72e07f4de644b400a4645c8cd4ab5ca7244c6e26237bc7dca","../bt-signals/src/gates.rs":"1ed3afe9087f941e47894d16c88351ea33c76198ac48894772e9b8d7b236cd19"}
 
 // Derived from bt-signals/src/gates.rs
 // Gate evaluation: 8 gates + TMC/AVE + DRE + slow-drift override.

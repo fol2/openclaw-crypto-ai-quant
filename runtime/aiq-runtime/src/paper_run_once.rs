@@ -1,6 +1,7 @@
 use aiq_runtime_core::paper::{restore_paper_state, PaperBootstrapReport, PaperPositionState};
 use aiq_runtime_core::runtime::RuntimeBootstrap;
 use anyhow::{anyhow, Result};
+use bt_core::behaviour::ResolvedBehaviourPlan;
 use bt_core::candle::OhlcvBar;
 use bt_core::config::{Confidence, MacdMode, Signal, StrategyConfig};
 use bt_core::decision_kernel::{
@@ -8,8 +9,9 @@ use bt_core::decision_kernel::{
     OrderIntentKind, PositionSide, StrategyState,
 };
 use bt_core::indicators::{IndicatorBank, IndicatorSnapshot};
-use bt_core::kernel_entries::{evaluate_entry, EntryParams};
+use bt_core::kernel_entries::{evaluate_entry_with_behaviour_plan, EntryParams};
 use bt_core::kernel_exits::ExitParams;
+use bt_core::signals::behaviour::BehaviourTrace;
 use bt_core::signals::gates::{self, GateResult};
 use chrono::{DateTime, TimeZone, Utc};
 use risk_core::{
@@ -32,6 +34,17 @@ pub struct PaperRunOnceInput<'a> {
     pub lookback_bars: usize,
     pub exported_at_ms: Option<i64>,
     pub dry_run: bool,
+}
+
+pub(crate) struct PrepareSymbolStepInput<'a> {
+    pub(crate) config: &'a StrategyConfig,
+    pub(crate) profile_override: Option<&'a str>,
+    pub(crate) prior_position: Option<&'a PaperPositionState>,
+    pub(crate) candles_db: &'a Path,
+    pub(crate) symbol: &'a str,
+    pub(crate) btc_symbol: &'a str,
+    pub(crate) lookback_bars: usize,
+    pub(crate) step_close_ts_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,13 +75,28 @@ pub(crate) struct ProjectionInput<'a> {
     pub(crate) ts_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuildExecutionPlanInput<'a> {
+    pub(crate) cfg: &'a StrategyConfig,
+    pub(crate) behaviour_plan: &'a ResolvedBehaviourPlan,
+    pub(crate) pre_state: &'a StrategyState,
+    pub(crate) symbol: &'a str,
+    pub(crate) execution_ts_ms: i64,
+    pub(crate) prior_position: Option<&'a PaperPositionState>,
+    pub(crate) snap: &'a IndicatorSnapshot,
+    pub(crate) execution_metadata: ExecutionMetadata,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedSymbolStep {
     pub symbol: String,
     pub snap: IndicatorSnapshot,
     pub gate_result: GateResult,
+    pub gate_behaviour_trace: Vec<BehaviourTrace>,
+    pub signal_behaviour_trace: Vec<BehaviourTrace>,
     pub ema_slow_slope_pct: f64,
     pub execution_metadata: ExecutionMetadata,
+    pub behaviour_plan: ResolvedBehaviourPlan,
     pub config: StrategyConfig,
     pub prior_position: Option<PaperPositionState>,
 }
@@ -92,6 +120,7 @@ pub struct PaperRunOnceReport {
     pub trades_written: usize,
     pub position_state_written: bool,
     pub runtime_cooldowns_written: bool,
+    pub behaviour_trace: Vec<BehaviourTrace>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -187,32 +216,46 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
 
     let slope_window = input.config.thresholds.entry.slow_drift_slope_window.max(1);
     let ema_slow_slope_pct = compute_ema_slow_slope(&ema_history, slope_window, snap.close);
-    let gate_result = gates::check_gates(
+    let behaviour_plan = input
+        .config
+        .resolve_behaviour_plan(None)
+        .map_err(anyhow::Error::msg)?;
+    let gate_report = gates::check_gates_with_behaviour_plan(
         &snap,
         input.config,
         &symbol,
         btc_bullish,
         ema_slow_slope_pct,
+        &behaviour_plan.gates,
     );
 
     let entry_params = build_entry_params(input.config);
-    let entry_result = evaluate_entry(&snap, &gate_result, &entry_params, ema_slow_slope_pct);
+    let entry_result = evaluate_entry_with_behaviour_plan(
+        &snap,
+        &gate_report.result,
+        &entry_params,
+        ema_slow_slope_pct,
+        &behaviour_plan.signal_modes,
+        &behaviour_plan.signal_confidence,
+    );
     let execution_metadata = ExecutionMetadata {
         signal: entry_result.signal,
         confidence: to_bt_confidence(entry_result.confidence),
         entry_adx_threshold: entry_result.entry_adx_threshold,
     };
-    let execution_plan = build_execution_plan(
-        input.config,
-        &pre_state,
-        &symbol,
-        exported_at_ms,
-        prior_position.as_ref(),
-        &snap,
+    let execution_plan = build_execution_plan(BuildExecutionPlanInput {
+        cfg: input.config,
+        behaviour_plan: &behaviour_plan,
+        pre_state: &pre_state,
+        symbol: &symbol,
+        execution_ts_ms: exported_at_ms,
+        prior_position: prior_position.as_ref(),
+        snap: &snap,
         execution_metadata,
-    );
+    });
     let params = build_kernel_params(
         input.config,
+        &behaviour_plan,
         execution_plan.leverage,
         execution_plan.allow_pyramid,
     );
@@ -228,7 +271,7 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
         fee_role: None,
         funding_rate: None,
         indicators: Some(snap.clone()),
-        gate_result: Some(gate_result),
+        gate_result: Some(gate_report.result.clone()),
         ema_slow_slope_pct: Some(ema_slow_slope_pct),
     };
     let decision = decision_kernel::step(&pre_state, &event, &params);
@@ -275,6 +318,13 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
         trades_written,
         position_state_written,
         runtime_cooldowns_written,
+        behaviour_trace: gate_report
+            .behaviour_trace
+            .iter()
+            .chain(entry_result.behaviour_trace.iter())
+            .cloned()
+            .chain(decision.diagnostics.behaviour_trace.clone())
+            .collect(),
         warnings: execution_plan
             .warnings
             .into_iter()
@@ -284,15 +334,17 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
     })
 }
 
-pub(crate) fn prepare_symbol_step(
-    config: &StrategyConfig,
-    prior_position: Option<&PaperPositionState>,
-    candles_db: &Path,
-    symbol: &str,
-    btc_symbol: &str,
-    lookback_bars: usize,
-    step_close_ts_ms: Option<i64>,
-) -> Result<PreparedSymbolStep> {
+pub(crate) fn prepare_symbol_step(input: PrepareSymbolStepInput<'_>) -> Result<PreparedSymbolStep> {
+    let PrepareSymbolStepInput {
+        config,
+        profile_override,
+        prior_position,
+        candles_db,
+        symbol,
+        btc_symbol,
+        lookback_bars,
+        step_close_ts_ms,
+    } = input;
     let interval = config.engine.interval.trim().to_string();
     let symbol_bars = load_recent_bars_as_of(
         candles_db,
@@ -319,22 +371,41 @@ pub(crate) fn prepare_symbol_step(
 
     let slope_window = config.thresholds.entry.slow_drift_slope_window.max(1);
     let ema_slow_slope_pct = compute_ema_slow_slope(&ema_history, slope_window, snap.close);
-    let gate_result = gates::check_gates(&snap, config, symbol, btc_bullish, ema_slow_slope_pct);
+    let behaviour_plan = config
+        .resolve_behaviour_plan(profile_override)
+        .map_err(anyhow::Error::msg)?;
+    let gate_report = gates::check_gates_with_behaviour_plan(
+        &snap,
+        config,
+        symbol,
+        btc_bullish,
+        ema_slow_slope_pct,
+        &behaviour_plan.gates,
+    );
 
-    let entry_params = build_entry_params(config);
-    let entry_result = evaluate_entry(&snap, &gate_result, &entry_params, ema_slow_slope_pct);
+    let entry_report = bt_core::signals::entry::generate_signal_with_behaviour_plan(
+        &snap,
+        &gate_report.result,
+        config,
+        ema_slow_slope_pct,
+        &behaviour_plan.signal_modes,
+        &behaviour_plan.signal_confidence,
+    );
     let execution_metadata = ExecutionMetadata {
-        signal: entry_result.signal,
-        confidence: to_bt_confidence(entry_result.confidence),
-        entry_adx_threshold: entry_result.entry_adx_threshold,
+        signal: entry_report.signal,
+        confidence: entry_report.confidence,
+        entry_adx_threshold: entry_report.entry_adx_threshold,
     };
 
     Ok(PreparedSymbolStep {
         symbol: symbol.to_string(),
         snap,
-        gate_result,
+        gate_result: gate_report.result,
+        gate_behaviour_trace: gate_report.behaviour_trace,
+        signal_behaviour_trace: entry_report.behaviour_trace,
         ema_slow_slope_pct,
         execution_metadata,
+        behaviour_plan,
         config: config.clone(),
         prior_position: prior_position.cloned(),
     })
@@ -359,17 +430,19 @@ pub(crate) fn execute_prepared_symbol_step_with_allow_pyramid_override(
     decision_ts_ms: i64,
     allow_pyramid_override: Option<bool>,
 ) -> (decision_kernel::DecisionResult, ExecutionPlan) {
-    let execution_plan = build_execution_plan(
-        &prepared.config,
+    let execution_plan = build_execution_plan(BuildExecutionPlanInput {
+        cfg: &prepared.config,
+        behaviour_plan: &prepared.behaviour_plan,
         pre_state,
-        &prepared.symbol,
-        decision_ts_ms,
-        prepared.prior_position.as_ref(),
-        &prepared.snap,
-        prepared.execution_metadata,
-    );
+        symbol: &prepared.symbol,
+        execution_ts_ms: decision_ts_ms,
+        prior_position: prepared.prior_position.as_ref(),
+        snap: &prepared.snap,
+        execution_metadata: prepared.execution_metadata,
+    });
     let params = build_kernel_params(
         &prepared.config,
+        &prepared.behaviour_plan,
         execution_plan.leverage,
         allow_pyramid_override.unwrap_or(execution_plan.allow_pyramid),
     );
@@ -490,6 +563,7 @@ pub(crate) fn compute_ema_slow_slope(history: &[f64], window: usize, current_clo
 
 pub(crate) fn build_kernel_params(
     cfg: &StrategyConfig,
+    behaviour_plan: &ResolvedBehaviourPlan,
     leverage: f64,
     allow_pyramid: bool,
 ) -> KernelParams {
@@ -503,6 +577,7 @@ pub(crate) fn build_kernel_params(
         exit_params: Some(build_exit_params(cfg)),
         entry_params: Some(build_entry_params(cfg)),
         cooldown_params: Some(build_cooldown_params(cfg)),
+        behaviour_plan: behaviour_plan.clone(),
         ..KernelParams::default()
     }
 }
@@ -586,15 +661,17 @@ pub(crate) fn build_cooldown_params(cfg: &StrategyConfig) -> CooldownParams {
     }
 }
 
-pub(crate) fn build_execution_plan(
-    cfg: &StrategyConfig,
-    pre_state: &StrategyState,
-    symbol: &str,
-    execution_ts_ms: i64,
-    prior_position: Option<&PaperPositionState>,
-    snap: &IndicatorSnapshot,
-    execution_metadata: ExecutionMetadata,
-) -> ExecutionPlan {
+pub(crate) fn build_execution_plan(input: BuildExecutionPlanInput<'_>) -> ExecutionPlan {
+    let BuildExecutionPlanInput {
+        cfg,
+        behaviour_plan,
+        pre_state,
+        symbol,
+        execution_ts_ms,
+        prior_position,
+        snap,
+        execution_metadata,
+    } = input;
     let entry_side = signal_to_side(execution_metadata.signal);
     let base_leverage = prior_position
         .map(|position| position.leverage.max(1.0))
@@ -602,7 +679,10 @@ pub(crate) fn build_execution_plan(
     let mut plan = ExecutionPlan {
         requested_notional_usd: None,
         leverage: base_leverage,
-        allow_pyramid: cfg.trade.enable_pyramiding,
+        allow_pyramid: cfg.trade.enable_pyramiding
+            && behaviour_plan
+                .entry_progression
+                .is_enabled("entry.progression.pyramiding"),
         warnings: Vec::new(),
     };
 
@@ -617,7 +697,11 @@ pub(crate) fn build_execution_plan(
 
     match pre_state.positions.get_key_value(symbol) {
         Some((_symbol, position)) if position.side == entry_side => {
-            if !cfg.trade.enable_pyramiding {
+            if !behaviour_plan
+                .entry_progression
+                .is_enabled("entry.progression.pyramiding")
+                || !cfg.trade.enable_pyramiding
+            {
                 plan.allow_pyramid = false;
                 return plan;
             }
@@ -640,9 +724,12 @@ pub(crate) fn build_execution_plan(
                 ));
                 return plan;
             }
-            if prior_position
-                .map(|position| position.tp1_taken)
-                .unwrap_or(position.tp1_taken)
+            if behaviour_plan
+                .entry_progression
+                .is_enabled("entry.progression.tp1_block_add")
+                && prior_position
+                    .map(|position| position.tp1_taken)
+                    .unwrap_or(position.tp1_taken)
             {
                 plan.allow_pyramid = false;
                 plan.warnings.push(format!(
@@ -654,7 +741,10 @@ pub(crate) fn build_execution_plan(
             let last_add_time_ms = prior_position
                 .map(|position| position.last_add_time_ms)
                 .unwrap_or(0);
-            if last_add_time_ms > 0
+            if behaviour_plan
+                .entry_progression
+                .is_enabled("entry.progression.add_cooldown")
+                && last_add_time_ms > 0
                 && execution_ts_ms.saturating_sub(last_add_time_ms)
                     < (cfg.trade.add_cooldown_minutes as i64 * 60_000)
             {
@@ -674,17 +764,31 @@ pub(crate) fn build_execution_plan(
                 allocation_pct: cfg.trade.allocation_pct,
                 add_fraction_of_base_margin: cfg.trade.add_fraction_of_base_margin,
                 min_notional_usd: cfg.trade.min_notional_usd,
-                bump_to_min_notional: cfg.trade.bump_to_min_notional,
+                bump_to_min_notional: cfg.trade.bump_to_min_notional
+                    && behaviour_plan
+                        .entry_sizing
+                        .is_enabled("entry.sizing.min_notional_bump"),
             }) {
                 Some(add_sizing) => {
-                    let exposure = evaluate_exposure_guard(ExposureGuardInput {
-                        open_positions: pre_state.positions.len(),
-                        max_open_positions: None,
-                        total_margin_used: total_margin_used + add_sizing.add_margin,
-                        equity,
-                        max_total_margin_pct: cfg.trade.max_total_margin_pct,
-                        allow_zero_margin_headroom: true,
-                    });
+                    let exposure = if behaviour_plan.risk.is_enabled("risk.exposure_guard") {
+                        evaluate_exposure_guard(ExposureGuardInput {
+                            open_positions: pre_state.positions.len(),
+                            max_open_positions: None,
+                            total_margin_used: total_margin_used + add_sizing.add_margin,
+                            equity,
+                            max_total_margin_pct: cfg.trade.max_total_margin_pct,
+                            allow_zero_margin_headroom: true,
+                        })
+                    } else {
+                        evaluate_exposure_guard(ExposureGuardInput {
+                            open_positions: pre_state.positions.len(),
+                            max_open_positions: None,
+                            total_margin_used,
+                            equity,
+                            max_total_margin_pct: 0.0,
+                            allow_zero_margin_headroom: true,
+                        })
+                    };
                     if exposure.allowed {
                         plan.requested_notional_usd = Some(add_sizing.add_notional);
                         plan.leverage = add_sizing.add_notional / add_sizing.add_margin.max(1e-12);
@@ -724,14 +828,25 @@ pub(crate) fn build_execution_plan(
                 ));
                 return plan;
             }
-            let exposure = evaluate_exposure_guard(ExposureGuardInput {
-                open_positions: pre_state.positions.len(),
-                max_open_positions: Some(cfg.trade.max_open_positions),
-                total_margin_used,
-                equity,
-                max_total_margin_pct: cfg.trade.max_total_margin_pct,
-                allow_zero_margin_headroom: false,
-            });
+            let exposure = if behaviour_plan.risk.is_enabled("risk.exposure_guard") {
+                evaluate_exposure_guard(ExposureGuardInput {
+                    open_positions: pre_state.positions.len(),
+                    max_open_positions: Some(cfg.trade.max_open_positions),
+                    total_margin_used,
+                    equity,
+                    max_total_margin_pct: cfg.trade.max_total_margin_pct,
+                    allow_zero_margin_headroom: false,
+                })
+            } else {
+                evaluate_exposure_guard(ExposureGuardInput {
+                    open_positions: pre_state.positions.len(),
+                    max_open_positions: None,
+                    total_margin_used,
+                    equity,
+                    max_total_margin_pct: 0.0,
+                    allow_zero_margin_headroom: true,
+                })
+            };
             if !exposure.allowed {
                 plan.allow_pyramid = false;
                 plan.warnings.push(format!(
@@ -748,15 +863,74 @@ pub(crate) fn build_execution_plan(
                 adx: snap.adx,
                 confidence,
                 allocation_pct: cfg.trade.allocation_pct,
-                enable_dynamic_sizing: cfg.trade.enable_dynamic_sizing,
-                confidence_mult_high: cfg.trade.confidence_mult_high,
-                confidence_mult_medium: cfg.trade.confidence_mult_medium,
-                confidence_mult_low: cfg.trade.confidence_mult_low,
-                adx_sizing_min_mult: cfg.trade.adx_sizing_min_mult,
-                adx_sizing_full_adx: cfg.trade.adx_sizing_full_adx,
-                vol_baseline_pct: cfg.trade.vol_baseline_pct,
-                vol_scalar_min: cfg.trade.vol_scalar_min,
-                vol_scalar_max: cfg.trade.vol_scalar_max,
+                enable_dynamic_sizing: cfg.trade.enable_dynamic_sizing
+                    && behaviour_plan
+                        .entry_sizing
+                        .is_enabled("entry.sizing.dynamic"),
+                confidence_mult_high: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.confidence_multiplier")
+                {
+                    cfg.trade.confidence_mult_high
+                } else {
+                    1.0
+                },
+                confidence_mult_medium: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.confidence_multiplier")
+                {
+                    cfg.trade.confidence_mult_medium
+                } else {
+                    1.0
+                },
+                confidence_mult_low: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.confidence_multiplier")
+                {
+                    cfg.trade.confidence_mult_low
+                } else {
+                    1.0
+                },
+                adx_sizing_min_mult: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.adx_multiplier")
+                {
+                    cfg.trade.adx_sizing_min_mult
+                } else {
+                    1.0
+                },
+                adx_sizing_full_adx: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.adx_multiplier")
+                {
+                    cfg.trade.adx_sizing_full_adx
+                } else {
+                    0.0
+                },
+                vol_baseline_pct: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.volatility_scalar")
+                {
+                    cfg.trade.vol_baseline_pct
+                } else {
+                    0.0
+                },
+                vol_scalar_min: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.volatility_scalar")
+                {
+                    cfg.trade.vol_scalar_min
+                } else {
+                    1.0
+                },
+                vol_scalar_max: if behaviour_plan
+                    .entry_sizing
+                    .is_enabled("entry.sizing.volatility_scalar")
+                {
+                    cfg.trade.vol_scalar_max
+                } else {
+                    1.0
+                },
                 leverage_low: cfg.trade.leverage_low,
                 leverage_medium: cfg.trade.leverage_medium,
                 leverage_high: cfg.trade.leverage_high,
@@ -776,7 +950,11 @@ pub(crate) fn build_execution_plan(
             }
 
             if notional < cfg.trade.min_notional_usd {
-                if cfg.trade.bump_to_min_notional {
+                if cfg.trade.bump_to_min_notional
+                    && behaviour_plan
+                        .entry_sizing
+                        .is_enabled("entry.sizing.min_notional_bump")
+                {
                     let bumped_margin = cfg.trade.min_notional_usd / plan.leverage.max(1.0);
                     if bumped_margin > exposure.margin_headroom {
                         plan.warnings.push(format!(
@@ -1396,19 +1574,20 @@ mod tests {
     fn build_execution_plan_uses_runtime_sizing_instead_of_kernel_default() {
         let cfg = load_cfg("ETH");
         let pre_state = StrategyState::new(1_000.0, FIXED_TS_MS);
-        let plan = build_execution_plan(
-            &cfg,
-            &pre_state,
-            "ETH",
-            FIXED_TS_MS,
-            None,
-            &sample_snap(),
-            ExecutionMetadata {
+        let plan = build_execution_plan(BuildExecutionPlanInput {
+            cfg: &cfg,
+            behaviour_plan: &ResolvedBehaviourPlan::production(),
+            pre_state: &pre_state,
+            symbol: "ETH",
+            execution_ts_ms: FIXED_TS_MS,
+            prior_position: None,
+            snap: &sample_snap(),
+            execution_metadata: ExecutionMetadata {
                 signal: Signal::Buy,
                 confidence: Confidence::High,
                 entry_adx_threshold: 22.0,
             },
-        );
+        });
 
         assert!(plan.requested_notional_usd.is_some());
         let requested = plan.requested_notional_usd.unwrap();
@@ -1566,12 +1745,13 @@ mod tests {
                 last_funding_ms: Some(FIXED_TS_MS - 1_800_000),
             },
         );
-        let plan = build_execution_plan(
-            &cfg,
-            &pre_state,
-            "ETH",
-            FIXED_TS_MS,
-            Some(&PaperPositionState {
+        let plan = build_execution_plan(BuildExecutionPlanInput {
+            cfg: &cfg,
+            behaviour_plan: &ResolvedBehaviourPlan::production(),
+            pre_state: &pre_state,
+            symbol: "ETH",
+            execution_ts_ms: FIXED_TS_MS,
+            prior_position: Some(&PaperPositionState {
                 symbol: "ETH".to_string(),
                 side: "long".to_string(),
                 size: 1.0,
@@ -1588,13 +1768,13 @@ mod tests {
                 last_add_time_ms: FIXED_TS_MS - 1_000,
                 entry_adx_threshold: 22.0,
             }),
-            &sample_snap(),
-            ExecutionMetadata {
+            snap: &sample_snap(),
+            execution_metadata: ExecutionMetadata {
                 signal: Signal::Buy,
                 confidence: Confidence::High,
                 entry_adx_threshold: 22.0,
             },
-        );
+        });
 
         assert!(plan.requested_notional_usd.is_none());
         assert!(!plan.allow_pyramid);

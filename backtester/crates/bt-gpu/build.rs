@@ -51,7 +51,7 @@ fn main() {
     // -- Compile sweep_engine.cu → PTX ----------------------------------------
     let ptx_sweep = format!("{}/sweep_engine.ptx", out_dir);
     let status = std::process::Command::new("nvcc")
-        .args(&[
+        .args([
             "--ptx",
             "-arch=sm_86", // RTX 3090 = Ampere
             "-O3",
@@ -68,7 +68,7 @@ fn main() {
     // -- Compile indicator_kernel.cu → PTX ------------------------------------
     let ptx_indicator = format!("{}/indicator_kernel.ptx", out_dir);
     let status = std::process::Command::new("nvcc")
-        .args(&[
+        .args([
             "--ptx",
             "-arch=sm_86",
             "-O3",

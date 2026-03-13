@@ -8,11 +8,13 @@
 //!    being written into state so that repeated replays remain stable.
 
 use crate::accounting;
+use crate::behaviour::ResolvedBehaviourPlan;
 use crate::indicators::IndicatorSnapshot;
 use crate::kernel_entries::EntryParams;
 use crate::kernel_exits::{ExitParams, KernelExitResult};
 use crate::reason_codes::{classify_reason_code, ReasonCode};
 use crate::signals::gates::GateResult;
+use bt_signals::behaviour::BehaviourTrace;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -390,6 +392,9 @@ pub struct Diagnostics {
     /// Exit tunnel boundaries (diagnostic — no effect on decision logic).
     #[serde(default)]
     pub exit_bounds: Option<crate::kernel_exits::ExitBounds>,
+    /// Behaviour-level execution trace for parity debugging.
+    #[serde(default)]
+    pub behaviour_trace: Vec<BehaviourTrace>,
 }
 
 impl Diagnostics {
@@ -444,6 +449,9 @@ pub struct KernelParams {
     /// and PESC (post-exit same-direction cooldown).
     #[serde(default)]
     pub cooldown_params: Option<CooldownParams>,
+    /// Behaviour plan resolved from the active pipeline profile.
+    #[serde(default)]
+    pub behaviour_plan: ResolvedBehaviourPlan,
 }
 
 impl Default for KernelParams {
@@ -461,6 +469,7 @@ impl Default for KernelParams {
             exit_params: None,
             entry_params: None,
             cooldown_params: None,
+            behaviour_plan: ResolvedBehaviourPlan::production(),
         }
     }
 }
@@ -514,6 +523,23 @@ fn is_entry_cooldown_active(state: &StrategyState, symbol: &str, ts: i64, cooldo
         Some(&last_ts) => ts.saturating_sub(last_ts) < (cooldown_s as i64) * 1000,
         None => false,
     }
+}
+
+fn trace_behaviour(
+    diagnostics: &mut Diagnostics,
+    group: &str,
+    id: &str,
+    enabled: bool,
+    status: &str,
+    detail: impl Into<String>,
+) {
+    diagnostics.behaviour_trace.push(BehaviourTrace {
+        group: group.to_string(),
+        id: id.to_string(),
+        enabled,
+        status: status.to_string(),
+        detail: detail.into(),
+    });
 }
 
 fn is_exit_cooldown_active(state: &StrategyState, symbol: &str, ts: i64, cooldown_s: u32) -> bool {
@@ -614,19 +640,42 @@ fn evaluate_exits_for_event(
     let mut fills = Vec::new();
 
     if let Some(ref cd) = params.cooldown_params {
-        if is_exit_cooldown_active(
-            next_state,
-            &event.symbol,
-            event.timestamp_ms,
-            cd.exit_cooldown_s,
-        ) {
+        if params.behaviour_plan.risk.is_enabled("risk.exit_cooldown")
+            && is_exit_cooldown_active(
+                next_state,
+                &event.symbol,
+                event.timestamp_ms,
+                cd.exit_cooldown_s,
+            )
+        {
             diagnostics
                 .warnings
                 .push(format!("exit cooldown active for {}", event.symbol));
             diagnostics.cooldown_blocked = true;
+            trace_behaviour(
+                diagnostics,
+                "risk",
+                "risk.exit_cooldown",
+                true,
+                "executed",
+                format!("blocked exit for {}", event.symbol),
+            );
             if cooldown_is_terminal {
                 return ExitEvaluationOutcome { intents, fills };
             }
+        } else {
+            trace_behaviour(
+                diagnostics,
+                "risk",
+                "risk.exit_cooldown",
+                params.behaviour_plan.risk.is_enabled("risk.exit_cooldown"),
+                if params.behaviour_plan.risk.is_enabled("risk.exit_cooldown") {
+                    "executed"
+                } else {
+                    "disabled"
+                },
+                format!("cooldown_s={}", cd.exit_cooldown_s),
+            );
         }
     }
 
@@ -642,11 +691,12 @@ fn evaluate_exits_for_event(
         let pre_exit_side = state.positions.get(&event.symbol).map(|p| p.side);
 
         let exit_eval = next_state.positions.get_mut(&event.symbol).map(|pos| {
-            crate::kernel_exits::evaluate_exits_with_diagnostics(
+            crate::kernel_exits::evaluate_exits_with_behaviour_plan_and_diagnostics(
                 pos,
                 snap,
                 exit_params,
                 event.timestamp_ms,
+                &params.behaviour_plan.exits,
             )
         });
 
@@ -654,6 +704,9 @@ fn evaluate_exits_for_event(
             diagnostics.applied_thresholds = eval.threshold_records;
             diagnostics.exit_context = eval.exit_context;
             diagnostics.exit_bounds = eval.exit_bounds;
+            diagnostics
+                .behaviour_trace
+                .extend(eval.behaviour_trace.clone());
             let result = eval.result;
             let fee_model = accounting::FeeModel {
                 maker_fee_bps: params.maker_fee_bps,
@@ -1136,8 +1189,17 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
 
         let slope = event.ema_slow_slope_pct.unwrap_or(0.0);
-        let entry_result =
-            crate::kernel_entries::evaluate_entry(snap, gate_result, entry_params, slope);
+        let entry_result = crate::kernel_entries::evaluate_entry_with_behaviour_plan(
+            snap,
+            gate_result,
+            entry_params,
+            slope,
+            &params.behaviour_plan.signal_modes,
+            &params.behaviour_plan.signal_confidence,
+        );
+        diagnostics
+            .behaviour_trace
+            .extend(entry_result.behaviour_trace.clone());
 
         // Record in diagnostics
         diagnostics.entry_signal = Some(match entry_result.signal {
@@ -1271,16 +1333,26 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
             if !is_opposite_close {
                 if let Some(ref cd) = params.cooldown_params {
-                    if is_entry_cooldown_active(
-                        &next_state,
-                        &event.symbol,
-                        event.timestamp_ms,
-                        cd.entry_cooldown_s,
-                    ) {
+                    if params.behaviour_plan.risk.is_enabled("risk.entry_cooldown")
+                        && is_entry_cooldown_active(
+                            &next_state,
+                            &event.symbol,
+                            event.timestamp_ms,
+                            cd.entry_cooldown_s,
+                        )
+                    {
                         diagnostics
                             .warnings
                             .push(format!("entry cooldown active for {}", event.symbol));
                         diagnostics.cooldown_blocked = true;
+                        trace_behaviour(
+                            &mut diagnostics,
+                            "risk",
+                            "risk.entry_cooldown",
+                            true,
+                            "executed",
+                            format!("blocked evaluate-entry for {}", event.symbol),
+                        );
                         diagnostics.intent_count = intents.len();
                         diagnostics.fill_count = fills.len();
                         return DecisionResult {
@@ -1298,18 +1370,28 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                         .map(|s| s.adx)
                         .or_else(|| event.gate_result.as_ref().map(|g| g.effective_min_adx))
                         .unwrap_or(30.0);
-                    if is_pesc_blocked(
-                        &next_state,
-                        &event.symbol,
-                        requested_side,
-                        event.timestamp_ms,
-                        adx,
-                        cd,
-                    ) {
+                    if params.behaviour_plan.risk.is_enabled("risk.pesc")
+                        && is_pesc_blocked(
+                            &next_state,
+                            &event.symbol,
+                            requested_side,
+                            event.timestamp_ms,
+                            adx,
+                            cd,
+                        )
+                    {
                         diagnostics
                             .warnings
                             .push(format!("PESC blocked for {}", event.symbol));
                         diagnostics.pesc_blocked = true;
+                        trace_behaviour(
+                            &mut diagnostics,
+                            "risk",
+                            "risk.pesc",
+                            true,
+                            "executed",
+                            format!("blocked evaluate-entry for {}", event.symbol),
+                        );
                         diagnostics.intent_count = intents.len();
                         diagnostics.fill_count = fills.len();
                         return DecisionResult {
@@ -1462,16 +1544,26 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         if !is_opposite_close {
             if let Some(ref cd) = params.cooldown_params {
                 // Entry cooldown
-                if is_entry_cooldown_active(
-                    &next_state,
-                    &event.symbol,
-                    event.timestamp_ms,
-                    cd.entry_cooldown_s,
-                ) {
+                if params.behaviour_plan.risk.is_enabled("risk.entry_cooldown")
+                    && is_entry_cooldown_active(
+                        &next_state,
+                        &event.symbol,
+                        event.timestamp_ms,
+                        cd.entry_cooldown_s,
+                    )
+                {
                     diagnostics
                         .warnings
                         .push(format!("entry cooldown active for {}", event.symbol));
                     diagnostics.cooldown_blocked = true;
+                    trace_behaviour(
+                        &mut diagnostics,
+                        "risk",
+                        "risk.entry_cooldown",
+                        true,
+                        "executed",
+                        format!("blocked entry for {}", event.symbol),
+                    );
                     diagnostics.intent_count = 0;
                     diagnostics.fill_count = 0;
                     return DecisionResult {
@@ -1490,18 +1582,28 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     .map(|s| s.adx)
                     .or_else(|| event.gate_result.as_ref().map(|g| g.effective_min_adx))
                     .unwrap_or(30.0);
-                if is_pesc_blocked(
-                    &next_state,
-                    &event.symbol,
-                    requested_side,
-                    event.timestamp_ms,
-                    adx,
-                    cd,
-                ) {
+                if params.behaviour_plan.risk.is_enabled("risk.pesc")
+                    && is_pesc_blocked(
+                        &next_state,
+                        &event.symbol,
+                        requested_side,
+                        event.timestamp_ms,
+                        adx,
+                        cd,
+                    )
+                {
                     diagnostics
                         .warnings
                         .push(format!("PESC blocked for {}", event.symbol));
                     diagnostics.pesc_blocked = true;
+                    trace_behaviour(
+                        &mut diagnostics,
+                        "risk",
+                        "risk.pesc",
+                        true,
+                        "executed",
+                        format!("blocked entry for {}", event.symbol),
+                    );
                     diagnostics.intent_count = 0;
                     diagnostics.fill_count = 0;
                     return DecisionResult {
@@ -2787,6 +2889,20 @@ mod tests {
         }
     }
 
+    fn exit_params_with_disabled_exit_behaviour(behaviour_id: &str) -> KernelParams {
+        let mut params = exit_params_for_test();
+        if let Some(item) = params
+            .behaviour_plan
+            .exits
+            .items
+            .iter_mut()
+            .find(|item| item.id == behaviour_id)
+        {
+            item.enabled = false;
+        }
+        params
+    }
+
     fn price_update_event(symbol: &str, price: f64, snap: IndicatorSnapshot) -> MarketEvent {
         MarketEvent {
             schema_version: KERNEL_SCHEMA_VERSION,
@@ -2844,6 +2960,31 @@ mod tests {
             result.state.positions.contains_key("BTC"),
             "position should remain"
         );
+    }
+
+    #[test]
+    fn price_update_exit_behaviour_trace_honours_disabled_stop_loss() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_with_disabled_exit_behaviour("exit.stop_loss.base");
+        let snap = test_snap(9_750.0);
+        let event = price_update_event("BTC", 9_750.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(
+            result.intents.is_empty(),
+            "disabled stop-loss should suppress close"
+        );
+        assert!(result.state.positions.contains_key("BTC"));
+        assert!(result
+            .diagnostics
+            .behaviour_trace
+            .iter()
+            .any(|item| item.id == "exit.stop_loss.base" && item.status == "disabled"));
     }
 
     #[test]
