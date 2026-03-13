@@ -1349,6 +1349,10 @@ fn select_roles(
     if deployable.is_empty() {
         return Vec::new();
     }
+    let active_targets = active_paper_targets(selection);
+    if active_targets.is_empty() {
+        return Vec::new();
+    }
     let by_mode = deployable.iter().fold(
         HashMap::<String, Vec<ValidationItem>>::new(),
         |mut acc, item| {
@@ -1360,7 +1364,7 @@ fn select_roles(
     );
     let mut used = BTreeSet::new();
     let mut selected = Vec::new();
-    for target in &selection.paper_targets {
+    for target in active_targets {
         let preferred_mode = match target.role.as_str() {
             "primary" => "efficient",
             "fallback" => "growth",
@@ -1421,8 +1425,9 @@ fn build_gate_report(
     selected: &[SelectionCandidate],
     selection: &SelectionSettings,
 ) -> GateReport {
+    let active_targets = active_paper_targets(selection);
     let deployable_count = validated.iter().filter(|item| !item.rejected).count();
-    let blocked = deployable_count < selection.paper_targets.len();
+    let blocked = deployable_count < active_targets.len();
     let blocked_reason = if blocked {
         if deployable_count == 0 {
             "no deployable candidates passed factory validation".to_string()
@@ -1430,14 +1435,13 @@ fn build_gate_report(
             format!(
                 "only {} deployable candidates for {} paper slots",
                 deployable_count,
-                selection.paper_targets.len()
+                active_targets.len()
             )
         }
     } else {
         String::new()
     };
-    let slot_bindings = selection
-        .paper_targets
+    let slot_bindings = active_targets
         .iter()
         .map(|target| {
             let chosen = selected.iter().find(|item| item.role == target.role);
@@ -1503,6 +1507,7 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         .or_else(|| selected_items.first().cloned())
         .or_else(|| best_overall_candidate(validated))
         .ok_or_else(|| anyhow!("missing selected primary candidate"))?;
+    let active_targets = active_paper_targets(selection);
     Ok(SelectionReport {
         version: "factory_cycle_selection_v2",
         run_id: run_id.to_string(),
@@ -1541,8 +1546,7 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         selected: primary,
         selected_candidates: selected_items,
         selected_candidates_by_role: selected.to_vec(),
-        selected_targets: selection
-            .paper_targets
+        selected_targets: active_targets
             .iter()
             .map(|target| PaperTargetSummary {
                 service: target.service.clone(),
@@ -1551,6 +1555,22 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
             })
             .collect(),
     })
+}
+
+fn active_paper_targets(selection: &SelectionSettings) -> Vec<&PaperTarget> {
+    let enabled = selection
+        .selected_roles
+        .iter()
+        .map(|role| role.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    if enabled.is_empty() {
+        return selection.paper_targets.iter().collect();
+    }
+    selection
+        .paper_targets
+        .iter()
+        .filter(|target| enabled.contains(&target.role.to_ascii_lowercase()))
+        .collect()
 }
 
 fn write_reports(
@@ -1921,5 +1941,22 @@ mod tests {
         assert_eq!(selected[0].config_id, "cfg-a");
         assert_eq!(selected[1].config_id, "cfg-b");
         assert_eq!(selected[2].config_id, "cfg-c");
+    }
+
+    #[test]
+    fn selected_roles_limits_active_targets_and_gate_requirements() {
+        let mut selection = SelectionSettings::default();
+        selection.selected_roles = vec!["primary".to_string()];
+        let targets = active_paper_targets(&selection);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].role, "primary");
+
+        let items = vec![validation_item("efficient", "cfg-a", 100.0, 1.2, 0.3)];
+        let selected = select_roles(&items, &selection);
+        assert_eq!(selected.len(), 1);
+
+        let gate = build_gate_report("run", &items, &selected, &selection);
+        assert!(!gate.blocked);
+        assert_eq!(gate.slot_bindings.len(), 1);
     }
 }
