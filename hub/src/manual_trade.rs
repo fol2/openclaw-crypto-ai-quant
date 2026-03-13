@@ -217,6 +217,17 @@ pub fn issue_confirm_token(
     let now_ms = chrono::Utc::now().timestamp_millis();
     purge_stale_manual_confirmations(&conn, now_ms)?;
     if let Some(token) = find_reusable_manual_confirmation(&conn, action, param_hash, now_ms)? {
+        write_manual_audit_event(
+            &conn,
+            Some(symbol),
+            "MANUAL_PREVIEW_REUSED",
+            "INFO",
+            json!({
+                "action": action,
+                "confirm_token": token.clone(),
+                "param_hash": param_hash,
+            }),
+        )?;
         return Ok(token);
     }
 
@@ -235,6 +246,18 @@ pub fn issue_confirm_token(
             param_hash,
             preview.to_string(),
         ],
+    )?;
+    write_manual_audit_event(
+        &conn,
+        Some(symbol),
+        "MANUAL_PREVIEW_ISSUED",
+        "INFO",
+        json!({
+            "action": action,
+            "confirm_token": token.clone(),
+            "param_hash": param_hash,
+            "preview": preview,
+        }),
     )?;
     Ok(token)
 }
@@ -350,6 +373,25 @@ pub fn execute_open(
             prepared.est_notional_usd
         ),
     )?;
+    write_manual_audit_event(
+        &conn,
+        Some(&prepared.symbol),
+        if resumed_existing {
+            "MANUAL_INTENT_RESUMED"
+        } else {
+            "MANUAL_INTENT_CREATED"
+        },
+        "INFO",
+        json!({
+            "intent_id": &intent_id,
+            "action": "OPEN",
+            "side": &prepared.side,
+            "order_type": request.order_type,
+            "requested_size": prepared.est_size,
+            "requested_notional_usd": prepared.est_notional_usd,
+            "client_order_id": &cloid,
+        }),
+    )?;
 
     let response = match submit_open_order(&client, &prepared, &cloid) {
         Ok(response) => response,
@@ -368,6 +410,17 @@ pub fn execute_open(
                     "manual_trade submit_failed intent_id={} symbol={} action=OPEN error={}",
                     intent_id, prepared.symbol, error_text
                 ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_ORDER_SUBMIT_FAILED",
+                "ERROR",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": "OPEN",
+                    "error": &error_text,
+                }),
             )?;
             return Err(error);
         }
@@ -404,6 +457,18 @@ pub fn execute_open(
                 response_text
             ),
         )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&prepared.symbol),
+            "MANUAL_ORDER_REJECTED",
+            "ERROR",
+            json!({
+                "intent_id": &intent_id,
+                "action": "OPEN",
+                "exchange_order_id": &exchange_order_id,
+                "response": &response,
+            }),
+        )?;
         return Err(HubError::BadRequest(response_text));
     }
     write_manual_runtime_log(
@@ -415,6 +480,19 @@ pub fn execute_open(
             prepared.symbol,
             exchange_order_id.as_deref().unwrap_or("unknown")
         ),
+    )?;
+    write_manual_audit_event(
+        &conn,
+        Some(&prepared.symbol),
+        "MANUAL_ORDER_SUBMITTED",
+        "INFO",
+        json!({
+            "intent_id": &intent_id,
+            "action": "OPEN",
+            "exchange_order_id": &exchange_order_id,
+            "client_order_id": &cloid,
+            "order_type": submission_order_type(prepared.order_type, false),
+        }),
     )?;
     let fills = if prepared.order_type == ParsedOrderType::LimitGtc {
         Vec::new()
@@ -437,6 +515,17 @@ pub fn execute_open(
                         "manual_trade fill_poll_failed intent_id={} symbol={} action=OPEN error={}",
                         intent_id, prepared.symbol, error_text
                     ),
+                )?;
+                write_manual_audit_event(
+                    &conn,
+                    Some(&prepared.symbol),
+                    "MANUAL_FILL_POLL_FAILED",
+                    "ERROR",
+                    json!({
+                        "intent_id": &intent_id,
+                        "action": "OPEN",
+                        "error": &error_text,
+                    }),
                 )?;
                 return Err(error);
             }
@@ -464,6 +553,17 @@ pub fn execute_open(
                     exchange_order_id.as_deref().unwrap_or("unknown")
                 ),
             )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_ORDER_RESTING",
+                "INFO",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": "OPEN",
+                    "exchange_order_id": &exchange_order_id,
+                }),
+            )?;
         } else {
             update_manual_intent_status(
                 &conn,
@@ -480,6 +580,17 @@ pub fn execute_open(
                     prepared.symbol,
                     exchange_order_id.as_deref().unwrap_or("unknown")
                 ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_NO_FILLS_OBSERVED",
+                "WARN",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": "OPEN",
+                    "exchange_order_id": &exchange_order_id,
+                }),
             )?;
         }
     } else {
@@ -512,6 +623,24 @@ pub fn execute_open(
                 fill_summary.filled_size,
                 status
             ),
+        )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&prepared.symbol),
+            "MANUAL_FILLS_RECORDED",
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            json!({
+                "intent_id": &intent_id,
+                "action": "OPEN",
+                "status": status,
+                "observed_fills": fill_summary.observed_fills,
+                "parsed_trade_rows": fill_summary.parsed_trade_rows,
+                "filled_size": fill_summary.filled_size,
+            }),
         )?;
     }
 
@@ -664,6 +793,25 @@ pub fn execute_close(
             prepared.current_size
         ),
     )?;
+    write_manual_audit_event(
+        &conn,
+        Some(&prepared.symbol),
+        if resumed_existing {
+            "MANUAL_INTENT_RESUMED"
+        } else {
+            "MANUAL_INTENT_CREATED"
+        },
+        "INFO",
+        json!({
+            "intent_id": &intent_id,
+            "action": close_action,
+            "side": side,
+            "order_type": request.order_type,
+            "close_size": prepared.close_size,
+            "current_size": prepared.current_size,
+            "client_order_id": &cloid,
+        }),
+    )?;
 
     let response = match submit_close_order(&client, &prepared, &cloid) {
         Ok(response) => response,
@@ -682,6 +830,17 @@ pub fn execute_close(
                     "manual_trade submit_failed intent_id={} symbol={} action={} error={}",
                     intent_id, prepared.symbol, close_action, error_text
                 ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_ORDER_SUBMIT_FAILED",
+                "ERROR",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": close_action,
+                    "error": &error_text,
+                }),
             )?;
             return Err(error);
         }
@@ -719,6 +878,18 @@ pub fn execute_close(
                 response_text
             ),
         )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&prepared.symbol),
+            "MANUAL_ORDER_REJECTED",
+            "ERROR",
+            json!({
+                "intent_id": &intent_id,
+                "action": close_action,
+                "exchange_order_id": &exchange_order_id,
+                "response": &response,
+            }),
+        )?;
         return Err(HubError::BadRequest(response_text));
     }
     write_manual_runtime_log(
@@ -731,6 +902,19 @@ pub fn execute_close(
             close_action,
             exchange_order_id.as_deref().unwrap_or("unknown")
         ),
+    )?;
+    write_manual_audit_event(
+        &conn,
+        Some(&prepared.symbol),
+        "MANUAL_ORDER_SUBMITTED",
+        "INFO",
+        json!({
+            "intent_id": &intent_id,
+            "action": close_action,
+            "exchange_order_id": &exchange_order_id,
+            "client_order_id": &cloid,
+            "order_type": submission_order_type(prepared.order_type, true),
+        }),
     )?;
     let fills = if prepared.order_type == ParsedOrderType::LimitGtc {
         Vec::new()
@@ -753,6 +937,17 @@ pub fn execute_close(
                         "manual_trade fill_poll_failed intent_id={} symbol={} action={} error={}",
                         intent_id, prepared.symbol, close_action, error_text
                     ),
+                )?;
+                write_manual_audit_event(
+                    &conn,
+                    Some(&prepared.symbol),
+                    "MANUAL_FILL_POLL_FAILED",
+                    "ERROR",
+                    json!({
+                        "intent_id": &intent_id,
+                        "action": close_action,
+                        "error": &error_text,
+                    }),
                 )?;
                 return Err(error);
             }
@@ -781,6 +976,17 @@ pub fn execute_close(
                     exchange_order_id.as_deref().unwrap_or("unknown")
                 ),
             )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_ORDER_RESTING",
+                "INFO",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": close_action,
+                    "exchange_order_id": &exchange_order_id,
+                }),
+            )?;
         } else {
             update_manual_intent_status(
                 &conn,
@@ -798,6 +1004,17 @@ pub fn execute_close(
                     close_action,
                     exchange_order_id.as_deref().unwrap_or("unknown")
                 ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_NO_FILLS_OBSERVED",
+                "WARN",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": close_action,
+                    "exchange_order_id": &exchange_order_id,
+                }),
             )?;
         }
     } else {
@@ -831,6 +1048,24 @@ pub fn execute_close(
                 fill_summary.filled_size,
                 status
             ),
+        )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&prepared.symbol),
+            "MANUAL_FILLS_RECORDED",
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            json!({
+                "intent_id": &intent_id,
+                "action": close_action,
+                "status": status,
+                "observed_fills": fill_summary.observed_fills,
+                "parsed_trade_rows": fill_summary.parsed_trade_rows,
+                "filled_size": fill_summary.filled_size,
+            }),
         )?;
     }
 
@@ -929,6 +1164,18 @@ pub fn cancel_order(
                     .unwrap_or("unknown")
             ),
         )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&symbol),
+            "MANUAL_CANCEL_REQUESTED",
+            "INFO",
+            json!({
+                "exchange_order_id": &order_id_text,
+                "intent_id": cancel_context
+                    .as_ref()
+                    .and_then(|item| item.intent_id.as_deref()),
+            }),
+        )?;
         let client = build_client(cfg)?;
         let response = match client.cancel_order(&symbol, parsed_oid) {
             Ok(response) => response,
@@ -962,6 +1209,19 @@ pub fn cancel_order(
                         symbol, order_id_text, error_text
                     ),
                 )?;
+                write_manual_audit_event(
+                    &conn,
+                    Some(&symbol),
+                    "MANUAL_CANCEL_FAILED",
+                    "ERROR",
+                    json!({
+                        "exchange_order_id": &order_id_text,
+                        "intent_id": cancel_context
+                            .as_ref()
+                            .and_then(|item| item.intent_id.as_deref()),
+                        "error": &error_text,
+                    }),
+                )?;
                 return Err(HubError::BadRequest(error_text));
             }
         };
@@ -994,6 +1254,19 @@ pub fn cancel_order(
                     "manual_trade cancel_rejected symbol={} exchange_order_id={} response={}",
                     symbol, order_id_text, response_text
                 ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&symbol),
+                "MANUAL_CANCEL_REJECTED",
+                "ERROR",
+                json!({
+                    "exchange_order_id": &order_id_text,
+                    "intent_id": cancel_context
+                        .as_ref()
+                        .and_then(|item| item.intent_id.as_deref()),
+                    "response": &response,
+                }),
             )?;
             return Err(HubError::BadRequest(response_text));
         }
@@ -1029,6 +1302,19 @@ pub fn cancel_order(
                     .and_then(|item| item.intent_id.as_deref())
                     .unwrap_or("unknown")
             ),
+        )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&symbol),
+            "MANUAL_CANCELLED",
+            "INFO",
+            json!({
+                "exchange_order_id": &order_id_text,
+                "intent_id": cancel_context
+                    .as_ref()
+                    .and_then(|item| item.intent_id.as_deref()),
+                "response": &response,
+            }),
         )?;
         return Ok(json!({
             "ok": true,
@@ -1066,6 +1352,16 @@ pub fn cancel_order(
                 effective_symbol, intent_id, cloid
             ),
         )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&effective_symbol),
+            "MANUAL_CANCEL_REQUESTED",
+            "INFO",
+            json!({
+                "intent_id": intent_id,
+                "client_order_id": &cloid,
+            }),
+        )?;
         let client = build_client(cfg)?;
         let response = match client.cancel_order_by_cloid(&effective_symbol, &cloid) {
             Ok(response) => response,
@@ -1095,6 +1391,17 @@ pub fn cancel_order(
                         effective_symbol, intent_id, error_text
                     ),
                 )?;
+                write_manual_audit_event(
+                    &conn,
+                    Some(&effective_symbol),
+                    "MANUAL_CANCEL_FAILED",
+                    "ERROR",
+                    json!({
+                        "intent_id": intent_id,
+                        "client_order_id": &cloid,
+                        "error": &error_text,
+                    }),
+                )?;
                 return Err(HubError::BadRequest(error_text));
             }
         };
@@ -1121,8 +1428,19 @@ pub fn cancel_order(
                 "ERROR",
                 &format!(
                     "manual_trade cancel_rejected symbol={} intent_id={} response={}",
-                    effective_symbol, intent_id, response_text
+                        effective_symbol, intent_id, response_text
                 ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&effective_symbol),
+                "MANUAL_CANCEL_REJECTED",
+                "ERROR",
+                json!({
+                    "intent_id": intent_id,
+                    "client_order_id": &cloid,
+                    "response": &response,
+                }),
             )?;
             return Err(HubError::BadRequest(response_text));
         }
@@ -1149,6 +1467,17 @@ pub fn cancel_order(
                 "manual_trade cancelled symbol={} intent_id={} client_order_id={}",
                 effective_symbol, intent_id, cloid
             ),
+        )?;
+        write_manual_audit_event(
+            &conn,
+            Some(&effective_symbol),
+            "MANUAL_CANCELLED",
+            "INFO",
+            json!({
+                "intent_id": intent_id,
+                "client_order_id": &cloid,
+                "response": &response,
+            }),
         )?;
         return Ok(json!({
             "ok": true,
@@ -1311,6 +1640,18 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
         );
         CREATE INDEX IF NOT EXISTS idx_runtime_logs_ts_ms ON runtime_logs(ts_ms);
         CREATE INDEX IF NOT EXISTS idx_runtime_logs_mode_ts_ms ON runtime_logs(mode, ts_ms);
+
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            symbol TEXT,
+            event TEXT NOT NULL,
+            level TEXT,
+            data_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_events_ts_ms ON audit_events(ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_event_ts_ms ON audit_events(event, ts_ms);
         ",
     )?;
     tx.commit()?;
@@ -2033,6 +2374,32 @@ fn write_manual_runtime_log(conn: &Connection, level: &str, message: &str) -> Re
             MANUAL_RUNTIME_STREAM,
             level.trim().to_ascii_uppercase(),
             message,
+        ],
+    )?;
+    Ok(())
+}
+
+fn write_manual_audit_event(
+    conn: &Connection,
+    symbol: Option<&str>,
+    event: &str,
+    level: &str,
+    data: Value,
+) -> Result<(), HubError> {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let ts = chrono::DateTime::from_timestamp_millis(ts_ms)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    conn.execute(
+        "INSERT INTO audit_events (ts_ms, timestamp, symbol, event, level, data_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            ts_ms,
+            ts,
+            symbol.map(|value| value.trim().to_ascii_uppercase()),
+            event.trim().to_ascii_uppercase(),
+            level.trim().to_ascii_uppercase(),
+            data.to_string(),
         ],
     )?;
     Ok(())
@@ -3451,5 +3818,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(order_status, "REJECTED");
+    }
+
+    #[test]
+    fn manual_audit_event_helper_persists_structured_row() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        write_manual_audit_event(
+            &conn,
+            Some("ETH"),
+            "manual_test_event",
+            "info",
+            json!({ "intent_id": "manual_test", "ok": true }),
+        )
+        .unwrap();
+
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT symbol, event, level FROM audit_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "ETH");
+        assert_eq!(row.1, "MANUAL_TEST_EVENT");
+        assert_eq!(row.2, "INFO");
     }
 }
