@@ -1,7 +1,11 @@
 # Rust Runtime Phase 0 Cutover and Burn-In Checklist
 
 **Date:** 2026-03-07  
-**Status:** Active execution checklist for `Phase 0` close-out and the first Rust paper burn-in lane
+**Status:** Historical execution checklist for the delivered `Phase 0` foundation tranche
+
+> Historical note: repo-owned `Phase 0` outputs landed on `master`. This
+> checklist remains as audit history; current operations should use
+> `docs/current_authoritative_paths.md` and `docs/runbook.md`.
 
 This checklist exists so `Phase 0` is not only a programme statement. Every PR
 or operator action that claims `Phase 0` completion should point back to this

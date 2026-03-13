@@ -1,3 +1,9 @@
+"""Legacy Python risk helpers retained for tests and archival tooling.
+
+The production live risk contract is Rust-owned (`runtime/aiq-runtime`).
+Keep this module only for non-runtime helpers and compatibility coverage.
+"""
+
 from __future__ import annotations
 
 import datetime

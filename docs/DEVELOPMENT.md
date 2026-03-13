@@ -1,6 +1,8 @@
 # Development Guide
 
-This repository contains Python (trading engine, strategies, monitoring) and Rust (backtester, WS sidecar, hub dashboard) components.
+This repository contains Python (archival recovery/debug runtime surfaces,
+strategies, monitoring) and Rust (production runtime, backtester, WS sidecar,
+hub dashboard) components.
 
 ## Python (uv / ruff / pytest)
 
@@ -9,7 +11,8 @@ Managed by `uv`:
 - Project config: `pyproject.toml`
 - Lockfile: `uv.lock`
 - Dev venv: `.venv/` (uv-managed, gitignored)
-- Runtime venv: `venv/` (used by `run_live.sh` / `run_paper.sh` systemd scripts)
+- Archived Python runtime entrypoint: `python -m engine.daemon`
+- Rust service wrappers: `scripts/run_paper_lane.sh`, `scripts/run_live.sh`
 
 ### Setup
 
@@ -34,11 +37,17 @@ Coverage is enforced for `engine/sqlite_logger.py`, `monitor/heartbeat.py`, `eng
 
 ## Rust
 
-Three Rust projects: backtester, WS sidecar, and hub dashboard.
+Four Rust projects: runtime foundation, backtester, WS sidecar, and hub
+dashboard.
 
 ### Build
 
 ```bash
+# Runtime foundation / production runtime
+cargo build --release -p aiq-runtime
+cargo test -p aiq-runtime-core
+cargo test -p aiq-runtime
+
 # Backtester (CPU) — recommended build script (version-stamped)
 python3 tools/build_mei_backtester.py
 
@@ -58,6 +67,8 @@ cd hub && cargo build --release
 ### Test
 
 ```bash
+cargo test -p aiq-runtime-core
+cargo test -p aiq-runtime
 cd backtester && cargo test
 cd ws_sidecar && cargo test
 cd hub && cargo test

@@ -13,11 +13,11 @@ The remaining Python daemon surfaces are archival recovery/debug compatibility
 paths only.
 
 - **Daemon** (`engine/daemon.py`): Legacy Python recovery/debug entrypoint. `paper` remains guarded recovery-only, while `live` / `dry_live` now require an explicit archival override and are no longer the production service path.
-- **UnifiedEngine** (`engine/core.py`): Main trading loop — polls candle keys per symbol, runs strategy analysis only when data changes, two-phase collect-rank-execute for entries.
+- **UnifiedEngine** (`engine/core.py`): Legacy Python execution loop retained for compatibility tests, helper types, and parity-oriented debugging. Rust owns the production paper/live loops.
 - **StrategyManager** (`engine/strategy_manager.py`): Hot-reloads the resolver-selected strategy YAML path via mtime polling for the active Python daemon. It does not define the effective-config contract, and when `AI_QUANT_EFFECTIVE_CONFIG_OWNER=rust` it now treats the Rust materialised runtime YAML as the authoritative config/identity source instead of reapplying Python defaults.
 - **MarketDataHub** (`engine/market_data.py`): Reads mids and candles from WS sidecar first, falls back to SQLite candles table, then REST `candleSnapshot`.
-- **RiskManager** (`engine/risk.py`): Rate limiting (global + per-symbol entries, exits, cancels), drawdown kill-switch, daily loss limits, notional caps, slippage guard, file-based and env-based kill-switch polling.
-- **LiveOms** (`engine/oms.py`): Durable Order Management System for live trading — intent rows (restart-safe dedupe), orders, fills (deduped by hash+tid), fill-to-intent matching via `client_order_id` with time-proximity fallback.
+- **RiskManager** (`engine/risk.py`): Legacy Python risk helpers retained for tests, recovery workflows, and compatibility tooling. The production live risk contract is Rust-owned.
+- **LiveOms** (`engine/oms.py`): Legacy Python OMS helpers retained for tests and tooling. The production live OMS contract is Rust-owned.
 - **OMS Reconciler** (`engine/oms_reconciler.py`): Reconciles OMS state against exchange positions/fills.
 - **Alerting** (`engine/alerting.py`): Discord / Telegram notifications via `openclaw message send`.
 - **Event Logger** (`engine/event_logger.py`): Decision + trade event logging for audit trail.
@@ -39,7 +39,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` or `ai_quant_live.lo
 
 ### 3. Exchange Adapters (`exchange/`)
 
-- **HyperliquidLiveExecutor** (`exchange/executor.py`): SDK interface — `market_open`, `market_close`, position queries.
+- **HyperliquidLiveExecutor** (`exchange/executor.py`): Python SDK adapter retained for non-runtime tooling and archival recovery workflows.
 - **WebSocket Client** (`exchange/ws.py`): Streams `allMids`, `bbo`, `candle` for market data; `userFills`, `orderUpdates`, `userFundings` for live mode.
 - **Sidecar Client** (`exchange/sidecar.py`): Unix socket client for the Rust WS sidecar.
 - **Meta** (`exchange/meta.py`): Hyperliquid metadata — sz/price rounding, symbol info.
@@ -149,13 +149,13 @@ Tiebreaker: symbol name alphabetical order. Pyramid ADD orders execute immediate
 ```
 .
 ├── engine/                    # Unified trading engine (Python)
-│   ├── core.py                # UnifiedEngine — main trading loop
-│   ├── daemon.py              # Entrypoint (paper / dry_live / live)
+│   ├── core.py                # Legacy Python execution loop + helper types
+│   ├── daemon.py              # Archived Python runtime entrypoint
 │   ├── market_data.py         # MarketDataHub — candle + mid data
 │   ├── strategy_manager.py    # YAML hot-reload via mtime polling
-│   ├── oms.py                 # Order Management System
+│   ├── oms.py                 # Legacy Python OMS helpers
 │   ├── oms_reconciler.py      # OMS reconciliation
-│   ├── risk.py                # RiskManager
+│   ├── risk.py                # Legacy Python risk helpers
 │   ├── alerting.py            # Discord / Telegram notifications
 │   ├── event_logger.py        # Decision + trade event logging
 │   ├── promoted_config.py     # Compatibility shim around Rust effective-config resolution
@@ -163,20 +163,20 @@ Tiebreaker: symbol name alphabetical order. Pyramid ADD orders execute immediate
 │   ├── sqlite_logger.py       # SQLite persistence
 │   └── systemd_watchdog.py    # sd_notify watchdog
 ├── strategy/                  # Strategy implementations
-│   ├── mei_alpha_v1.py        # Signals, confidence, PaperTrader
+│   ├── mei_alpha_v1.py        # Signals, defaults, helper builders, legacy PaperTrader
 │   ├── kernel_orchestrator.py # Rust kernel orchestrator (PyO3)
 │   ├── broker_adapter.py      # OrderIntent → exchange orders
 │   ├── shadow_mode.py         # Shadow mode decision tracking
 │   ├── reconciler.py          # Position reconciliation
 │   └── event_id.py            # Deterministic event IDs
 ├── exchange/                  # Exchange adapters
-│   ├── executor.py            # HyperliquidLiveExecutor
+│   ├── executor.py            # Python exchange adapter for tooling/recovery
 │   ├── ws.py                  # WebSocket client
 │   ├── sidecar.py             # WS sidecar Unix socket client
 │   ├── meta.py                # Metadata + sz rounding
 │   └── market_watch.py        # Market watch utilities
 ├── live/                      # Live trading
-│   └── trader.py              # LiveTrader
+│   └── trader.py              # Legacy LiveTrader compatibility code
 ├── monitor/                   # Real-time dashboard (Python)
 │   ├── server.py              # HTTP + SSE server
 │   └── heartbeat.py           # Heartbeat checks

@@ -12,9 +12,10 @@ body:
     attributes:
       label: Component
       options:
-        - Trading Engine (engine/)
+        - Rust Runtime (runtime/)
+        - Python Compatibility Runtime (engine/)
         - Strategy (strategy/)
-        - Live Trader (live/)
+        - Live Trader (live/, archival)
         - Rust Backtester (backtester/)
         - WS Sidecar (ws_sidecar/)
         - Hub Dashboard (hub/)

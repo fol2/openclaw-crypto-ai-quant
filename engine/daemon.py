@@ -1,27 +1,30 @@
-"""Unified daemon entrypoint (paper + legacy live recovery).
+"""Archived Python daemon entrypoint for recovery/debug workflows only.
 
 Usage:
-  AI_QUANT_MODE=paper python -m engine.daemon
-  AI_QUANT_MODE=dry_live AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 python -m engine.daemon
-  AI_QUANT_MODE=live AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 python -m engine.daemon
+  # Production Rust-owned paths
+  scripts/run_paper_lane.sh paper1
+  scripts/run_live.sh
+
+  # Legacy Python recovery/debug only
+  AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
+  AI_QUANT_MODE=dry_live AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
+  AI_QUANT_MODE=live AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
 
 What this replaces:
 - trader_daemon.py (paper loop)
 - trader_daemon_live.py (live loop)
 
-The goal is to keep ONE orchestration loop, and let PaperTrader / LiveTrader focus on:
-- strategy decision logic
-- execution (paper vs real orders)
-
-Phase 2 note:
-- Rust now owns the production paper runtime.
-- This Python paper entrypoint remains a legacy recovery/debug path and is no
-  longer the authoritative paper service.
+This module is no longer the production owner for any runtime lane. The goal is
+to preserve one Python recovery loop for archival debugging while Rust owns the
+production scheduling and execution paths.
 
 Phase 3 note:
-- Rust now owns the production live / dry-live runtime as well.
-- Python live / dry-live execution is archival-only and requires
-  AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 as an explicit override.
+- Rust now owns the production paper, dry-live, and live runtime paths.
+- This Python entrypoint is archival-only and requires
+  AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 as an explicit override.
+- AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 is still accepted for legacy
+  dry-live/live recovery workflows, but the broader runtime override is the
+  preferred archival gate.
 
 YAML config hot-reload is handled by StrategyManager, without reloading mei_alpha_v1 each loop.
 """
@@ -63,22 +66,41 @@ def _mode() -> str:
     return str(os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
 
 
-def _legacy_python_live_override_enabled() -> bool:
-    return _env_bool("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", False)
+def _legacy_python_runtime_override_enabled(mode: str) -> bool:
+    if _env_bool("AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME", False):
+        return True
+    if mode in {"live", "dry_live"} and _env_bool("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", False):
+        return True
+    return False
 
 
-def _require_rust_live_runtime_owner(mode: str) -> None:
-    if mode not in {"live", "dry_live"}:
+def _require_rust_runtime_owner(mode: str) -> None:
+    if mode not in {"paper", "live", "dry_live"}:
         return
-    if _legacy_python_live_override_enabled():
+    if _legacy_python_runtime_override_enabled(mode):
+        if (
+            mode in {"live", "dry_live"}
+            and not _env_bool("AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME", False)
+            and _env_bool("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", False)
+        ):
+            logger.warning(
+                "AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE is deprecated; prefer "
+                "AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 for archival recovery"
+            )
         logger.warning(
             "legacy Python %s runtime override enabled; Rust remains the authoritative production owner",
             mode,
         )
         return
+    if mode == "paper":
+        raise SystemExit(
+            "Python paper runtime is retired. Use `aiq-runtime paper daemon` or "
+            "`scripts/run_paper_lane.sh`. Set AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 "
+            "only for archival recovery."
+        )
     raise SystemExit(
         "Python live runtime is retired. Use `aiq-runtime live daemon` or `scripts/run_live.sh`. "
-        "Set AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 only for archival recovery."
+        "Set AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 only for archival recovery."
     )
 
 
@@ -1521,7 +1543,7 @@ def main() -> None:
 
     mode = _mode()
     _enforce_v8_only_runtime(mode)
-    _require_rust_live_runtime_owner(mode)
+    _require_rust_runtime_owner(mode)
     try:
         from .sqlite_logger import install_sqlite_stdio_logger
 

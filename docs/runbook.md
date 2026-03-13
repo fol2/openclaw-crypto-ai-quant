@@ -2,6 +2,10 @@
 
 Procedures for common operational scenarios. When the bot misbehaves, follow the relevant section below.
 
+This runbook assumes the Rust paper and live daemons are the authoritative
+runtime paths. See `docs/current_authoritative_paths.md` for the current
+ownership map and the remaining archival Python compatibility surfaces.
+
 ## Services Reference
 
 | Service | Unit name | Purpose |
@@ -643,7 +647,7 @@ systemctl --user stop openclaw-ai-quant-ws-sidecar
 systemctl --user start openclaw-ai-quant-ws-sidecar
 sleep 5
 systemctl --user start openclaw-ai-quant-trader-v8-paper1     # paper
-# systemctl --user start openclaw-ai-quant-live-v8     # live (uncomment when ready)
+systemctl --user start openclaw-ai-quant-live-v8     # live (start on hosts that own the live lane and have safety gates configured)
 systemctl --user start openclaw-ai-quant-monitor
 ```
 

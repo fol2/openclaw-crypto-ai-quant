@@ -1,3 +1,10 @@
+"""Python Hyperliquid adapter retained for non-runtime tooling.
+
+Production live order execution is now owned by the Rust runtime. This module
+remains available for archival tools, recovery workflows, and compatibility
+tests until those paths are migrated or removed.
+"""
+
 import datetime
 import json
 import logging

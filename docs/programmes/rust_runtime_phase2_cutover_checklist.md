@@ -1,7 +1,12 @@
 # Rust Runtime Phase 2 Paper Cutover Checklist
 
 **Date:** 2026-03-08  
-**Status:** Active execution checklist for `Phase 2` Rust paper cutover
+**Status:** Historical execution checklist for the delivered `Phase 2` Rust paper cutover
+
+> Historical note: repo-owned `Phase 2` cutover outputs landed on `master`.
+> Lane-specific operator evidence still lives outside git; use
+> `docs/current_authoritative_paths.md` and `docs/runbook.md` for the current
+> paper service contract.
 
 This checklist exists so `Phase 2` is measured by service ownership, paper-gate
 evidence, replay-gate evidence, and deletion progress rather than by unlimited
