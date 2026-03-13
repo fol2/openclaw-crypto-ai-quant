@@ -45,16 +45,6 @@ pub struct HyperliquidFill {
     pub raw: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HyperliquidOpenOrder {
-    pub symbol: String,
-    pub exchange_order_id: String,
-    pub side: String,
-    pub size: f64,
-    pub limit_px: f64,
-    pub timestamp_ms: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveOrderType {
     LimitIoc,
@@ -263,38 +253,6 @@ impl HyperliquidClient {
             .collect())
     }
 
-    pub fn open_orders(&self) -> Result<Vec<HyperliquidOpenOrder>> {
-        #[derive(Debug, Deserialize)]
-        struct OpenOrderPayload {
-            coin: String,
-            #[serde(rename = "limitPx")]
-            limit_px: String,
-            oid: serde_json::Value,
-            side: String,
-            sz: String,
-            timestamp: i64,
-        }
-
-        let response: Vec<OpenOrderPayload> =
-            self.info("openOrders", json!({ "user": self.main_address }))?;
-        response
-            .into_iter()
-            .map(|payload| {
-                Ok(HyperliquidOpenOrder {
-                    symbol: payload.coin.trim().to_ascii_uppercase(),
-                    exchange_order_id: match payload.oid {
-                        serde_json::Value::String(value) => value,
-                        other => other.to_string(),
-                    },
-                    side: payload.side.trim().to_ascii_uppercase(),
-                    size: parse_number(&payload.sz, "sz")?,
-                    limit_px: parse_number(&payload.limit_px, "limitPx")?,
-                    timestamp_ms: payload.timestamp,
-                })
-            })
-            .collect()
-    }
-
     pub fn update_leverage(
         &self,
         symbol: &str,
@@ -364,37 +322,6 @@ impl HyperliquidClient {
         })
     }
 
-    pub fn cancel_order(&self, symbol: &str, exchange_order_id: i64) -> Result<serde_json::Value> {
-        let asset = self.asset_for_symbol(symbol)?;
-        let action = map_value(vec![
-            ("type", Value::from("cancel")),
-            (
-                "cancels",
-                Value::Array(vec![map_value(vec![
-                    ("a", Value::from(i64::from(asset))),
-                    ("o", Value::from(exchange_order_id)),
-                ])]),
-            ),
-        ]);
-        self.post_action(action)
-    }
-
-    pub fn cancel_by_cloid(&self, symbol: &str, cloid: &str) -> Result<serde_json::Value> {
-        validate_cloid(cloid)?;
-        let asset = self.asset_for_symbol(symbol)?;
-        let action = map_value(vec![
-            ("type", Value::from("cancelByCloid")),
-            (
-                "cancels",
-                Value::Array(vec![map_value(vec![
-                    ("asset", Value::from(i64::from(asset))),
-                    ("cloid", Value::from(cloid)),
-                ])]),
-            ),
-        ]);
-        self.post_action(action)
-    }
-
     pub fn order(&self, order: OrderRequest) -> Result<serde_json::Value> {
         let asset = self.asset_for_symbol(&order.symbol)?;
         let mut fields = vec![
@@ -405,12 +332,12 @@ impl HyperliquidClient {
             ("r", Value::from(order.reduce_only)),
             (
                 "t",
-                Value::from(match order.order_type {
+                match order.order_type {
                     LiveOrderType::LimitIoc => map_value(vec![(
                         "limit",
                         map_value(vec![("tif", Value::from("Ioc"))]),
                     )]),
-                }),
+                },
             ),
         ];
         if let Some(cloid) = order.cloid.as_deref() {

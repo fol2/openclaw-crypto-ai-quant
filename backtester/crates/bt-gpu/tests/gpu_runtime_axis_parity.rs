@@ -252,7 +252,16 @@ fn run_cpu_single(
     initial_balance: f64,
 ) -> (u32, f64, f64) {
     let spec = single_config_spec(initial_balance);
-    let cpu = bt_core::sweep::run_sweep(cfg, &spec, candles, None, None, None, None, None);
+    let cpu = bt_core::sweep::run_sweep(bt_core::sweep::RunSweepInput {
+        base_cfg: cfg,
+        spec: &spec,
+        candles,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        from_ts: None,
+        to_ts: None,
+    });
     assert_eq!(cpu.len(), 1, "CPU sweep should produce exactly 1 result");
     let r = &cpu[0].report;
     (r.total_trades, r.final_balance, r.total_pnl)
@@ -686,8 +695,16 @@ fn test_gpu_parity_full_multi_config() {
     );
 
     // CPU: run all 8 configs via the same sweep
-    let cpu_results =
-        bt_core::sweep::run_sweep(&base_cfg, &spec, &candles, None, None, None, None, None);
+    let cpu_results = bt_core::sweep::run_sweep(bt_core::sweep::RunSweepInput {
+        base_cfg: &base_cfg,
+        spec: &spec,
+        candles: &candles,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        from_ts: None,
+        to_ts: None,
+    });
     assert_eq!(
         cpu_results.len(),
         8,

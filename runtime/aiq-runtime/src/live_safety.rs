@@ -20,12 +20,6 @@ fn env_string(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub fn live_mode() -> String {
-    env_string("AI_QUANT_MODE")
-        .unwrap_or_else(|| "paper".to_string())
-        .to_ascii_lowercase()
-}
-
 pub fn live_orders_enabled() -> bool {
     if env_bool("AI_QUANT_HARD_KILL_SWITCH") {
         return false;

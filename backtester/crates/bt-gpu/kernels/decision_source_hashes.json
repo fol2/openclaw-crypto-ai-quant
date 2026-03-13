@@ -4,6 +4,6 @@
   "../bt-core/src/exits/stop_loss.rs": "971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63",
   "../bt-core/src/exits/take_profit.rs": "97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23",
   "../bt-core/src/exits/trailing.rs": "501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e",
-  "../bt-signals/src/entry.rs": "7046e519e86605bc8f631c8ee3bcadfadeea119f616a1ad07f9b19f647072fbc",
-  "../bt-signals/src/gates.rs": "730aacfca4ec69a383157e2fdce134c5e5e16a40caf4ab36cf15a6ab0fa47acb"
+  "../bt-signals/src/entry.rs": "678516374f4ba66145f5a6e2a288a3f77e4f125153fcf0914201e9a83592cfb9",
+  "../bt-signals/src/gates.rs": "bb0a731c877d26fec35dab4182790be746196ac9ed9c169d2f7b12275c69a08d"
 }

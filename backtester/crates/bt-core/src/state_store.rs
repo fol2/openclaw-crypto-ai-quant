@@ -124,7 +124,7 @@ mod tests {
             schema_version: 1,
             timestamp_ms: 1_000_000,
             step: 42,
-            cash_usd: 98_765.4321,
+            cash_usd: 98_765.432_1,
             positions: BTreeMap::new(),
             last_entry_ms: BTreeMap::new(),
             last_exit_ms: BTreeMap::new(),

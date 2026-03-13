@@ -979,16 +979,16 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
             snapshot.validate()?;
 
             if let Some(path) = output.as_ref() {
-                std::fs::write(&path, snapshot_to_pretty_json(&snapshot)?)?;
+                std::fs::write(path, snapshot_to_pretty_json(&snapshot)?)?;
             }
 
             if json || output.is_none() {
                 println!("{}", snapshot_to_pretty_json(&snapshot)?);
-            } else {
+            } else if let Some(path) = output.as_ref() {
                 println!(
                     "paper snapshot exported: positions={} output={}",
                     snapshot.positions.len(),
-                    output.as_ref().unwrap().display(),
+                    path.display(),
                 );
             }
         }

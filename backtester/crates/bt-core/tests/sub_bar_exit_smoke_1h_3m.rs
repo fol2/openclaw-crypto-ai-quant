@@ -96,7 +96,12 @@ fn exit_sub_bars_change_outcomes() {
         exit_candles: None,
         entry_candles: None,
         funding_rates: None,
-        init_state: Some((1_000.0, positions, FxHashMap::default(), FxHashMap::default())),
+        init_state: Some((
+            1_000.0,
+            positions,
+            FxHashMap::default(),
+            FxHashMap::default(),
+        )),
         from_ts: None,
         to_ts: None,
     });

@@ -167,9 +167,18 @@ impl GpuIndicatorConfig {
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig, lookback: usize) -> Self {
         let ic = &cfg.indicators;
         Self {
-            ema_fast_window: checked_u32_from_usize("indicators.ema_fast_window", ic.ema_fast_window),
-            ema_slow_window: checked_u32_from_usize("indicators.ema_slow_window", ic.ema_slow_window),
-            ema_macro_window: checked_u32_from_usize("indicators.ema_macro_window", ic.ema_macro_window),
+            ema_fast_window: checked_u32_from_usize(
+                "indicators.ema_fast_window",
+                ic.ema_fast_window,
+            ),
+            ema_slow_window: checked_u32_from_usize(
+                "indicators.ema_slow_window",
+                ic.ema_slow_window,
+            ),
+            ema_macro_window: checked_u32_from_usize(
+                "indicators.ema_macro_window",
+                ic.ema_macro_window,
+            ),
             adx_window: checked_u32_from_usize("indicators.adx_window", ic.adx_window),
             bb_window: checked_u32_from_usize("indicators.bb_window", ic.bb_window),
             bb_width_avg_window: checked_u32_from_usize(
@@ -609,18 +618,18 @@ pub struct GpuParams {
     pub num_combos: u32,
     pub num_symbols: u32,
     pub num_bars: u32,
-    pub btc_sym_idx: u32, // u32::MAX when unavailable
+    pub btc_sym_idx: u32,  // u32::MAX when unavailable
     pub paxg_sym_idx: u32, // u32::MAX when unavailable
     pub chunk_start: u32,
     pub chunk_end: u32,
-    pub initial_balance_bits: u32, // f32 bits
-    pub maker_fee_rate_bits: u32,  // f32 bits (from config, default 3.5 bps)
-    pub taker_fee_rate_bits: u32,  // f32 bits (from config, default 3.5 bps)
-    pub max_sub_per_bar: u32,      // 0 = no sub-bars (backwards compatible)
-    pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
-    pub debug_t_sec: u32,          // 0 = disabled; otherwise enable debug logs at this timestamp
-    pub funding_enabled: u32,      // 1 = apply funding settlements in trade kernel
-    pub entry_interval_sec: u32,   // entry sub-bar interval in seconds (for signal-on-close alignment)
+    pub initial_balance_bits: u32,   // f32 bits
+    pub maker_fee_rate_bits: u32,    // f32 bits (from config, default 3.5 bps)
+    pub taker_fee_rate_bits: u32,    // f32 bits (from config, default 3.5 bps)
+    pub max_sub_per_bar: u32,        // 0 = no sub-bars (backwards compatible)
+    pub trade_end_bar: u32,          // last bar index for result write-back (scoped trade range)
+    pub debug_t_sec: u32,            // 0 = disabled; otherwise enable debug logs at this timestamp
+    pub funding_enabled: u32,        // 1 = apply funding settlements in trade kernel
+    pub entry_interval_sec: u32, // entry sub-bar interval in seconds (for signal-on-close alignment)
     pub signal_on_candle_close: u32, // 1 = evaluate sub-bar entries on candle close semantics
 }
 
@@ -843,8 +852,12 @@ impl GpuComboConfig {
             ranging_rsi_low: checked_f32_field!(rt.rsi_low),
             ranging_rsi_high: checked_f32_field!(rt.rsi_high),
             ranging_min_signals: rt.min_signals as u32,
-            stoch_rsi_block_long_gt: checked_f32_field!(cfg.thresholds.stoch_rsi.block_long_if_k_gt),
-            stoch_rsi_block_short_lt: checked_f32_field!(cfg.thresholds.stoch_rsi.block_short_if_k_lt),
+            stoch_rsi_block_long_gt: checked_f32_field!(
+                cfg.thresholds.stoch_rsi.block_long_if_k_gt
+            ),
+            stoch_rsi_block_short_lt: checked_f32_field!(
+                cfg.thresholds.stoch_rsi.block_short_if_k_lt
+            ),
             ave_enabled: et.ave_enabled as u32,
             tp_mult_strong: checked_f32_field!(tp.tp_mult_strong),
             tp_mult_weak: checked_f32_field!(tp.tp_mult_weak),

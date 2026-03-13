@@ -107,7 +107,12 @@ fn bar_close_vs_partial_bar_exits_close_earlier() {
         exit_candles: Some(&exit_candles),
         entry_candles: None,
         funding_rates: None,
-        init_state: Some((1_000.0, pos.clone(), FxHashMap::default(), FxHashMap::default())),
+        init_state: Some((
+            1_000.0,
+            pos.clone(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+        )),
         from_ts: None,
         to_ts: None,
     });

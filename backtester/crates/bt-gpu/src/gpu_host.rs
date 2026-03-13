@@ -594,20 +594,21 @@ pub fn dispatch_and_readback(
     let sentinel_funding_spans: CudaSlice<GpuFundingSpan>;
     let sentinel_funding_rates: CudaSlice<f64>;
     let funding_enabled = buffers.funding_spans.is_some() && buffers.funding_rates.is_some();
-    let (funding_spans_ref, funding_rates_ref) = match (&buffers.funding_spans, &buffers.funding_rates) {
-        (Some(spans), Some(rates)) => (spans.as_ref(), rates.as_ref()),
-        _ => {
-            sentinel_funding_spans = ds
-                .dev
-                .alloc_zeros::<GpuFundingSpan>(1)
-                .map_err(|e| format!("GPU alloc failed: {e}"))?;
-            sentinel_funding_rates = ds
-                .dev
-                .alloc_zeros::<f64>(1)
-                .map_err(|e| format!("GPU alloc failed: {e}"))?;
-            (&sentinel_funding_spans, &sentinel_funding_rates)
-        }
-    };
+    let (funding_spans_ref, funding_rates_ref) =
+        match (&buffers.funding_spans, &buffers.funding_rates) {
+            (Some(spans), Some(rates)) => (spans.as_ref(), rates.as_ref()),
+            _ => {
+                sentinel_funding_spans = ds
+                    .dev
+                    .alloc_zeros::<GpuFundingSpan>(1)
+                    .map_err(|e| format!("GPU alloc failed: {e}"))?;
+                sentinel_funding_rates = ds
+                    .dev
+                    .alloc_zeros::<f64>(1)
+                    .map_err(|e| format!("GPU alloc failed: {e}"))?;
+                (&sentinel_funding_spans, &sentinel_funding_rates)
+            }
+        };
 
     for chunk_idx in 0..num_chunks {
         let chunk_start = trade_start + chunk_idx * effective_chunk;

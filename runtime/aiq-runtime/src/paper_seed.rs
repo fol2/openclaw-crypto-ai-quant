@@ -578,7 +578,9 @@ mod tests {
             })
             .unwrap();
         let close_count: i64 = conn
-            .query_row("SELECT COUNT(1) FROM runtime_last_closes", [], |row| row.get(0))
+            .query_row("SELECT COUNT(1) FROM runtime_last_closes", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let open_ts: String = conn
             .query_row(

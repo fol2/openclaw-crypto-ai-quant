@@ -297,7 +297,11 @@ fn resolve_raw(axis: &AxisOptimizer, raw_val: f64) -> f64 {
     match &axis.axis_type {
         AxisType::Binary => {
             let idx = raw_val.floor() as usize;
-            if idx == 0 { 0.0 } else { 1.0 }
+            if idx == 0 {
+                0.0
+            } else {
+                1.0
+            }
         }
         AxisType::Categorical { values } => {
             let idx = (raw_val.floor() as usize).min(values.len() - 1);
@@ -662,7 +666,10 @@ pub fn run_tpe_sweep(
             axis_idx_by_path
                 .get(g.path.as_str())
                 .copied()
-                .map(|parent_idx| AxisGateBinding { parent_idx, eq: g.eq })
+                .map(|parent_idx| AxisGateBinding {
+                    parent_idx,
+                    eq: g.eq,
+                })
         });
 
         let axis_type = classify_axis(&axis.path, &axis.values);
@@ -776,9 +783,8 @@ pub fn run_tpe_sweep(
 
     let (trade_start, trade_end) =
         raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
-    let funding_events_host = funding.map(|fr| {
-        raw_candles::prepare_funding_event_buffers(fr, &raw.timestamps, &symbols)
-    });
+    let funding_events_host =
+        funding.map(|fr| raw_candles::prepare_funding_event_buffers(fr, &raw.timestamps, &symbols));
     eprintln!(
         "[TPE] Trade bar range: {}..{} ({} of {} bars)",
         trade_start,
@@ -806,27 +812,31 @@ pub fn run_tpe_sweep(
         Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
         Option<Arc<cudarc::driver::CudaSlice<f64>>>,
     ) = if let Some(funding_events) = funding_events_host.as_ref() {
-        let active_slots = funding_events.spans.iter().filter(|span| span.len > 0).count();
+        let active_slots = funding_events
+            .spans
+            .iter()
+            .filter(|span| span.len > 0)
+            .count();
         if funding_events.rates.is_empty() || active_slots == 0 {
             eprintln!(
                 "[TPE] Funding DB provided but no hourly settlements in scoped range; funding kernel path disabled"
             );
             (None, None)
         } else {
-                let spans_gpu = match device_state.dev.htod_sync_copy(&funding_events.spans) {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        eprintln!("[TPE] Funding span upload failed: {e} — returning empty results");
-                        return TpeSweepOutcome::empty();
-                    }
-                };
-                let rates_gpu = match device_state.dev.htod_sync_copy(&funding_events.rates) {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        eprintln!("[TPE] Funding rate upload failed: {e} — returning empty results");
-                        return TpeSweepOutcome::empty();
-                    }
-                };
+            let spans_gpu = match device_state.dev.htod_sync_copy(&funding_events.spans) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("[TPE] Funding span upload failed: {e} — returning empty results");
+                    return TpeSweepOutcome::empty();
+                }
+            };
+            let rates_gpu = match device_state.dev.htod_sync_copy(&funding_events.rates) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("[TPE] Funding rate upload failed: {e} — returning empty results");
+                    return TpeSweepOutcome::empty();
+                }
+            };
             eprintln!(
                 "[TPE] Funding settlements prepared: {} events across {} active bar-symbol slots",
                 funding_events.rates.len(),
@@ -1821,8 +1831,8 @@ fn classify_axis(path: &str, values: &[f64]) -> AxisType {
 #[cfg(test)]
 mod tests {
     use super::{
-        approx_step_from_values, checked_num_bars_u32, classify_axis, is_integer_path,
-        resolve_raw, AxisOptimizer, AxisType,
+        approx_step_from_values, checked_num_bars_u32, classify_axis, is_integer_path, resolve_raw,
+        AxisOptimizer, AxisType,
     };
 
     #[test]
@@ -1866,10 +1876,7 @@ mod tests {
             AxisType::Categorical { .. }
         ));
         assert!(matches!(
-            classify_axis(
-                "thresholds.entry.macd_hist_entry_mode",
-                &[0.0, 1.0, 2.0]
-            ),
+            classify_axis("thresholds.entry.macd_hist_entry_mode", &[0.0, 1.0, 2.0]),
             AxisType::Categorical { .. }
         ));
         if let AxisType::Categorical { values } =

@@ -14,7 +14,7 @@ use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_export;
 use crate::paper_run_once::{
     action_codes_for_symbol, apply_decision_projection_with_tx, iso_from_ms, prepare_symbol_step,
-    PreparedSymbolStep,
+    PreparedSymbolStep, ProjectionInput,
 };
 
 pub struct PaperCycleInput<'a> {
@@ -434,32 +434,32 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
 
         if projection_enabled {
             for execution in &executed_steps {
-                let (written, _, _) = apply_decision_projection_with_tx(
-                    &tx,
-                    &execution.symbol,
-                    &execution.pre_state,
-                    execution.prepared.prior_position.as_ref(),
-                    &execution.decision.state,
-                    &execution.decision.intents,
-                    &execution.decision.fills,
-                    &execution.prepared.snap,
-                    execution.prepared.execution_metadata,
-                    input.step_close_ts_ms,
-                )?;
+                let projection = ProjectionInput {
+                    symbol: &execution.symbol,
+                    pre_state: &execution.pre_state,
+                    prior_position: execution.prepared.prior_position.as_ref(),
+                    post_state: &execution.decision.state,
+                    intents: &execution.decision.intents,
+                    fills: &execution.decision.fills,
+                    snap: &execution.prepared.snap,
+                    execution_metadata: execution.prepared.execution_metadata,
+                    ts_ms: input.step_close_ts_ms,
+                };
+                let (written, _, _) = apply_decision_projection_with_tx(&tx, &projection)?;
                 trades_written += written;
             }
         }
 
-        record_cycle_step(
-            &tx,
-            &step_id,
-            input.step_close_ts_ms,
-            interval.as_deref().unwrap_or("unknown"),
-            &active_symbols,
-            snapshot.exported_at_ms,
-            executed_steps.len(),
+        let cycle_step = CycleStepRecord {
+            step_id: &step_id,
+            step_close_ts_ms: input.step_close_ts_ms,
+            interval: interval.as_deref().unwrap_or("unknown"),
+            active_symbols: &active_symbols,
+            snapshot_exported_at_ms: snapshot.exported_at_ms,
+            execution_count: executed_steps.len(),
             trades_written,
-        )?;
+        };
+        record_cycle_step(&tx, &cycle_step)?;
         tx.commit()?;
         runtime_step_recorded = true;
     } else if input.dry_run {
@@ -761,28 +761,29 @@ fn cycle_step_exists(tx: &rusqlite::Transaction<'_>, step_id: &str) -> Result<bo
     Ok(row.is_some())
 }
 
-fn record_cycle_step(
-    tx: &rusqlite::Transaction<'_>,
-    step_id: &str,
+struct CycleStepRecord<'a> {
+    step_id: &'a str,
     step_close_ts_ms: i64,
-    interval: &str,
-    active_symbols: &[String],
+    interval: &'a str,
+    active_symbols: &'a [String],
     snapshot_exported_at_ms: i64,
     execution_count: usize,
     trades_written: usize,
-) -> Result<()> {
+}
+
+fn record_cycle_step(tx: &rusqlite::Transaction<'_>, record: &CycleStepRecord<'_>) -> Result<()> {
     tx.execute(
         "INSERT INTO runtime_cycle_steps (step_id, step_close_ts_ms, interval, symbols_json, snapshot_exported_at_ms, execution_count, trades_written, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            step_id,
-            step_close_ts_ms,
-            interval,
-            serde_json::to_string(active_symbols)?,
-            snapshot_exported_at_ms,
-            execution_count as i64,
-            trades_written as i64,
-            iso_from_ms(snapshot_exported_at_ms),
+            record.step_id,
+            record.step_close_ts_ms,
+            record.interval,
+            serde_json::to_string(record.active_symbols)?,
+            record.snapshot_exported_at_ms,
+            record.execution_count as i64,
+            record.trades_written as i64,
+            iso_from_ms(record.snapshot_exported_at_ms),
         ],
     )?;
     Ok(())

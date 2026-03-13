@@ -476,15 +476,14 @@ fn entry_score(confidence: Confidence, adx: f64) -> f64 {
 }
 
 fn sort_entry_candidates(ranker: &str, candidates: &mut [EntryCandidate]) {
-    match ranker.trim() {
-        _ => candidates.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.prepared.symbol.cmp(&right.prepared.symbol))
-        }),
-    }
+    let _ = ranker.trim();
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.prepared.symbol.cmp(&right.prepared.symbol))
+    });
 }
 
 fn stage_precedes(ordered_stage_ids: &[StageId], left: StageId, right: StageId) -> bool {

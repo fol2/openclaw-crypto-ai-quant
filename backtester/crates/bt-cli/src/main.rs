@@ -105,7 +105,8 @@ fn parse_timestamp_ms(input: &str) -> Result<i64, String> {
 
 /// Read only the `balance` field from a runtime snapshot JSON file.
 fn read_balance_from_json(path: &str) -> Result<f64, Box<dyn std::error::Error>> {
-    let data = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
     let json: serde_json::Value =
         serde_json::from_str(&data).map_err(|e| format!("Invalid JSON in {:?}: {}", path, e))?;
     let balance = json
@@ -1359,14 +1360,11 @@ fn check_gpu_sweep_guardrails(
 
 fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let symbol_norm = args.symbol.as_ref().map(|s| s.trim().to_uppercase());
-    let mut cfg = bt_core::config::load_config_checked(
-        &args.config,
-        symbol_norm.as_deref(),
-        args.live,
-    )
-    .map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("[replay] {e}"))
-    })?;
+    let mut cfg =
+        bt_core::config::load_config_checked(&args.config, symbol_norm.as_deref(), args.live)
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("[replay] {e}"))
+            })?;
 
     if let Some(bps) = args.slippage_bps {
         cfg.trade.slippage_bps = bps.max(0.0);
@@ -1658,7 +1656,9 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load init-state if provided (overrides both --initial-balance and --balance-from)
-    let (effective_balance, init_state, init_positions_for_export) = if let Some(ref path) = args.init_state {
+    let (effective_balance, init_state, init_positions_for_export) = if let Some(ref path) =
+        args.init_state
+    {
         eprintln!("[replay] Loading init-state from {:?}", path);
         let state_file = bt_core::init_state::load(path).unwrap_or_else(|e| {
             eprintln!("[error] {e}");
@@ -1728,11 +1728,8 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Optional trade-level CSV export (one row per exit event).
     if let Some(ref path) = args.export_trades {
-        let rows = build_trade_export_rows(
-            &candles,
-            &sim.trades,
-            init_positions_for_export.as_deref(),
-        );
+        let rows =
+            build_trade_export_rows(&candles, &sim.trades, init_positions_for_export.as_deref());
         write_trade_export_csv(path, &rows)?;
         eprintln!("[replay] Trade CSV written to {}", path.display());
     }
@@ -1763,9 +1760,10 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Load base config
-    let base_cfg = bt_core::config::load_config_checked(&args.config, None, args.live).map_err(
-        |e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("[sweep] {e}")),
-    )?;
+    let base_cfg =
+        bt_core::config::load_config_checked(&args.config, None, args.live).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("[sweep] {e}"))
+        })?;
 
     // Resolve intervals: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {
@@ -2246,7 +2244,10 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        eprintln!("{}", format_tpe_gpu_completion_summary(completed_trials, gpu_elapsed));
+        eprintln!(
+            "{}",
+            format_tpe_gpu_completion_summary(completed_trials, gpu_elapsed)
+        );
 
         // Print top 5 summary
         eprintln!("\n[TPE] Top 5 results:");
@@ -2336,16 +2337,16 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     // CPU sweep path (default)
     // ------------------------------------------------------------------
     let sweep_start = Instant::now();
-    let results = bt_core::sweep::run_sweep(
-        &base_cfg,
-        &spec,
-        &candles,
-        exit_candles.as_ref(),
-        entry_candles.as_ref(),
-        funding_rates.as_ref(),
+    let results = bt_core::sweep::run_sweep(bt_core::sweep::RunSweepInput {
+        base_cfg: &base_cfg,
+        spec: &spec,
+        candles: &candles,
+        exit_candles: exit_candles.as_ref(),
+        entry_candles: entry_candles.as_ref(),
+        funding_rates: funding_rates.as_ref(),
         from_ts,
         to_ts,
-    );
+    });
     let sweep_elapsed = sweep_start.elapsed();
 
     let total_combos = results.len();

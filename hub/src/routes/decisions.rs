@@ -66,13 +66,15 @@ async fn api_decisions_list(
 
     let (data, total) = decisions::list_decisions(
         &conn,
-        q.symbol.as_deref(),
-        q.start,
-        q.end,
-        q.event_type.as_deref(),
-        q.status.as_deref(),
-        limit,
-        offset,
+        decisions::DecisionListQuery {
+            symbol: q.symbol.as_deref(),
+            start_ms: q.start,
+            end_ms: q.end,
+            event_type: q.event_type.as_deref(),
+            status: q.status.as_deref(),
+            limit,
+            offset,
+        },
     )?;
 
     Ok(Json(json!({

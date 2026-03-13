@@ -219,17 +219,18 @@ fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
 }
 
 fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
-    let mut kernel_params = decision_kernel::KernelParams::default();
-    kernel_params.allow_pyramid = cfg.trade.enable_pyramiding;
-    // Engine entry processing closes the existing position first when a reverse
-    // signal arrives; keep this behaviour by disabling canonical reverses.
-    kernel_params.allow_reverse = false;
-    // Kernel cash-check leverage uses cfg.trade.leverage (the base/fallback
-    // leverage), NOT the per-confidence-tier value.  This matches the GPU
-    // sweep kernel which computes kernel_margin_req = notional / cfg.leverage.
-    kernel_params.leverage = cfg.trade.leverage.max(1.0);
-    kernel_params.exit_params = Some(build_exit_params(cfg));
-    kernel_params
+    decision_kernel::KernelParams {
+        allow_pyramid: cfg.trade.enable_pyramiding,
+        // Engine entry processing closes the existing position first when a reverse
+        // signal arrives; keep this behaviour by disabling canonical reverses.
+        allow_reverse: false,
+        // Kernel cash-check leverage uses cfg.trade.leverage (the base/fallback
+        // leverage), NOT the per-confidence-tier value.  This matches the GPU
+        // sweep kernel which computes kernel_margin_req = notional / cfg.leverage.
+        leverage: cfg.trade.leverage.max(1.0),
+        exit_params: Some(build_exit_params(cfg)),
+        ..decision_kernel::KernelParams::default()
+    }
 }
 
 fn maker_taker_fee_rate(params: &decision_kernel::KernelParams, role: accounting::FeeRole) -> f64 {
@@ -769,18 +770,18 @@ fn make_indicator_bank(cfg: &StrategyConfig, use_stoch_rsi: bool) -> IndicatorBa
 /// * `initial_balance` - Starting equity in USD.
 /// * `lookback`        - Number of warmup bars before trading begins.
 /// * `exit_candles`    - Optional higher-resolution bar data for exit checks (e.g. 1m).
-///                       When provided, exit conditions are evaluated on sub-bars within
-///                       each indicator bar, aligning backtest exits with live behavior.
+///   When provided, exit conditions are evaluated on sub-bars within
+///   each indicator bar, aligning backtest exits with live behaviour.
 /// * `entry_candles`   - Optional higher-resolution bar data for entry checks (e.g. 15m).
-///                       When provided, entry signals are evaluated at sub-bar resolution
-///                       (indicator-bar indicators + sub-bar price) instead of indicator bars.
-///                       This matches live engine behavior where signals are checked every ~60s.
+///   When provided, entry signals are evaluated at sub-bar resolution
+///   (indicator-bar indicators + sub-bar price) instead of indicator bars.
+///   This matches live engine behaviour where signals are checked every ~60s.
 /// * `funding_rates`   - Optional per-symbol funding rate data. When provided, funding
-///                       payments are applied at hourly boundaries for open positions.
+///   payments are applied at hourly boundaries for open positions.
 /// * `from_ts`         - Optional start timestamp (ms, inclusive). Bars before this
-///                       still update indicators (warmup) but no trading occurs.
+///   still update indicators (warmup) but no trading occurs.
 /// * `to_ts`           - Optional end timestamp (ms, inclusive). Bars after this are
-///                       skipped for trading.
+///   skipped for trading.
 pub struct RunSimulationInput<'a> {
     pub candles: &'a CandleData,
     pub cfg: &'a StrategyConfig,
@@ -913,7 +914,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         let mut prev_indicator_snaps: FxHashMap<String, IndicatorSnapshot> = FxHashMap::default();
         // Current indicator snapshot per symbol after processing this indicator bar.
         // Used for signal-on-candle-close entry evaluation at the bar boundary.
-        let mut current_indicator_snaps: FxHashMap<String, IndicatorSnapshot> = FxHashMap::default();
+        let mut current_indicator_snaps: FxHashMap<String, IndicatorSnapshot> =
+            FxHashMap::default();
 
         // Per-bar entry counter (limits entries to max_entry_orders_per_loop)
         let mut entries_this_bar: usize = 0;
@@ -957,7 +959,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             state
                 .ema_slow_history
                 .entry(sym.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(snap.ema_slow);
 
             // Increment bar count (copy value so mutable borrow ends)
@@ -989,12 +991,12 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             // which handles SL, trailing, TP, glitch guard, and smart exits.
             // The kernel updates trailing_sl/tp1_taken in-place; we sync them
             // back to the engine position after each evaluation.
-            if state.positions.contains_key(sym_str) && !use_exit_sub_bar {
-                if !is_exit_cooldown_active(&state, sym_str, ts, cfg) {
-                    if let Some(exit_result) = evaluate_kernel_exit(&mut state, sym_str, &snap, ts)
-                    {
-                        apply_exit(&mut state, sym_str, &exit_result, &snap, ts, cfg);
-                    }
+            if state.positions.contains_key(sym_str)
+                && !use_exit_sub_bar
+                && !is_exit_cooldown_active(&state, sym_str, ts, cfg)
+            {
+                if let Some(exit_result) = evaluate_kernel_exit(&mut state, sym_str, &snap, ts) {
+                    apply_exit(&mut state, sym_str, &exit_result, &snap, ts, cfg);
                 }
             }
 
@@ -1083,7 +1085,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
                 ) {
                     (Ok(sym_filter), Ok(ts_filter_raw)) => {
-                        sym_str == sym_filter && ts == ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)
+                        sym_str == sym_filter
+                            && ts == ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)
                     }
                     _ => false,
                 };
@@ -1464,16 +1467,19 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                             | decision_kernel::OrderIntentKind::Add
                     )
                 });
+                let reason = format!("{:?} entry", cand.confidence);
                 if intent_open
-                    && apply_indicator_open_from_kernel(
+                    && apply_kernel_open_from_plan(
                         &mut state,
-                        &cand,
-                        size,
-                        margin_used,
-                        leverage,
-                        kernel_notional,
-                        cfg,
-                        &format!("{:?} entry", cand.confidence),
+                        ApplyOpenPlanInput {
+                            cand,
+                            size,
+                            margin_used,
+                            leverage,
+                            requested_notional_usd: kernel_notional,
+                            cfg,
+                            reason: &reason,
+                        },
                     )
                 {
                     entries_this_bar += 1;
@@ -1511,11 +1517,11 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
 
                     for sym in &exit_syms {
                         if let Some(sym_exit_idx) = ec_idx.get(sym.as_str()) {
-                            let start = match sym_exit_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t)
-                            {
-                                Ok(i) => i,
-                                Err(i) => i,
-                            };
+                            let start =
+                                match sym_exit_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t) {
+                                    Ok(i) => i,
+                                    Err(i) => i,
+                                };
 
                             if let Some(exit_bars) = ec.get(sym.as_str()) {
                                 // Use the last fully-closed indicator-bar snapshot for
@@ -1541,7 +1547,12 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                         break; // Already exited
                                     }
                                     if let Some(sub_bar) = exit_bars.get(bar_i) {
-                                        if is_exit_cooldown_active(&state, sym.as_str(), sub_ts, cfg) {
+                                        if is_exit_cooldown_active(
+                                            &state,
+                                            sym.as_str(),
+                                            sub_ts,
+                                            cfg,
+                                        ) {
                                             continue;
                                         }
                                         let sub_snap = make_exit_snap(&base_snap, sub_bar);
@@ -1597,10 +1608,11 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             let mut sub_bar_ticks: Vec<i64> = Vec::new();
             for sym in &symbols {
                 if let Some(sym_entry_idx) = enc_idx.get(sym.as_str()) {
-                    let start = match sym_entry_idx.binary_search_by_key(&sub_tick_from, |(t, _)| *t) {
-                        Ok(i) => i,
-                        Err(i) => i,
-                    };
+                    let start =
+                        match sym_entry_idx.binary_search_by_key(&sub_tick_from, |(t, _)| *t) {
+                            Ok(i) => i,
+                            Err(i) => i,
+                        };
                     for &(sub_ts, _) in &sym_entry_idx[start..] {
                         if sub_ts > sub_tick_to {
                             break;
@@ -1664,29 +1676,35 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                         sub_bar_slopes.get(sym.as_str()).copied().unwrap_or(0.0);
 
                                     // Evaluate signal (same logic as try_sub_bar_entry but collect instead)
-                                    if let Some(cand) = evaluate_sub_bar_candidate(
-                                        &state,
-                                        sym.as_str(),
-                                        &sub_snap,
-                                        cfg,
-                                        btc_bullish,
-                                        breadth_pct,
-                                        slope,
-                                        eval_ts,
-                                    ) {
+                                    if let Some(cand) =
+                                        evaluate_sub_bar_candidate(EvaluateSubBarCandidateInput {
+                                            state: &state,
+                                            sym: sym.as_str(),
+                                            snap: &sub_snap,
+                                            cfg,
+                                            btc_bullish,
+                                            breadth_pct,
+                                            ema_slow_slope_pct: slope,
+                                            ts: eval_ts,
+                                        })
+                                    {
                                         // Sub-bar path parity with indicator-bar path:
                                         // if the symbol already has a same-direction position,
                                         // route accepted signal into pyramiding checks instead
                                         // of ranking as a fresh OPEN candidate.
-                                        let existing_pos_type =
-                                            state.positions.get(sym.as_str()).map(|pos| pos.pos_type);
+                                        let existing_pos_type = state
+                                            .positions
+                                            .get(sym.as_str())
+                                            .map(|pos| pos.pos_type);
                                         if let Some(pos_type) = existing_pos_type {
                                             let desired_type = match cand.signal {
                                                 Signal::Buy => PositionType::Long,
                                                 Signal::Sell => PositionType::Short,
                                                 Signal::Neutral => continue,
                                             };
-                                            if pos_type == desired_type && cfg.trade.enable_pyramiding {
+                                            if pos_type == desired_type
+                                                && cfg.trade.enable_pyramiding
+                                            {
                                                 try_pyramid(
                                                     &mut state,
                                                     sym.as_str(),
@@ -1930,14 +1948,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             }
             let exit = ExitResult::exit("End of Backtest", terminal_price);
             let snap = make_minimal_snap(terminal_price, terminal_ts);
-            apply_exit(
-                &mut state,
-                &sym,
-                &exit,
-                &snap,
-                terminal_ts,
-                cfg,
-            );
+            apply_exit(&mut state, &sym, &exit, &snap, terminal_ts, cfg);
         }
     }
 
@@ -2659,15 +2670,17 @@ fn try_pyramid(
     }
     let _ = apply_kernel_add_from_plan(
         state,
-        symbol,
-        cfg,
-        snap,
-        confidence,
-        atr,
-        add_size,
-        add_notional,
-        add_margin,
-        ts,
+        ApplyAddPlanInput {
+            symbol,
+            cfg,
+            snap,
+            confidence,
+            atr,
+            add_size,
+            add_notional,
+            add_margin,
+            ts,
+        },
     );
 }
 
@@ -2757,16 +2770,28 @@ fn last_price_at_or_before(candles: &CandleData, symbol: &str, ts: i64) -> Optio
 
 /// Evaluate whether a sub-bar entry candidate should be collected for ranking.
 /// Returns Some(EntryCandidate) if the signal passes gates, None otherwise.
-fn evaluate_sub_bar_candidate(
-    state: &SimState,
-    sym: &str,
-    snap: &IndicatorSnapshot,
-    cfg: &StrategyConfig,
+struct EvaluateSubBarCandidateInput<'a> {
+    state: &'a SimState,
+    sym: &'a str,
+    snap: &'a IndicatorSnapshot,
+    cfg: &'a StrategyConfig,
     btc_bullish: Option<bool>,
     breadth_pct: f64,
     ema_slow_slope_pct: f64,
     ts: i64,
-) -> Option<EntryCandidate> {
+}
+
+fn evaluate_sub_bar_candidate(input: EvaluateSubBarCandidateInput<'_>) -> Option<EntryCandidate> {
+    let EvaluateSubBarCandidateInput {
+        state,
+        sym,
+        snap,
+        cfg,
+        btc_bullish,
+        breadth_pct,
+        ema_slow_slope_pct,
+        ts,
+    } = input;
     let gate_result = gates::check_gates(snap, cfg, sym, btc_bullish, ema_slow_slope_pct);
     let (mut signal, confidence, entry_adx_threshold) =
         entry::generate_signal(snap, &gate_result, cfg, ema_slow_slope_pct);
@@ -2966,7 +2991,7 @@ fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_
         return false;
     }
 
-    let desired_type = match signal {
+    match signal {
         Signal::Buy => PositionType::Long,
         Signal::Sell => PositionType::Short,
         Signal::Neutral => return false,
@@ -3090,38 +3115,52 @@ fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_
         return false;
     }
 
+    let candidate = EntryCandidate {
+        symbol: sym.to_string(),
+        signal,
+        confidence,
+        adx: snap.adx,
+        atr,
+        entry_adx_threshold,
+        snap: snap.clone(),
+        ts,
+        gate_eval: gate_eval.clone(),
+    };
+    let reason = format!("{:?} entry (sub-bar)", confidence);
     apply_kernel_open_from_plan(
         state,
-        &EntryCandidate {
-            symbol: sym.to_string(),
-            signal,
-            confidence,
-            adx: snap.adx,
-            atr,
-            entry_adx_threshold,
-            snap: snap.clone(),
-            ts,
-            gate_eval: gate_eval.clone(),
+        ApplyOpenPlanInput {
+            cand: &candidate,
+            size,
+            margin_used,
+            leverage,
+            requested_notional_usd: notional,
+            cfg,
+            reason: &reason,
         },
-        size,
-        margin_used,
-        leverage,
-        notional,
-        cfg,
-        &format!("{:?} entry (sub-bar)", confidence),
     )
 }
 
-fn apply_kernel_open_from_plan(
-    state: &mut SimState,
-    cand: &EntryCandidate,
+struct ApplyOpenPlanInput<'a> {
+    cand: &'a EntryCandidate,
     size: f64,
     margin_used: f64,
     leverage: f64,
     requested_notional_usd: f64,
-    cfg: &StrategyConfig,
-    reason: &str,
-) -> bool {
+    cfg: &'a StrategyConfig,
+    reason: &'a str,
+}
+
+fn apply_kernel_open_from_plan(state: &mut SimState, input: ApplyOpenPlanInput<'_>) -> bool {
+    let ApplyOpenPlanInput {
+        cand,
+        size,
+        margin_used,
+        leverage,
+        requested_notional_usd,
+        cfg,
+        reason,
+    } = input;
     if state.positions.contains_key(&cand.symbol) {
         return false;
     }
@@ -3193,40 +3232,30 @@ fn apply_kernel_open_from_plan(
     true
 }
 
-fn apply_indicator_open_from_kernel(
-    state: &mut SimState,
-    cand: &EntryCandidate,
-    size: f64,
-    margin_used: f64,
-    leverage: f64,
-    requested_notional_usd: f64,
-    cfg: &StrategyConfig,
-    reason: &str,
-) -> bool {
-    apply_kernel_open_from_plan(
-        state,
-        cand,
-        size,
-        margin_used,
-        leverage,
-        requested_notional_usd,
-        cfg,
-        reason,
-    )
-}
-
-fn apply_kernel_add_from_plan(
-    state: &mut SimState,
-    symbol: &str,
-    cfg: &StrategyConfig,
-    snap: &IndicatorSnapshot,
+struct ApplyAddPlanInput<'a> {
+    symbol: &'a str,
+    cfg: &'a StrategyConfig,
+    snap: &'a IndicatorSnapshot,
     confidence: Confidence,
     atr: f64,
     add_size: f64,
     add_notional: f64,
     add_margin: f64,
     ts: i64,
-) -> bool {
+}
+
+fn apply_kernel_add_from_plan(state: &mut SimState, input: ApplyAddPlanInput<'_>) -> bool {
+    let ApplyAddPlanInput {
+        symbol,
+        cfg,
+        snap,
+        confidence,
+        atr,
+        add_size,
+        add_notional,
+        add_margin,
+        ts,
+    } = input;
     let add_signal = match state.positions.get(symbol).map(|pos| pos.pos_type) {
         Some(PositionType::Long) => Signal::Buy,
         Some(PositionType::Short) => Signal::Sell,

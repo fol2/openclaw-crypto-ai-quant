@@ -19,8 +19,6 @@ fn main() {
     let hashes = drift::compute_source_hashes();
     let manifest = drift::format_manifest(&hashes);
     std::fs::write("kernels/decision_source_hashes.json", &manifest).ok();
-    let inline_hashes = drift::format_inline_json(&hashes);
-
     // Check for drift against existing generated file
     let generated_path = std::path::Path::new("kernels/generated_decision.cu");
     if let Some(embedded) = drift::read_embedded_hashes(generated_path) {
@@ -41,6 +39,7 @@ fn main() {
     // -- CUDA codegen (only when `codegen` feature is enabled) ----------------
     #[cfg(feature = "codegen")]
     {
+        let inline_hashes = drift::format_inline_json(&hashes);
         println!("cargo:rerun-if-changed=../bt-core/src/decision_kernel.rs");
         println!("cargo:rerun-if-changed=../bt-core/src/accounting.rs");
 

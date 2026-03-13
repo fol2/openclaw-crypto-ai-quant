@@ -100,7 +100,7 @@ fn generate_combinations(axes: &[SweepAxis]) -> Vec<Vec<(String, f64)>> {
                 combo
                     .iter()
                     .find(|(p, _)| *p == gate.path)
-                    .map_or(true, |(_, v)| (*v - gate.eq).abs() < 1e-9)
+                    .is_none_or(|(_, v)| (*v - gate.eq).abs() < 1e-9)
             } else {
                 true
             };
@@ -884,16 +884,28 @@ pub fn verify_overrides(
 ///
 /// `from_ts`/`to_ts` are forwarded to the simulation engine to restrict trading to a
 /// specific time window.
-pub fn run_sweep(
-    base_cfg: &StrategyConfig,
-    spec: &SweepSpec,
-    candles: &CandleData,
-    exit_candles: Option<&CandleData>,
-    entry_candles: Option<&CandleData>,
-    funding_rates: Option<&FundingRateData>,
-    from_ts: Option<i64>,
-    to_ts: Option<i64>,
-) -> Vec<SweepResult> {
+pub struct RunSweepInput<'a> {
+    pub base_cfg: &'a StrategyConfig,
+    pub spec: &'a SweepSpec,
+    pub candles: &'a CandleData,
+    pub exit_candles: Option<&'a CandleData>,
+    pub entry_candles: Option<&'a CandleData>,
+    pub funding_rates: Option<&'a FundingRateData>,
+    pub from_ts: Option<i64>,
+    pub to_ts: Option<i64>,
+}
+
+pub fn run_sweep(input: RunSweepInput<'_>) -> Vec<SweepResult> {
+    let RunSweepInput {
+        base_cfg,
+        spec,
+        candles,
+        exit_candles,
+        entry_candles,
+        funding_rates,
+        from_ts,
+        to_ts,
+    } = input;
     // Pre-resolve gates whose gate axis is not being swept.
     // If the gate axis is fixed (from base config), we can simplify:
     //   - Gate permanently satisfied → remove the gate (always expand)

@@ -61,8 +61,8 @@ pub struct GateResult {
 /// * `symbol`             - The symbol being analysed (e.g. "ETH").
 /// * `btc_bullish`        - BTC trend direction (`None` = unknown / no data).
 /// * `ema_slow_slope_pct` - Pre-computed EMA-slow slope:
-///                          `(ema_slow_now - ema_slow_prev_N) / close_now`
-///                          over the configured `slow_drift_slope_window`.
+///   `(ema_slow_now - ema_slow_prev_N) / close_now`
+///   over the configured `slow_drift_slope_window`.
 pub fn check_gates<S, C>(
     snap: &S,
     cfg: &C,

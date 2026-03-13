@@ -49,6 +49,19 @@ pub(crate) struct ExecutionMetadata {
     pub(crate) entry_adx_threshold: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProjectionInput<'a> {
+    pub(crate) symbol: &'a str,
+    pub(crate) pre_state: &'a StrategyState,
+    pub(crate) prior_position: Option<&'a PaperPositionState>,
+    pub(crate) post_state: &'a StrategyState,
+    pub(crate) intents: &'a [OrderIntent],
+    pub(crate) fills: &'a [FillEvent],
+    pub(crate) snap: &'a IndicatorSnapshot,
+    pub(crate) execution_metadata: ExecutionMetadata,
+    pub(crate) ts_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedSymbolStep {
     pub symbol: String,
@@ -223,18 +236,20 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
     let (trades_written, position_state_written, runtime_cooldowns_written) = if input.dry_run {
         (0usize, false, false)
     } else {
-        apply_decision_projection(
-            input.paper_db,
-            &symbol,
-            &pre_state,
-            prior_position.as_ref(),
-            &decision.state,
-            &decision.intents,
-            &decision.fills,
-            &snap,
-            execution_metadata,
-            exported_at_ms,
-        )?
+        {
+            let projection = ProjectionInput {
+                symbol: &symbol,
+                pre_state: &pre_state,
+                prior_position: prior_position.as_ref(),
+                post_state: &decision.state,
+                intents: &decision.intents,
+                fills: &decision.fills,
+                snap: &snap,
+                execution_metadata,
+                ts_ms: exported_at_ms,
+            };
+            apply_decision_projection(input.paper_db, &projection)?
+        }
     };
 
     Ok(PaperRunOnceReport {
@@ -251,7 +266,12 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
         ema_slow_slope_pct,
         intent_count: decision.intents.len(),
         fill_count: decision.fills.len(),
-        action_codes: action_codes_for_symbol(&symbol, &pre_state, &decision.intents, &decision.fills),
+        action_codes: action_codes_for_symbol(
+            &symbol,
+            &pre_state,
+            &decision.intents,
+            &decision.fills,
+        ),
         trades_written,
         position_state_written,
         runtime_cooldowns_written,
@@ -299,13 +319,7 @@ pub(crate) fn prepare_symbol_step(
 
     let slope_window = config.thresholds.entry.slow_drift_slope_window.max(1);
     let ema_slow_slope_pct = compute_ema_slow_slope(&ema_history, slope_window, snap.close);
-    let gate_result = gates::check_gates(
-        &snap,
-        config,
-        symbol,
-        btc_bullish,
-        ema_slow_slope_pct,
-    );
+    let gate_result = gates::check_gates(&snap, config, symbol, btc_bullish, ema_slow_slope_pct);
 
     let entry_params = build_entry_params(config);
     let entry_result = evaluate_entry(&snap, &gate_result, &entry_params, ema_slow_slope_pct);
@@ -479,17 +493,18 @@ pub(crate) fn build_kernel_params(
     leverage: f64,
     allow_pyramid: bool,
 ) -> KernelParams {
-    let mut params = KernelParams::default();
-    params.default_notional_usd = 0.0;
-    params.min_notional_usd = 0.0;
-    params.max_notional_usd = f64::MAX;
-    params.allow_pyramid = allow_pyramid;
-    params.allow_reverse = false;
-    params.leverage = leverage.max(1.0);
-    params.exit_params = Some(build_exit_params(cfg));
-    params.entry_params = Some(build_entry_params(cfg));
-    params.cooldown_params = Some(build_cooldown_params(cfg));
-    params
+    KernelParams {
+        default_notional_usd: 0.0,
+        min_notional_usd: 0.0,
+        max_notional_usd: f64::MAX,
+        allow_pyramid,
+        allow_reverse: false,
+        leverage: leverage.max(1.0),
+        exit_params: Some(build_exit_params(cfg)),
+        entry_params: Some(build_entry_params(cfg)),
+        cooldown_params: Some(build_cooldown_params(cfg)),
+        ..KernelParams::default()
+    }
 }
 
 pub(crate) fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
@@ -826,46 +841,28 @@ pub(crate) fn total_margin_used(state: &StrategyState) -> f64 {
 
 pub(crate) fn apply_decision_projection(
     db_path: &Path,
-    symbol: &str,
-    pre_state: &StrategyState,
-    prior_position: Option<&PaperPositionState>,
-    post_state: &StrategyState,
-    intents: &[OrderIntent],
-    fills: &[FillEvent],
-    snap: &IndicatorSnapshot,
-    execution_metadata: ExecutionMetadata,
-    ts_ms: i64,
+    input: &ProjectionInput<'_>,
 ) -> Result<(usize, bool, bool)> {
     let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = apply_decision_projection_with_tx(
-        &tx,
-        symbol,
-        pre_state,
-        prior_position,
-        post_state,
-        intents,
-        fills,
-        snap,
-        execution_metadata,
-        ts_ms,
-    )?;
+    let result = apply_decision_projection_with_tx(&tx, input)?;
     tx.commit()?;
     Ok(result)
 }
 
 pub(crate) fn apply_decision_projection_with_tx(
     tx: &rusqlite::Transaction<'_>,
-    symbol: &str,
-    pre_state: &StrategyState,
-    prior_position: Option<&PaperPositionState>,
-    post_state: &StrategyState,
-    intents: &[OrderIntent],
-    fills: &[FillEvent],
-    snap: &IndicatorSnapshot,
-    execution_metadata: ExecutionMetadata,
-    ts_ms: i64,
+    input: &ProjectionInput<'_>,
 ) -> Result<(usize, bool, bool)> {
+    let symbol = input.symbol;
+    let pre_state = input.pre_state;
+    let prior_position = input.prior_position;
+    let post_state = input.post_state;
+    let intents = input.intents;
+    let fills = input.fills;
+    let snap = input.snap;
+    let execution_metadata = input.execution_metadata;
+    let ts_ms = input.ts_ms;
     let ts_iso = iso_from_ms(ts_ms);
     let existing_open_trade_id = tx
         .query_row(
@@ -1028,7 +1025,7 @@ pub(crate) fn apply_decision_projection_with_tx(
     )?;
 
     if let Some((close_side, close_reason)) = latest_full_close {
-        if table_exists_in_tx(&tx, "runtime_last_closes")? {
+        if table_exists_in_tx(tx, "runtime_last_closes")? {
             tx.execute(
                 "INSERT OR REPLACE INTO runtime_last_closes (symbol, close_ts_ms, side, reason, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1096,10 +1093,7 @@ pub(crate) fn ms_to_secs(value: i64) -> f64 {
     (value as f64) / 1000.0
 }
 
-pub(crate) fn table_exists_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    table_name: &str,
-) -> Result<bool> {
+pub(crate) fn table_exists_in_tx(tx: &rusqlite::Transaction<'_>, table_name: &str) -> Result<bool> {
     let row = tx
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
@@ -1482,20 +1476,19 @@ mod tests {
             confidence: Confidence::High,
             entry_adx_threshold: 22.0,
         };
+        let projection = ProjectionInput {
+            symbol: "ETH",
+            pre_state: &pre_state,
+            prior_position: None,
+            post_state: &post_state,
+            intents: &[intent],
+            fills: &[fill],
+            snap: &sample_snap(),
+            execution_metadata: metadata,
+            ts_ms: FIXED_TS_MS,
+        };
         let (trades_written, position_state_written, runtime_cooldowns_written) =
-            apply_decision_projection(
-                &paper_db,
-                "ETH",
-                &pre_state,
-                None,
-                &post_state,
-                &[intent],
-                &[fill],
-                &sample_snap(),
-                metadata,
-                FIXED_TS_MS,
-            )
-            .unwrap();
+            apply_decision_projection(&paper_db, &projection).unwrap();
 
         assert_eq!(trades_written, 1);
         assert!(position_state_written);
@@ -1674,36 +1667,36 @@ mod tests {
             confidence: Confidence::High,
             entry_adx_threshold: 22.0,
         };
+        let prior_position = PaperPositionState {
+            symbol: "ETH".to_string(),
+            side: "long".to_string(),
+            size: 1.0,
+            entry_price: 100.0,
+            entry_atr: 5.0,
+            trailing_sl: Some(95.0),
+            confidence: "high".to_string(),
+            leverage: 3.0,
+            margin_used: 33.3,
+            adds_count: 0,
+            tp1_taken: false,
+            open_time_ms: FIXED_TS_MS - 3_600_000,
+            last_funding_time_ms: FIXED_TS_MS - 3_600_000,
+            last_add_time_ms: FIXED_TS_MS - 7_200_000,
+            entry_adx_threshold: 22.0,
+        };
+        let projection = ProjectionInput {
+            symbol: "ETH",
+            pre_state: &pre_state,
+            prior_position: Some(&prior_position),
+            post_state: &post_state,
+            intents: &[intent],
+            fills: &[fill],
+            snap: &sample_snap(),
+            execution_metadata: metadata,
+            ts_ms: FIXED_TS_MS,
+        };
 
-        apply_decision_projection(
-            &paper_db,
-            "ETH",
-            &pre_state,
-            Some(&PaperPositionState {
-                symbol: "ETH".to_string(),
-                side: "long".to_string(),
-                size: 1.0,
-                entry_price: 100.0,
-                entry_atr: 5.0,
-                trailing_sl: Some(95.0),
-                confidence: "high".to_string(),
-                leverage: 3.0,
-                margin_used: 33.3,
-                adds_count: 0,
-                tp1_taken: false,
-                open_time_ms: FIXED_TS_MS - 3_600_000,
-                last_funding_time_ms: FIXED_TS_MS - 3_600_000,
-                last_add_time_ms: FIXED_TS_MS - 7_200_000,
-                entry_adx_threshold: 22.0,
-            }),
-            &post_state,
-            &[intent],
-            &[fill],
-            &sample_snap(),
-            metadata,
-            FIXED_TS_MS,
-        )
-        .unwrap();
+        apply_decision_projection(&paper_db, &projection).unwrap();
 
         let conn = Connection::open(&paper_db).unwrap();
         let state_row = conn
@@ -1788,39 +1781,40 @@ mod tests {
             pnl_usd: 5.0,
         };
 
-        apply_decision_projection(
-            &paper_db,
-            "ETH",
-            &pre_state,
-            Some(&PaperPositionState {
-                symbol: "ETH".to_string(),
-                side: "long".to_string(),
-                size: 1.0,
-                entry_price: 100.0,
-                entry_atr: 5.0,
-                trailing_sl: Some(95.0),
-                confidence: "high".to_string(),
-                leverage: 3.0,
-                margin_used: 33.3,
-                adds_count: 0,
-                tp1_taken: false,
-                open_time_ms: FIXED_TS_MS - 3_600_000,
-                last_funding_time_ms: FIXED_TS_MS - 3_600_000,
-                last_add_time_ms: 0,
-                entry_adx_threshold: 22.0,
-            }),
-            &post_state,
-            &[intent],
-            &[fill],
-            &sample_snap(),
-            ExecutionMetadata {
+        let prior_position = PaperPositionState {
+            symbol: "ETH".to_string(),
+            side: "long".to_string(),
+            size: 1.0,
+            entry_price: 100.0,
+            entry_atr: 5.0,
+            trailing_sl: Some(95.0),
+            confidence: "high".to_string(),
+            leverage: 3.0,
+            margin_used: 33.3,
+            adds_count: 0,
+            tp1_taken: false,
+            open_time_ms: FIXED_TS_MS - 3_600_000,
+            last_funding_time_ms: FIXED_TS_MS - 3_600_000,
+            last_add_time_ms: 0,
+            entry_adx_threshold: 22.0,
+        };
+        let projection = ProjectionInput {
+            symbol: "ETH",
+            pre_state: &pre_state,
+            prior_position: Some(&prior_position),
+            post_state: &post_state,
+            intents: &[intent],
+            fills: &[fill],
+            snap: &sample_snap(),
+            execution_metadata: ExecutionMetadata {
                 signal: Signal::Sell,
                 confidence: Confidence::High,
                 entry_adx_threshold: 22.0,
             },
-            FIXED_TS_MS,
-        )
-        .unwrap();
+            ts_ms: FIXED_TS_MS,
+        };
+
+        apply_decision_projection(&paper_db, &projection).unwrap();
 
         let snapshot = crate::paper_export::export_paper_snapshot(&paper_db, FIXED_TS_MS).unwrap();
         let close_info = snapshot

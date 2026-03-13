@@ -94,13 +94,7 @@ pub fn prepare_funding_event_buffers(
 ) -> FundingEventBuffers {
     let num_bars = timestamps.len();
     let num_symbols = symbols.len();
-    let mut spans = vec![
-        GpuFundingSpan {
-            offset: 0,
-            len: 0,
-        };
-        num_bars * num_symbols
-    ];
+    let mut spans = vec![GpuFundingSpan { offset: 0, len: 0 }; num_bars * num_symbols];
     let mut flat_rates: Vec<f64> = Vec::new();
 
     if num_bars == 0 || num_symbols == 0 || funding_rates.is_empty() {
@@ -113,7 +107,11 @@ pub fn prepare_funding_event_buffers(
     const HOUR_MS: i64 = 3_600_000;
 
     for (bar_idx, &ts) in timestamps.iter().enumerate() {
-        let prev_ts = if bar_idx > 0 { timestamps[bar_idx - 1] } else { ts };
+        let prev_ts = if bar_idx > 0 {
+            timestamps[bar_idx - 1]
+        } else {
+            ts
+        };
         let first_boundary = ((prev_ts / HOUR_MS) + 1) * HOUR_MS;
         if first_boundary > ts {
             continue;

@@ -236,9 +236,8 @@ fn run_gpu_sweep_internal(
     // Compute trade bar range from time scope
     let (trade_start, trade_end) =
         raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
-    let funding_events_host = funding.map(|fr| {
-        raw_candles::prepare_funding_event_buffers(fr, &raw.timestamps, &symbols)
-    });
+    let funding_events_host =
+        funding.map(|fr| raw_candles::prepare_funding_event_buffers(fr, &raw.timestamps, &symbols));
 
     eprintln!(
         "[GPU] {} ind × {} trade = {} total combos, {} bars × {} symbols",
@@ -302,7 +301,11 @@ fn run_gpu_sweep_internal(
         Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
         Option<Arc<cudarc::driver::CudaSlice<f64>>>,
     ) = if let Some(funding_events) = funding_events_host.as_ref() {
-        let active_slots = funding_events.spans.iter().filter(|span| span.len > 0).count();
+        let active_slots = funding_events
+            .spans
+            .iter()
+            .filter(|span| span.len > 0)
+            .count();
         if funding_events.rates.is_empty() || active_slots == 0 {
             eprintln!(
                 "[GPU] Funding DB provided but no hourly settlements in scoped range; funding kernel path disabled"

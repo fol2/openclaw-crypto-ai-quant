@@ -46,4 +46,3 @@ global:
     interval: 1h
     entry_interval: ""
     exit_interval: ""
-
