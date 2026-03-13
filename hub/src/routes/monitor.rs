@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::db::pool::open_ro_pool;
 use crate::db::{candles, runtime, trading, tunnel};
 use crate::error::HubError;
+use crate::hyperliquid::HlPositionSnapshot;
 use crate::state::AppState;
 
 fn now_ms() -> i64 {
@@ -187,6 +188,55 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/metrics", get(api_prometheus))
 }
 
+fn live_position_overrides(
+    mode: &str,
+    hl_snap: Option<&crate::hyperliquid::HlAccountSnapshot>,
+) -> HashMap<String, HlPositionSnapshot> {
+    if mode != "live" {
+        return HashMap::new();
+    }
+
+    hl_snap
+        .map(|snap| {
+            snap.positions
+                .iter()
+                .map(|position| (position.symbol.clone(), position.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn live_position_override_for<'a>(
+    db_position: &trading::OpenPosition,
+    live_positions: &'a HashMap<String, HlPositionSnapshot>,
+) -> Option<&'a HlPositionSnapshot> {
+    live_positions.get(&db_position.symbol).filter(|live_position| {
+        live_position
+            .pos_type
+            .eq_ignore_ascii_case(&db_position.pos_type)
+    })
+}
+
+fn position_json(
+    position: &trading::OpenPosition,
+    live_override: Option<&HlPositionSnapshot>,
+    unreal_pnl: Option<f64>,
+) -> Value {
+    json!({
+        "symbol": position.symbol,
+        "type": position.pos_type,
+        "entry_price": live_override.map(|live| live.entry_price).unwrap_or(position.entry_price),
+        "size": live_override.map(|live| live.size).unwrap_or(position.size),
+        "leverage": live_override.map(|live| live.leverage).unwrap_or(position.leverage),
+        "margin_used": live_override.map(|live| live.margin_used).unwrap_or(position.margin_used),
+        "open_trade_id": position.open_trade_id,
+        "open_timestamp": position.open_timestamp,
+        "confidence": position.confidence,
+        "entry_atr": position.entry_atr,
+        "unreal_pnl_est": unreal_pnl,
+    })
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────
 
 async fn api_health(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -313,62 +363,6 @@ async fn api_snapshot(
     let last_trades = trading::last_trades_by_symbol(&conn, &merged)?;
     let last_intents = trading::last_intents_by_symbol(&conn, &merged)?;
 
-    // Get mids from sidecar
-    let mids_snap = state.sidecar.get_mids(&merged).await.ok();
-    let mids: HashMap<String, f64> = mids_snap
-        .as_ref()
-        .map(|s| s.mids.clone())
-        .unwrap_or_default();
-
-    // Build symbols output with mid prices and positions
-    let fee_rate = state.config.fee_rate;
-    let mut unreal_total = 0.0_f64;
-    let mut close_fee_total = 0.0_f64;
-    let mut margin_used_total = 0.0_f64;
-    let pos_map: HashMap<String, &trading::OpenPosition> =
-        positions.iter().map(|p| (p.symbol.clone(), p)).collect();
-
-    let mut symbols_out: Vec<Value> = Vec::new();
-    for sym in &merged {
-        let mid = mids.get(sym).copied();
-        let pos = pos_map.get(sym).copied();
-        let mut unreal_pnl: Option<f64> = None;
-
-        if let (Some(p), Some(m)) = (pos, mid) {
-            let u = if p.pos_type == "LONG" {
-                (m - p.entry_price) * p.size
-            } else {
-                (p.entry_price - m) * p.size
-            };
-            unreal_pnl = Some(u);
-            unreal_total += u;
-            close_fee_total += p.size.abs() * m * fee_rate;
-            let lev = p.leverage.max(0.01);
-            margin_used_total += p.size.abs() * m / lev;
-        }
-
-        symbols_out.push(json!({
-            "symbol": sym,
-            "mid": mid,
-            "last_signal": last_signals.get(sym),
-            "last_trade": last_trades.get(sym),
-            "last_intent": last_intents.get(sym),
-            "position": pos.map(|p| json!({
-                "symbol": p.symbol,
-                "type": p.pos_type,
-                "entry_price": p.entry_price,
-                "size": p.size,
-                "leverage": p.leverage,
-                "margin_used": p.margin_used,
-                "open_trade_id": p.open_trade_id,
-                "open_timestamp": p.open_timestamp,
-                "confidence": p.confidence,
-                "entry_atr": p.entry_atr,
-                "unreal_pnl_est": unreal_pnl,
-            })),
-        }));
-    }
-
     // Balance — prefer HL API snapshot for live mode, fall back to DB.
     let bal = trading::latest_balance(&conn)?;
     let db_realised_usd = bal.as_ref().map(|(b, _)| *b);
@@ -389,6 +383,70 @@ async fn api_snapshot(
     } else {
         None
     };
+
+    // Get mids from sidecar
+    let mids_snap = state.sidecar.get_mids(&merged).await.ok();
+    let mids: HashMap<String, f64> = mids_snap
+        .as_ref()
+        .map(|s| s.mids.clone())
+        .unwrap_or_default();
+
+    // Build symbols output with mid prices and positions
+    let fee_rate = state.config.fee_rate;
+    let mut unreal_total = 0.0_f64;
+    let mut close_fee_total = 0.0_f64;
+    let mut margin_used_total = 0.0_f64;
+    let pos_map: HashMap<String, &trading::OpenPosition> =
+        positions.iter().map(|p| (p.symbol.clone(), p)).collect();
+    let live_positions = live_position_overrides(mode.as_str(), hl_snap.as_ref());
+
+    let mut symbols_out: Vec<Value> = Vec::new();
+    for sym in &merged {
+        let mid = mids.get(sym).copied();
+        let pos = pos_map.get(sym).copied();
+        let mut unreal_pnl: Option<f64> = None;
+
+        if let (Some(p), Some(m)) = (pos, mid) {
+            let live_override = live_position_override_for(p, &live_positions);
+            let entry_price = live_override.map(|live| live.entry_price).unwrap_or(p.entry_price);
+            let size = live_override.map(|live| live.size).unwrap_or(p.size);
+            let u = if p.pos_type == "LONG" {
+                (m - entry_price) * size
+            } else {
+                (entry_price - m) * size
+            };
+            unreal_pnl = Some(u);
+            unreal_total += u;
+            close_fee_total += size.abs() * m * fee_rate;
+            let lev = live_override
+                .map(|live| live.leverage)
+                .unwrap_or(p.leverage)
+                .max(0.01);
+            margin_used_total += size.abs() * m / lev;
+        }
+
+        let position_out = pos.map(|p| {
+            let live_override = live_position_override_for(p, &live_positions);
+            position_json(p, live_override, unreal_pnl)
+        });
+
+        symbols_out.push(json!({
+            "symbol": sym,
+            "mid": mid,
+            "last_signal": last_signals.get(sym),
+            "last_trade": last_trades.get(sym),
+            "last_intent": last_intents.get(sym),
+            "position": position_out,
+        }));
+    }
+
+    let open_positions_out = positions
+        .iter()
+        .map(|position| {
+            let live_override = live_position_override_for(position, &live_positions);
+            position_json(position, live_override, None)
+        })
+        .collect::<Vec<_>>();
 
     let (realised_usd, equity_est, unreal_pnl_out, margin_used_out, balance_source) =
         if let Some(ref hl) = hl_snap {
@@ -509,7 +567,7 @@ async fn api_snapshot(
             "drawdown_pct": all_time.drawdown_pct,
         }),
         "symbols": symbols_out,
-        "open_positions": positions,
+        "open_positions": open_positions_out,
         "recent": {
             "trades": recent_trades,
             "signals": recent_signals,
@@ -602,27 +660,32 @@ async fn api_marks(
         .ok()
         .and_then(|s| s.mids.get(&sym).copied());
 
+    let hl_snap = if mode == "live" {
+        let guard = state.hl_snapshot.read().await;
+        guard.as_ref().and_then(|cached| {
+            if cached.fetched_at.elapsed().as_secs() <= 60 {
+                Some(cached.snapshot.clone())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    let live_positions = live_position_overrides(mode.as_str(), hl_snap.as_ref());
+
     let position_json = pos.as_ref().map(|p| {
+        let live_override = live_position_override_for(p, &live_positions);
+        let entry_price = live_override.map(|live| live.entry_price).unwrap_or(p.entry_price);
+        let size = live_override.map(|live| live.size).unwrap_or(p.size);
         let unreal_pnl = mid.map(|m| {
             if p.pos_type == "LONG" {
-                (m - p.entry_price) * p.size
+                (m - entry_price) * size
             } else {
-                (p.entry_price - m) * p.size
+                (entry_price - m) * size
             }
         });
-        json!({
-            "symbol": p.symbol,
-            "type": p.pos_type,
-            "entry_price": p.entry_price,
-            "size": p.size,
-            "leverage": p.leverage,
-            "margin_used": p.margin_used,
-            "open_trade_id": p.open_trade_id,
-            "open_timestamp": p.open_timestamp,
-            "confidence": p.confidence,
-            "entry_atr": p.entry_atr,
-            "unreal_pnl_est": unreal_pnl,
-        })
+        position_json(p, live_override, unreal_pnl)
     });
 
     Ok(Json(json!({
