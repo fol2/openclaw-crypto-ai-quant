@@ -94,11 +94,16 @@
     journeyLoading = true;
     try {
       const off = reset ? 0 : journeyOffset;
-      const res = await getJourneys(appState.mode, 50, off);
+      const sym = focusSym.trim().toUpperCase() || undefined;
+      const res = await getJourneys(appState.mode, 50, off, sym);
       const batch = res.journeys || [];
       if (reset) {
         journeys = batch;
         journeyOffset = batch.length;
+        selectedJourney = null;
+        journeyCandles = [];
+        journeyMarks = [];
+        journeyTunnelPoints = [];
       } else {
         journeys = [...journeys, ...batch];
         journeyOffset += batch.length;
@@ -493,6 +498,20 @@
   function pnlClass(v: number | null | undefined): string {
     if (v === null || v === undefined) return '';
     return v >= 0 ? 'green' : 'red';
+  }
+
+  function entryActionLabel(action: string | null | undefined): string {
+    const value = String(action || '').toUpperCase();
+    if (value === 'REDUCE') return 'PARTIAL CLOSE';
+    if (value === 'CLOSE') return 'FULL CLOSE';
+    return value || '\u2014';
+  }
+
+  function journeySourceLabel(source: string | null | undefined): string {
+    const value = String(source || '').toLowerCase();
+    if (value === 'manual') return 'MANUAL';
+    if (value === 'mixed') return 'MANUAL+AUTO';
+    return '';
   }
 
   async function refresh() {
@@ -1545,7 +1564,10 @@
               <h4>Entries</h4>
               {#each marks.entries as e}
                 <div class="kv">
-                  <span class="k">{e.action}</span>
+                  <span class="k">
+                    {entryActionLabel(e.action)}
+                    {#if e.source === 'manual'}<span class="trade-source-badge">MANUAL</span>{/if}
+                  </span>
                   <span class="v mono">@ {fmtNum(e.price, 6)} &times; {fmtNum(e.size, 4)}</span>
                 </div>
               {/each}
@@ -1585,6 +1607,9 @@
                 <span class="journey-chart-label">
                   {selectedJourney.symbol}
                   <span class="badge" class:badge-long={selectedJourney.type === 'LONG'} class:badge-short={selectedJourney.type !== 'LONG'}>{selectedJourney.type}</span>
+                  {#if journeySourceLabel(selectedJourney.source)}
+                    <span class="journey-source-badge" class:mixed={selectedJourney.source === 'mixed'}>{journeySourceLabel(selectedJourney.source)}</span>
+                  {/if}
                 </span>
                 <div class="journey-iv-bar">
                   {#each INTERVALS as iv}
@@ -1637,6 +1662,9 @@
                 <div class="jc-top">
                   <span class="jc-sym">{j.symbol}</span>
                   <span class="badge" class:badge-long={j.type === 'LONG'} class:badge-short={j.type !== 'LONG'}>{j.type}</span>
+                  {#if journeySourceLabel(j.source)}
+                    <span class="journey-source-badge" class:mixed={j.source === 'mixed'}>{journeySourceLabel(j.source)}</span>
+                  {/if}
                   {#if j.is_open}<span class="jc-open-dot" title="Still open"></span>{/if}
                   <span class="jc-age dim">{sigAge(j.close_ts || j.open_ts)}</span>
                   <span class="jc-dur dim">{fmtDuration(dur)}</span>
@@ -2498,6 +2526,18 @@
   }
   .kv .k { color: var(--text-muted); }
   .kv .v { font-weight: 500; }
+  .trade-source-badge {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #ffd38a;
+    background: rgba(245, 158, 11, 0.16);
+  }
 
   .empty-focus {
     display: flex;
@@ -2721,6 +2761,19 @@
   }
   .badge-long { background: rgba(59,130,246,0.2); color: #93c5fd; }
   .badge-short { background: rgba(245,158,11,0.2); color: #fcd34d; }
+  .journey-source-badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    color: #ffd38a;
+    background: rgba(245, 158, 11, 0.16);
+  }
+  .journey-source-badge.mixed {
+    color: #bfdbfe;
+    background: rgba(59, 130, 246, 0.16);
+  }
   .jc-open-dot {
     width: 6px;
     height: 6px;

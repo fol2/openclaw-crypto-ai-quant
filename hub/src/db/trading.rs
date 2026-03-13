@@ -128,6 +128,8 @@ pub struct TradeJourney {
     pub symbol: String,
     #[serde(rename = "type")]
     pub pos_type: String, // LONG / SHORT
+    pub source: String, // strategy / manual / mixed
+    pub manual_leg_count: usize,
     pub open_ts: String,
     pub close_ts: Option<String>,
     pub entry_price: f64,
@@ -144,6 +146,7 @@ pub struct JourneyLeg {
     pub id: i64,
     pub timestamp: String,
     pub action: String,
+    pub source: String,
     pub price: f64,
     pub size: f64,
     pub pnl: f64,
@@ -582,6 +585,7 @@ pub struct TradeEntry {
     pub action: Option<String>,
     #[serde(rename = "type")]
     pub trade_type: Option<String>,
+    pub source: String,
     pub price: Option<f64>,
     pub size: Option<f64>,
     pub confidence: Option<String>,
@@ -603,18 +607,21 @@ pub fn position_entries(
     open_trade_id: i64,
 ) -> Result<Vec<TradeEntry>, HubError> {
     let mut stmt = conn.prepare(
-        "SELECT id, timestamp, action, type, price, size, confidence
+        "SELECT id, timestamp, action, type, price, size, confidence, reason, meta_json
          FROM trades
-         WHERE symbol = ? AND id >= ? AND action IN ('OPEN', 'ADD')
+         WHERE symbol = ? AND id >= ? AND action IN ('OPEN', 'ADD', 'REDUCE')
          ORDER BY id ASC",
     )?;
     let rows = stmt
         .query_map(params![symbol, open_trade_id], |row| {
+            let reason = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+            let meta_json = row.get::<_, Option<String>>(8)?.unwrap_or_default();
             Ok(TradeEntry {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
                 action: row.get(2)?,
                 trade_type: row.get(3)?,
+                source: trade_source(&reason, &meta_json).to_string(),
                 price: row.get(4)?,
                 size: row.get(5)?,
                 confidence: row.get(6)?,
@@ -663,6 +670,60 @@ fn enrich_entry_reason(reason: &str, meta_json: &str) -> String {
     } else {
         format!("{mode} Entry ({})", mods.join("+"))
     }
+}
+
+fn trade_source(reason: &str, meta_json: &str) -> &'static str {
+    let reason_norm = reason.trim().to_ascii_lowercase();
+    if matches!(
+        reason_norm.as_str(),
+        "manual" | "manual_trade" | "manual trade"
+    ) {
+        return "manual";
+    }
+    if meta_json.is_empty() {
+        return "strategy";
+    }
+    let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) else {
+        return "strategy";
+    };
+
+    let is_manual_intent = |pointer: &str| {
+        meta.pointer(pointer)
+            .and_then(|value| value.as_str())
+            .map(|value| value.starts_with("manual_"))
+            .unwrap_or(false)
+    };
+
+    if is_manual_intent("/intent_id") || is_manual_intent("/oms/intent_id") {
+        return "manual";
+    }
+    if meta
+        .pointer("/source")
+        .and_then(|value| value.as_str())
+        .map(|value| value.eq_ignore_ascii_case("manual_trade"))
+        .unwrap_or(false)
+    {
+        return "manual";
+    }
+    if meta
+        .pointer("/oms/matched_via")
+        .and_then(|value| value.as_str())
+        .map(|value| value.eq_ignore_ascii_case("manual_orphan"))
+        .unwrap_or(false)
+    {
+        return "manual";
+    }
+    "strategy"
+}
+
+fn merged_journey_source(current: &str, leg_source: &str) -> String {
+    if current.is_empty() || current == leg_source {
+        return leg_source.to_string();
+    }
+    if current == "mixed" {
+        return "mixed".to_string();
+    }
+    "mixed".to_string()
 }
 
 /// Reconstruct trade journeys (OPEN→…→CLOSE lifecycles) from the trades table.
@@ -745,6 +806,7 @@ pub fn trade_journeys(
         rows
     {
         let reason = enrich_entry_reason(&reason, &meta_json);
+        let source = trade_source(&reason, &meta_json).to_string();
         let action_upper = action.to_uppercase();
         let sym_upper = symbol.to_uppercase();
 
@@ -761,6 +823,8 @@ pub fn trade_journeys(
                             id,
                             symbol: sym_upper,
                             pos_type: pos_type.to_uppercase(),
+                            source: source.clone(),
+                            manual_leg_count: usize::from(source == "manual"),
                             open_ts: ts.clone(),
                             close_ts: None,
                             entry_price: price,
@@ -773,6 +837,7 @@ pub fn trade_journeys(
                                 id,
                                 timestamp: ts,
                                 action: action_upper,
+                                source: source.clone(),
                                 price,
                                 size,
                                 pnl,
@@ -796,12 +861,17 @@ pub fn trade_journeys(
                     if new_size > ip.journey.peak_size {
                         ip.journey.peak_size = new_size;
                     }
+                    ip.journey.source = merged_journey_source(&ip.journey.source, &source);
+                    if source == "manual" {
+                        ip.journey.manual_leg_count += 1;
+                    }
                     ip.journey.total_pnl += pnl;
                     ip.journey.total_fees += fee.abs();
                     ip.journey.legs.push(JourneyLeg {
                         id,
                         timestamp: ts,
                         action: action_upper,
+                        source: source.clone(),
                         price,
                         size,
                         pnl,
@@ -814,12 +884,17 @@ pub fn trade_journeys(
             "REDUCE" => {
                 if let Some(ip) = in_progress.get_mut(&sym_upper) {
                     ip.current_size = (ip.current_size - size).max(0.0);
+                    ip.journey.source = merged_journey_source(&ip.journey.source, &source);
+                    if source == "manual" {
+                        ip.journey.manual_leg_count += 1;
+                    }
                     ip.journey.total_pnl += pnl;
                     ip.journey.total_fees += fee.abs();
                     ip.journey.legs.push(JourneyLeg {
                         id,
                         timestamp: ts,
                         action: action_upper,
+                        source: source.clone(),
                         price,
                         size,
                         pnl,
@@ -831,6 +906,10 @@ pub fn trade_journeys(
             "CLOSE" => {
                 if let Some(ip) = in_progress.remove(&sym_upper) {
                     let mut j = ip.journey;
+                    j.source = merged_journey_source(&j.source, &source);
+                    if source == "manual" {
+                        j.manual_leg_count += 1;
+                    }
                     j.close_ts = Some(ts.clone());
                     j.exit_price = Some(price);
                     j.is_open = false;
@@ -840,6 +919,7 @@ pub fn trade_journeys(
                         id,
                         timestamp: ts,
                         action: action_upper,
+                        source,
                         price,
                         size,
                         pnl,
@@ -875,6 +955,169 @@ pub fn trade_journeys(
     }
     let end = (start + limit as usize).min(result.len());
     Ok(result[start..end].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_trades_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                type TEXT,
+                action TEXT,
+                price REAL,
+                size REAL,
+                notional REAL,
+                reason TEXT,
+                confidence TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                fee_token TEXT,
+                fee_rate REAL,
+                balance REAL,
+                entry_atr REAL,
+                leverage REAL,
+                margin_used REAL,
+                fill_hash TEXT,
+                fill_tid INTEGER,
+                meta_json TEXT,
+                run_fingerprint TEXT,
+                reason_code TEXT
+            );",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn position_entries_include_partial_close_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+        conn.execute(
+            "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                "2026-03-01T00:00:00Z",
+                "BTC",
+                "LONG",
+                "OPEN",
+                100_000.0,
+                0.1,
+                "Signal Trigger",
+                "high",
+                0.0,
+                0.0,
+                "{}",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                "2026-03-01T00:05:00Z",
+                "BTC",
+                "LONG",
+                "REDUCE",
+                101_000.0,
+                0.04,
+                "Take Profit (Partial)",
+                "n/a",
+                40.0,
+                0.5,
+                r#"{"oms":{"intent_id":"manual_test_partial"}}"#,
+            ],
+        )
+        .unwrap();
+
+        let entries = position_entries(&conn, "BTC", 1).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].action.as_deref(), Some("REDUCE"));
+        assert_eq!(entries[1].source, "manual");
+    }
+
+    #[test]
+    fn trade_journeys_mark_mixed_manual_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+
+        let rows = [
+            (
+                "2026-03-01T00:00:00Z",
+                "ETH",
+                "LONG",
+                "OPEN",
+                2_000.0,
+                1.0,
+                "Signal Trigger",
+                "medium",
+                0.0,
+                0.5,
+                "{}",
+            ),
+            (
+                "2026-03-01T00:10:00Z",
+                "ETH",
+                "LONG",
+                "ADD",
+                2_010.0,
+                0.5,
+                "LIVE_FILL Open Long",
+                "MANUAL",
+                0.0,
+                0.25,
+                r#"{"oms":{"intent_id":"manual_fill_add"}}"#,
+            ),
+            (
+                "2026-03-01T00:20:00Z",
+                "ETH",
+                "LONG",
+                "REDUCE",
+                2_030.0,
+                0.4,
+                "LIVE_FILL Close Long",
+                "MANUAL",
+                12.0,
+                0.2,
+                r#"{"oms":{"intent_id":"manual_fill_reduce"}}"#,
+            ),
+            (
+                "2026-03-01T00:30:00Z",
+                "ETH",
+                "LONG",
+                "CLOSE",
+                2_050.0,
+                1.1,
+                "Trailing Stop",
+                "n/a",
+                20.0,
+                0.6,
+                "{}",
+            ),
+        ];
+
+        for row in rows {
+            conn.execute(
+                "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+                    row.10
+                ],
+            )
+            .unwrap();
+        }
+
+        let journeys = trade_journeys(&conn, 10, 0, Some("ETH")).unwrap();
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0].source, "mixed");
+        assert_eq!(journeys[0].manual_leg_count, 2);
+        assert_eq!(journeys[0].legs[1].source, "manual");
+        assert_eq!(journeys[0].legs[2].source, "manual");
+    }
 }
 
 // ── Daily Metrics ────────────────────────────────────────────────────────
