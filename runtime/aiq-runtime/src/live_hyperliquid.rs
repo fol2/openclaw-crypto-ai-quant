@@ -70,6 +70,64 @@ pub struct OrderRequest {
     pub order_type: LiveOrderType,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClearinghouseStateResponse {
+    #[serde(rename = "marginSummary")]
+    margin_summary: MarginSummary,
+    withdrawable: Option<StringOrNumber>,
+    #[serde(rename = "assetPositions", default)]
+    asset_positions: Vec<AssetPosition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarginSummary {
+    #[serde(rename = "accountValue")]
+    account_value: StringOrNumber,
+    #[serde(rename = "totalMarginUsed")]
+    total_margin_used: StringOrNumber,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetPosition {
+    position: PositionPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct PositionPayload {
+    coin: String,
+    #[serde(rename = "entryPx")]
+    entry_px: Option<StringOrNumber>,
+    leverage: Option<LeveragePayload>,
+    #[serde(rename = "marginUsed")]
+    margin_used: Option<StringOrNumber>,
+    szi: StringOrNumber,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeveragePayload {
+    value: Option<StringOrNumber>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StringOrNumber {
+    String(String),
+    Number(f64),
+    Integer(i64),
+    Unsigned(u64),
+}
+
+impl StringOrNumber {
+    fn parse_f64(&self, field: &str) -> Result<f64> {
+        match self {
+            Self::String(raw) => parse_number(raw, field),
+            Self::Number(raw) => Ok(*raw),
+            Self::Integer(raw) => Ok(*raw as f64),
+            Self::Unsigned(raw) => Ok(*raw as f64),
+        }
+    }
+}
+
 pub struct HyperliquidClient {
     client: Client,
     base_url: Url,
@@ -115,33 +173,20 @@ impl HyperliquidClient {
     }
 
     pub fn account_snapshot(&self) -> Result<HyperliquidAccountSnapshot> {
-        #[derive(Debug, Deserialize)]
-        struct MarginSummary {
-            #[serde(rename = "accountValue")]
-            account_value: String,
-            #[serde(rename = "totalMarginUsed")]
-            total_margin_used: String,
-        }
-
-        #[derive(Debug, Deserialize)]
-        struct Response {
-            #[serde(rename = "marginSummary")]
-            margin_summary: MarginSummary,
-            withdrawable: Option<String>,
-        }
-
-        let response: Response =
+        let response: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        let account_value_usd =
-            parse_number(&response.margin_summary.account_value, "accountValue")?;
-        let total_margin_used_usd = parse_number(
-            &response.margin_summary.total_margin_used,
-            "totalMarginUsed",
-        )?;
+        let account_value_usd = response
+            .margin_summary
+            .account_value
+            .parse_f64("accountValue")?;
+        let total_margin_used_usd = response
+            .margin_summary
+            .total_margin_used
+            .parse_f64("totalMarginUsed")?;
         let withdrawable_usd = response
             .withdrawable
-            .as_deref()
-            .map(|value| parse_number(value, "withdrawable"))
+            .as_ref()
+            .map(|value| value.parse_f64("withdrawable"))
             .transpose()?
             .unwrap_or(account_value_usd - total_margin_used_usd);
         Ok(HyperliquidAccountSnapshot {
@@ -152,91 +197,19 @@ impl HyperliquidClient {
     }
 
     pub fn positions(&self) -> Result<Vec<HyperliquidPosition>> {
-        #[derive(Debug, Deserialize)]
-        struct Response {
-            #[serde(rename = "assetPositions", default)]
-            asset_positions: Vec<AssetPosition>,
-        }
-
-        #[derive(Debug, Deserialize)]
-        struct AssetPosition {
-            position: PositionPayload,
-        }
-
-        #[derive(Debug, Deserialize)]
-        struct PositionPayload {
-            coin: String,
-            #[serde(rename = "entryPx")]
-            entry_px: Option<String>,
-            leverage: Option<LeveragePayload>,
-            #[serde(rename = "marginUsed")]
-            margin_used: Option<String>,
-            szi: String,
-        }
-
-        #[derive(Debug, Deserialize)]
-        struct LeveragePayload {
-            value: Option<String>,
-        }
-
-        let response: Response =
+        let response: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        let mut positions = Vec::new();
-        for asset in response.asset_positions {
-            let symbol = asset.position.coin.trim().to_ascii_uppercase();
-            if symbol.is_empty() {
-                continue;
-            }
-            let signed_size = parse_number(&asset.position.szi, "szi")?;
-            if signed_size.abs() <= f64::EPSILON {
-                continue;
-            }
-            let entry_price = asset
-                .position
-                .entry_px
-                .as_deref()
-                .map(|value| parse_number(value, "entryPx"))
-                .transpose()?
-                .unwrap_or(0.0);
-            let leverage = asset
-                .position
-                .leverage
-                .as_ref()
-                .and_then(|payload| payload.value.as_deref())
-                .map(|value| parse_number(value, "leverage"))
-                .transpose()?
-                .unwrap_or(1.0)
-                .max(1.0);
-            let margin_used = asset
-                .position
-                .margin_used
-                .as_deref()
-                .map(|value| parse_number(value, "marginUsed"))
-                .transpose()?
-                .unwrap_or(0.0);
-            positions.push(HyperliquidPosition {
-                symbol,
-                pos_type: if signed_size > 0.0 {
-                    "LONG".to_string()
-                } else {
-                    "SHORT".to_string()
-                },
-                size: signed_size.abs(),
-                entry_price,
-                leverage,
-                margin_used,
-            });
-        }
-        Ok(positions)
+        parse_positions(response)
     }
 
     pub fn all_mids(&self) -> Result<HashMap<String, f64>> {
-        let response: HashMap<String, String> =
+        let response: HashMap<String, StringOrNumber> =
             self.info("allMids", serde_json::Value::Object(Default::default()))?;
         response
             .into_iter()
             .map(|(symbol, value)| {
-                parse_number(&value, "midPx")
+                value
+                    .parse_f64("midPx")
                     .map(|parsed| (symbol.trim().to_ascii_uppercase(), parsed))
             })
             .collect()
@@ -767,6 +740,56 @@ fn parse_number(raw: &str, field: &str) -> Result<f64> {
         .with_context(|| format!("failed to parse Hyperliquid numeric field {field}: {raw}"))
 }
 
+fn parse_positions(response: ClearinghouseStateResponse) -> Result<Vec<HyperliquidPosition>> {
+    let mut positions = Vec::new();
+    for asset in response.asset_positions {
+        let symbol = asset.position.coin.trim().to_ascii_uppercase();
+        if symbol.is_empty() {
+            continue;
+        }
+        let signed_size = asset.position.szi.parse_f64("szi")?;
+        if signed_size.abs() <= f64::EPSILON {
+            continue;
+        }
+        let entry_price = asset
+            .position
+            .entry_px
+            .as_ref()
+            .map(|value| value.parse_f64("entryPx"))
+            .transpose()?
+            .unwrap_or(0.0);
+        let leverage = asset
+            .position
+            .leverage
+            .as_ref()
+            .and_then(|payload| payload.value.as_ref())
+            .map(|value| value.parse_f64("leverage"))
+            .transpose()?
+            .unwrap_or(1.0)
+            .max(1.0);
+        let margin_used = asset
+            .position
+            .margin_used
+            .as_ref()
+            .map(|value| value.parse_f64("marginUsed"))
+            .transpose()?
+            .unwrap_or(0.0);
+        positions.push(HyperliquidPosition {
+            symbol,
+            pos_type: if signed_size > 0.0 {
+                "LONG".to_string()
+            } else {
+                "SHORT".to_string()
+            },
+            size: signed_size.abs(),
+            entry_price,
+            leverage,
+            margin_used,
+        });
+    }
+    Ok(positions)
+}
+
 fn map_value(entries: Vec<(&str, Value)>) -> Value {
     Value::Map(
         entries
@@ -940,5 +963,46 @@ mod tests {
             extract_exchange_order_id(&response).as_deref(),
             Some("123456789")
         );
+    }
+
+    #[test]
+    fn clearinghouse_positions_accept_numeric_info_fields() {
+        let payload = json!({
+            "marginSummary": {
+                "accountValue": "223.843819",
+                "totalMarginUsed": "175.36588"
+            },
+            "withdrawable": 48.477939,
+            "assetPositions": [
+                {
+                    "position": {
+                        "coin": "HYPE",
+                        "entryPx": "35.7393",
+                        "marginUsed": "75.309375",
+                        "leverage": { "value": 4 },
+                        "szi": "-8.31"
+                    }
+                },
+                {
+                    "position": {
+                        "coin": "DOGE",
+                        "entryPx": 0.094602,
+                        "marginUsed": 41.451039,
+                        "leverage": { "value": "4" },
+                        "szi": "1692.0"
+                    }
+                }
+            ]
+        });
+
+        let response: ClearinghouseStateResponse = serde_json::from_value(payload).unwrap();
+        let positions = parse_positions(response).unwrap();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].symbol, "HYPE");
+        assert_eq!(positions[0].pos_type, "SHORT");
+        assert!((positions[0].size - 8.31).abs() < 1e-9);
+        assert!((positions[0].leverage - 4.0).abs() < 1e-9);
+        assert!((positions[1].entry_price - 0.094602).abs() < 1e-9);
+        assert!((positions[1].margin_used - 41.451039).abs() < 1e-9);
     }
 }
