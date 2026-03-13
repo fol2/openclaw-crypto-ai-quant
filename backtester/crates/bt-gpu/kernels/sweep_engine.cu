@@ -220,8 +220,10 @@ struct GpuComboConfig {
     unsigned int ave_enabled;
     float tp_mult_strong;  float tp_mult_weak;
     unsigned int entry_cooldown_s;  unsigned int exit_cooldown_s;
+    unsigned int signal_mode_behaviour_mask;
+    unsigned int signal_mode_order_0;  unsigned int signal_mode_order_1;  unsigned int signal_mode_order_2;
 };
-static_assert(sizeof(GpuComboConfig) == 564, "GpuComboConfig layout mismatch");
+static_assert(sizeof(GpuComboConfig) == 580, "GpuComboConfig layout mismatch");
 
 struct GpuComboState {
     double balance;  unsigned int num_open;  unsigned int entries_this_bar;

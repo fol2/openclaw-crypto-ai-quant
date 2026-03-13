@@ -7,7 +7,7 @@ use crate::behaviour::{
 use crate::config::StrategyConfig;
 use bt_signals::behaviour::{
     BehaviourDescriptor, BehaviourGroupPlan, DEFAULT_GATE_BEHAVIOURS,
-    DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS, DEFAULT_SIGNAL_MODE_BEHAVIOURS,
+    DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS,
 };
 
 const DISABLED_SENTINEL: f64 = 1.0e12;
@@ -250,11 +250,6 @@ fn validate_gpu_behaviour_contract(
         &behaviour_plan.gates,
     )?;
     validate_canonical_order(
-        "signal_modes",
-        ordered_ids(&DEFAULT_SIGNAL_MODE_BEHAVIOURS),
-        &behaviour_plan.signal_modes,
-    )?;
-    validate_canonical_order(
         "signal_confidence",
         ordered_ids(&DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS),
         &behaviour_plan.signal_confidence,
@@ -301,7 +296,11 @@ fn validate_gpu_behaviour_contract(
     validate_supported_disable(
         "signal_modes",
         &behaviour_plan.signal_modes,
-        &["signal.mode.pullback", "signal.mode.slow_drift"],
+        &[
+            "signal.mode.standard_trend",
+            "signal.mode.pullback",
+            "signal.mode.slow_drift",
+        ],
     )?;
     validate_supported_disable(
         "signal_confidence",
@@ -623,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gpu_execution_config_rejects_unsupported_standard_mode_disable() {
+    fn resolve_gpu_execution_config_accepts_standard_mode_disable() {
         let profile = "gpu_no_standard";
         let mut cfg = StrategyConfig::default();
         cfg.runtime.profile = profile.to_string();
@@ -641,13 +640,36 @@ mod tests {
             },
         );
 
-        let err = resolve_gpu_execution_config(&cfg, None).unwrap_err();
-        assert!(matches!(
-            err,
-            GpuExecutionContractError::UnsupportedDisable {
-                group: "signal_modes",
-                ..
-            }
-        ));
+        let resolved =
+            resolve_gpu_execution_config(&cfg, None).expect("signal mode disable should resolve");
+        assert_eq!(resolved.active_profile, profile);
+    }
+
+    #[test]
+    fn resolve_gpu_execution_config_accepts_signal_mode_reorder() {
+        let profile = "gpu_signal_reorder";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        cfg.pipeline.profiles.insert(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    signal_modes: BehaviourGroupConfig {
+                        order: vec![
+                            "signal.mode.slow_drift".to_string(),
+                            "signal.mode.standard_trend".to_string(),
+                            "signal.mode.pullback".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        );
+
+        let resolved =
+            resolve_gpu_execution_config(&cfg, None).expect("signal mode reorder should resolve");
+        assert_eq!(resolved.active_profile, profile);
     }
 }

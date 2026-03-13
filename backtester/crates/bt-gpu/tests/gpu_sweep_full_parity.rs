@@ -342,6 +342,10 @@ fn random_gpu_combo_config(rng: &mut StdRng) -> GpuComboConfig {
         tp_mult_weak: rng.gen_range(2.0_f32..5.0),
         entry_cooldown_s: rng.gen_range(0_u32..61),
         exit_cooldown_s: rng.gen_range(0_u32..61),
+        signal_mode_behaviour_mask: bt_gpu::buffers::GPU_SIGNAL_MODE_MASK_ALL,
+        signal_mode_order_0: bt_gpu::buffers::GPU_SIGNAL_MODE_ID_STANDARD_TREND,
+        signal_mode_order_1: bt_gpu::buffers::GPU_SIGNAL_MODE_ID_PULLBACK,
+        signal_mode_order_2: bt_gpu::buffers::GPU_SIGNAL_MODE_ID_SLOW_DRIFT,
     }
 }
 
