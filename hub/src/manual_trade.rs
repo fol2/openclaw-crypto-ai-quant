@@ -143,6 +143,7 @@ struct FillWriteSummary {
 
 #[derive(Clone)]
 struct ManualCancelContext {
+    intent_exists: bool,
     intent_id: Option<String>,
     symbol: String,
     side: Option<String>,
@@ -1046,6 +1047,7 @@ pub fn cancel_order(
         let cloid = manual_cloid_from_intent_id(intent_id);
         let cancel_context = load_manual_cancel_context_by_intent_id(&conn, intent_id)?
             .unwrap_or_else(|| ManualCancelContext {
+                intent_exists: false,
                 intent_id: Some(intent_id.to_string()),
                 symbol: symbol.clone(),
                 side: None,
@@ -1451,6 +1453,7 @@ fn load_manual_cancel_context_by_intent_id(
     let row = stmt.query_row([intent_id], |row| {
         let action = row.get::<_, Option<String>>(4)?;
         Ok(ManualCancelContext {
+            intent_exists: true,
             intent_id: Some(intent_id.to_string()),
             symbol: row
                 .get::<_, String>(0)?
@@ -1488,6 +1491,7 @@ fn load_manual_cancel_context_by_exchange_order_id(
     let row = stmt.query_row(params![symbol, exchange_order_id], |row| {
         let action = row.get::<_, Option<String>>(4)?;
         Ok(ManualCancelContext {
+            intent_exists: true,
             intent_id: row.get(0)?,
             symbol: symbol.to_string(),
             side: row.get(1)?,
@@ -1971,7 +1975,11 @@ fn record_manual_cancel_audit(
     audit: ManualCancelAudit<'_>,
 ) -> Result<(), HubError> {
     let ts_ms = chrono::Utc::now().timestamp_millis();
-    if let Some(intent_id) = audit.intent_id {
+    let can_update_intent = context.map(|item| item.intent_exists).unwrap_or(false);
+    if can_update_intent {
+        let intent_id = audit.intent_id.ok_or_else(|| {
+            HubError::Internal("cancel audit expected an intent_id for a persisted context".into())
+        })?;
         match audit.status {
             "CANCELLED" => {
                 if let Some(next_status) =
@@ -3399,5 +3407,49 @@ mod tests {
             .unwrap()
             .expect("cancel context should exist");
         assert_eq!(context.symbol, "HYPE");
+    }
+
+    #[test]
+    fn manual_cancel_audit_allows_missing_intent_fallback_on_reject() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let fallback = ManualCancelContext {
+            intent_exists: false,
+            intent_id: Some("missing_intent".to_string()),
+            symbol: "ETH".to_string(),
+            side: None,
+            current_status: None,
+            requested_size: None,
+            reduce_only: None,
+            client_order_id: Some("0x6d616e5f1234567890abcdef12345678".to_string()),
+            exchange_order_id: None,
+        };
+
+        record_manual_cancel_audit(
+            &conn,
+            Some(&fallback),
+            ManualCancelAudit {
+                intent_id: fallback.intent_id.as_deref(),
+                symbol: "ETH",
+                side: None,
+                order_type: "cancel_by_cloid",
+                requested_size: None,
+                reduce_only: None,
+                client_order_id: fallback.client_order_id.as_deref(),
+                exchange_order_id: None,
+                status: "REJECTED",
+                raw_json: "missing order".to_string(),
+            },
+        )
+        .unwrap();
+
+        let order_status: String = conn
+            .query_row(
+                "SELECT status FROM oms_orders ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(order_status, "REJECTED");
     }
 }
