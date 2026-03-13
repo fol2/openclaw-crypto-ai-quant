@@ -23,6 +23,9 @@ cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 
 cargo run -p aiq-runtime -- snapshot export-paper --db trading_engine.db --output /tmp/paper.json
 cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper.json --target-db trading_engine.db --strict-replace --json
+
+cargo run -p aiq-runtime --bin aiq-maintenance -- fetch-funding-rates --days 30 --db candles_dbs/funding_rates.db
+cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db trading_engine.db
 ```
 
 ## Ownership
@@ -73,6 +76,11 @@ Use the shell wrappers when you want stable service-style entrypoints:
 - `scripts/run_paper.sh`
 - `scripts/run_paper_lane.sh`
 - `scripts/run_live.sh`
+
+Use the maintenance binary when you need the kept Rust-owned one-shot jobs:
+
+- `aiq-maintenance fetch-funding-rates`
+- `aiq-maintenance prune-runtime-logs`
 
 ## Validation
 

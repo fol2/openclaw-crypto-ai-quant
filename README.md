@@ -82,8 +82,11 @@ Shell wrappers and systemd examples are provided for the Rust-owned runtime:
 - `scripts/run_paper_lane.sh`
 - `scripts/run_live.sh`
 - `scripts/run_paper.sh`
+- `systemd/openclaw-ai-quant-hub.service.example`
 - `systemd/openclaw-ai-quant-trader-v8-paper*.service.example`
 - `systemd/openclaw-ai-quant-live-v8.service.example`
+- `systemd/openclaw-ai-quant-funding-v8.service.example`
+- `systemd/openclaw-ai-quant-prune-runtime-logs-v8.service.example`
 - `systemd/openclaw-ai-quant-ws-sidecar.service.example`
 
 ## Documentation

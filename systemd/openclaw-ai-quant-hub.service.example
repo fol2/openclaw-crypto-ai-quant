@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenClaw AI Quant Hub
+After=network-online.target openclaw-ai-quant-ws-sidecar.service
+Wants=network-online.target openclaw-ai-quant-ws-sidecar.service
+Requires=openclaw-ai-quant-ws-sidecar.service
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-monitor-v8.env
+Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws.sock
+Environment=AI_QUANT_CANDLES_DB_DIR=$PROJECT_DIR/candles_dbs
+Environment=AIQ_ROOT=$PROJECT_DIR
+Environment=RUST_LOG=info
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=AIQ_MANUAL_TRADE_ENABLE=true
+ExecStart=$PROJECT_DIR/hub/target/release/aiq-hub
+Restart=always
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=default.target
