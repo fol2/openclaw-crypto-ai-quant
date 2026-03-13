@@ -1840,23 +1840,26 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
 
         CREATE TABLE IF NOT EXISTS audit_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts_ms INTEGER NOT NULL,
             timestamp TEXT NOT NULL,
             symbol TEXT,
             event TEXT NOT NULL,
             level TEXT,
             data_json TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_audit_events_ts_ms ON audit_events(ts_ms);
-        CREATE INDEX IF NOT EXISTS idx_audit_events_event_ts_ms ON audit_events(event, ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_event_timestamp
+            ON audit_events(event, timestamp);
 
         CREATE TABLE IF NOT EXISTS oms_reconcile_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_ms INTEGER NOT NULL,
             kind TEXT NOT NULL,
             symbol TEXT,
+            intent_id TEXT,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
             result TEXT,
-            data_json TEXT
+            detail_json TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_ts_ms ON oms_reconcile_events(ts_ms);
         CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_kind_ts_ms
@@ -2684,10 +2687,9 @@ fn write_manual_audit_event(
         .map(|value| value.to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     conn.execute(
-        "INSERT INTO audit_events (ts_ms, timestamp, symbol, event, level, data_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO audit_events (timestamp, symbol, event, level, data_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-            ts_ms,
             ts,
             symbol.map(|value| value.trim().to_ascii_uppercase()),
             event.trim().to_ascii_uppercase(),
@@ -2707,7 +2709,7 @@ fn write_manual_reconcile_event(
 ) -> Result<(), HubError> {
     let ts_ms = chrono::Utc::now().timestamp_millis();
     conn.execute(
-        "INSERT INTO oms_reconcile_events (ts_ms, kind, symbol, result, data_json)
+        "INSERT INTO oms_reconcile_events (ts_ms, kind, symbol, result, detail_json)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             ts_ms,
