@@ -33,13 +33,13 @@ Instead, report them privately:
 
 The following are in scope:
 
-- Trading engine logic (`engine/`, `strategy/`, `live/`)
-- Exchange adapters and order execution (`exchange/`, `live/trader.py`)
+- Trading runtime and daemon logic (`runtime/`)
+- Exchange-facing runtime ownership and supervision contracts (`runtime/`, `systemd/`, `scripts/`)
 - Key/secret handling (anything touching `secrets.json`, `.env`, API keys)
-- Risk manager bypasses (`engine/risk.py`)
+- Risk and execution contract bypasses within the Rust runtime stack
 - Kill-switch circumvention
 - WebSocket sidecar and data integrity (`ws_sidecar/`)
-- Rust backtester and PyO3 bridge (`backtester/`)
+- Rust backtester and GPU sweep surfaces (`backtester/`)
 
 ## Disclosure Policy
 

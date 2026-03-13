@@ -73,7 +73,7 @@ impl AdxIndicator {
         if !high.is_finite() || !low.is_finite() || !close.is_finite() {
             let (di_pos, di_neg, _) = self.compute_di_dx();
             return AdxOutput {
-                adx: self.adx_value,
+                adx: self.current_adx(),
                 adx_pos: di_pos,
                 adx_neg: di_neg,
             };
@@ -217,6 +217,20 @@ impl AdxIndicator {
             0.0
         };
         (di_pos, di_neg, dx)
+    }
+
+    fn current_adx(&self) -> f64 {
+        match self.phase {
+            Phase::Init | Phase::Accumulate => 0.0,
+            Phase::DxAccumulate => {
+                if self.dx_count > 0 {
+                    self.adx_sum / self.dx_count as f64
+                } else {
+                    0.0
+                }
+            }
+            Phase::Warm => self.adx_value,
+        }
     }
 }
 

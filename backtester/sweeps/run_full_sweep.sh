@@ -74,15 +74,7 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/lib/wsl/lib"
 
 mkdir -p "$OUTPUT_DIR"
 
-AXIS_COUNT="$(python3 - "$SWEEP_SPEC" <<'PY'
-import sys, yaml
-try:
-    spec = yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8").read()) or {}
-    print(len(spec.get("axes", [])))
-except Exception:
-    print("?")
-PY
-)"
+AXIS_COUNT="$(grep -c '^- path:' "$SWEEP_SPEC" 2>/dev/null || echo '?')"
 
 # ── Data coverage info ──────────────────────────────────────────────────
 declare -A INTERVAL_DAYS=(
@@ -173,7 +165,12 @@ for IV in $INTERVALS; do
     if [[ -f "$OUTFILE" ]]; then
         # First line = best (already sorted by PnL desc)
         HEAD=$(head -1 "$OUTFILE" 2>/dev/null || echo "{}")
-        PNL=$(echo "$HEAD" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'PnL=\${d[\"total_pnl\"]:.2f}, trades={d[\"total_trades\"]}, WR={d[\"win_rate\"]*100:.1f}%, PF={d[\"profit_factor\"]:.2f}')" 2>/dev/null || echo "parse error")
+        PNL="$(echo "$HEAD" | jq -r '[
+            "PnL=" + ((.total_pnl // 0) | tonumber | tostring),
+            "trades=" + ((.total_trades // 0) | tostring),
+            "WR=" + ((((.win_rate // 0) | tonumber) * 100) | tostring) + "%",
+            "PF=" + ((.profit_factor // 0) | tonumber | tostring)
+        ] | join(", ")' 2>/dev/null || echo "parse error")"
         echo "  ${IV}: ${PNL}"
     fi
 done

@@ -1,6 +1,6 @@
 //! Exit conditions module for the backtesting simulator.
 //!
-//! Implements all exit conditions from Python `mei_alpha_v1.py` PaperTrader.
+//! Implements the legacy v1 exit conditions preserved by the Rust backtester.
 //!
 //! Priority order: Stop Loss > Trailing Stop > Take Profit > Smart Exits.
 //!

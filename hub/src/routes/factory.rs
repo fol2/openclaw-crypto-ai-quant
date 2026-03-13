@@ -12,7 +12,6 @@ use tokio::process::Command;
 
 use crate::error::HubError;
 use crate::state::AppState;
-use crate::subprocess::factory;
 use crate::subprocess::JobStatus;
 
 /// Build factory sub-router.
@@ -237,9 +236,6 @@ async fn run_candidates(
 
 // ── Job control routes ─────────────────────────────────────────────
 
-/// Valid factory profiles.
-const VALID_PROFILES: &[&str] = &["smoke", "daily", "deep", "weekly"];
-
 /// Body for POST /api/factory/run.
 #[derive(Deserialize)]
 struct RunFactoryBody {
@@ -279,100 +275,12 @@ fn load_settings(state: &AppState) -> Value {
 
 /// POST /api/factory/run — launch a new factory cycle.
 async fn run_factory(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<RunFactoryBody>,
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<RunFactoryBody>,
 ) -> Result<Json<Value>, HubError> {
-    // Load saved settings as defaults, then override with request body.
-    let defaults = load_settings(&state);
-
-    let profile = body
-        .profile
-        .or_else(|| defaults["profile"].as_str().map(String::from))
-        .unwrap_or_else(|| "daily".to_string());
-
-    if !VALID_PROFILES.contains(&profile.as_str()) {
-        return Err(HubError::BadRequest(format!(
-            "invalid profile: {profile} (valid: {})",
-            VALID_PROFILES.join(", ")
-        )));
-    }
-
-    let candidate_count = body
-        .candidate_count
-        .or_else(|| defaults["candidate_count"].as_u64().map(|n| n as u32))
-        .unwrap_or(3);
-
-    if !(1..=10).contains(&candidate_count) {
-        return Err(HubError::BadRequest(format!(
-            "candidate_count must be 1-10, got {candidate_count}"
-        )));
-    }
-
-    let args = factory::FactoryArgs {
-        profile,
-        strategy_mode: body
-            .strategy_mode
-            .or_else(|| defaults["strategy_mode"].as_str().map(String::from)),
-        gpu: body
-            .gpu
-            .or_else(|| defaults["gpu"].as_bool())
-            .unwrap_or(true),
-        tpe: body
-            .tpe
-            .or_else(|| defaults["tpe"].as_bool())
-            .unwrap_or(true),
-        walk_forward: body
-            .walk_forward
-            .or_else(|| defaults["walk_forward"].as_bool())
-            .unwrap_or(true),
-        slippage_stress: body
-            .slippage_stress
-            .or_else(|| defaults["slippage_stress"].as_bool())
-            .unwrap_or(true),
-        concentration_checks: body
-            .concentration_checks
-            .or_else(|| defaults["concentration_checks"].as_bool())
-            .unwrap_or(true),
-        sensitivity_checks: body
-            .sensitivity_checks
-            .or_else(|| defaults["sensitivity_checks"].as_bool())
-            .unwrap_or(true),
-        candidate_count,
-        max_age_fail_hours: body
-            .max_age_fail_hours
-            .or_else(|| defaults["max_age_fail_hours"].as_f64()),
-        funding_max_stale_symbols: body
-            .funding_max_stale_symbols
-            .or_else(|| defaults["funding_max_stale_symbols"].as_u64().map(|n| n as u32)),
-        dry_run: body
-            .dry_run
-            .or_else(|| defaults["dry_run"].as_bool())
-            .unwrap_or(false),
-        no_deploy: body
-            .no_deploy
-            .or_else(|| defaults["no_deploy"].as_bool())
-            .unwrap_or(false),
-        enable_livepaper_promotion: body
-            .enable_livepaper_promotion
-            .or_else(|| defaults["enable_livepaper_promotion"].as_bool())
-            .unwrap_or(true),
-    };
-
-    let job_id = uuid::Uuid::new_v4().to_string();
-
-    factory::spawn_factory(
-        job_id.clone(),
-        args,
-        state.config.aiq_root.display().to_string(),
-        Arc::clone(&state.jobs),
-        state.broadcast.clone(),
-    )
-    .await;
-
-    Ok(Json(json!({
-        "job_id": job_id,
-        "status": "running",
-    })))
+    Err(HubError::Forbidden(
+        "factory automation was retired with the zero-Python repository cutover".into(),
+    ))
 }
 
 /// GET /api/factory/jobs — list all factory jobs.

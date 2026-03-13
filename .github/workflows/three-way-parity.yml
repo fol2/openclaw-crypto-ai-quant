@@ -44,22 +44,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Check fixtures exist
+      - name: Check legacy fixtures exist
         id: fixtures
         run: |
+          SCRIPT="backtester/scripts/three_way_parity.py"
           FIXTURE_DIR="backtester/testdata/three_way_parity"
-          if [ -f "$FIXTURE_DIR/gpu_sweep.jsonl" ] && \
+          if [ -f "$SCRIPT" ] && \
+             [ -f "$FIXTURE_DIR/gpu_sweep.jsonl" ] && \
              [ -f "$FIXTURE_DIR/cpu_replay.json" ] && \
              [ -f "$FIXTURE_DIR/kernel_shadow_report.json" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Three-way parity fixtures not found; skipping."
+            echo "::notice::Legacy three-way parity harness is retired; skipping."
           fi
 
       - name: Run three-way parity

@@ -103,7 +103,7 @@ fn parse_timestamp_ms(input: &str) -> Result<i64, String> {
     ))
 }
 
-/// Read only the `balance` field from an export_state.py JSON file.
+/// Read only the `balance` field from a runtime snapshot JSON file.
 fn read_balance_from_json(path: &str) -> Result<f64, Box<dyn std::error::Error>> {
     let data = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
     let json: serde_json::Value =
@@ -265,7 +265,7 @@ struct ReplayArgs {
     end_ts: Option<TimestampMs>,
 
     /// Filter the candle universe to symbols active during the backtest window using
-    /// `universe_listings` from a universe history DB (see tools/sync_universe_history.py).
+    /// `universe_listings` from a universe history DB.
     ///
     /// A symbol is considered active when its observed listing interval overlaps with
     /// the backtest window:
@@ -290,13 +290,13 @@ struct ReplayArgs {
     #[arg(long, default_value_t = false)]
     no_auto_scope: bool,
 
-    /// Path to a JSON file exported by export_state.py. When provided, the simulation
+    /// Path to a runtime snapshot JSON file. When provided, the simulation
     /// starts with the exported balance and open positions instead of a blank slate.
     /// Overrides --initial-balance.
     #[arg(long)]
     init_state: Option<String>,
 
-    /// Read initial balance from an export_state.py JSON file (ignores positions).
+    /// Read initial balance from a runtime snapshot JSON file (ignores positions).
     /// Overrides --initial-balance.
     #[arg(long)]
     balance_from: Option<String>,
@@ -379,7 +379,7 @@ struct SweepArgs {
     end_ts: Option<TimestampMs>,
 
     /// Filter the candle universe to symbols active during the sweep window using
-    /// `universe_listings` from a universe history DB (see tools/sync_universe_history.py).
+    /// `universe_listings` from a universe history DB.
     ///
     /// A symbol is considered active when its observed listing interval overlaps with
     /// the sweep window:
@@ -398,7 +398,7 @@ struct SweepArgs {
     #[arg(long, default_value_t = false)]
     no_auto_scope: bool,
 
-    /// Read initial balance from an export_state.py JSON file (ignores positions).
+    /// Read initial balance from a runtime snapshot JSON file (ignores positions).
     /// Overrides --initial-balance.
     #[arg(long)]
     balance_from: Option<String>,

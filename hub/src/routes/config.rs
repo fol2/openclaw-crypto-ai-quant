@@ -561,68 +561,12 @@ async fn get_config_files(
 
 /// POST /api/config/actions/promote-live — Promote a selected paper config to live.
 async fn post_promote_live(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<PromoteLiveBody>,
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<PromoteLiveBody>,
 ) -> Result<Json<Value>, HubError> {
-    ensure_admin_actions_enabled(&state)?;
-
-    let mode_raw = body.paper_mode.unwrap_or_else(|| "paper1".to_string());
-    let paper_mode = normalize_paper_mode(&mode_raw).ok_or_else(|| {
-        HubError::BadRequest(format!(
-            "invalid paper_mode '{mode_raw}' (expected paper1/paper2/paper3)"
-        ))
-    })?;
-    let (paper_db, _) = state.config.mode_paths(&paper_mode);
-    let dry_run = body.dry_run.unwrap_or(false);
-
-    let mut command = vec![
-        "python3".to_string(),
-        state
-            .config
-            .aiq_root
-            .join("tools")
-            .join("promote_to_live.py")
-            .to_string_lossy()
-            .to_string(),
-        "--paper-db".to_string(),
-        paper_db.to_string_lossy().to_string(),
-        "--artifacts-dir".to_string(),
-        state.config.artifacts_dir.to_string_lossy().to_string(),
-        "--live-yaml-path".to_string(),
-        state.config.live_yaml_path.to_string_lossy().to_string(),
-    ];
-
-    if let Some(config_id) = body
-        .config_id
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        command.push("--config-id".to_string());
-        command.push(config_id.to_string());
-    }
-    if dry_run {
-        command.push("--dry-run".to_string());
-    } else {
-        command.push("--apply".to_string());
-    }
-
-    let mut result = run_action_command(
-        command,
-        &state.config.aiq_root,
-        state.config.admin_action_timeout_s,
-    )
-    .await;
-    if let Some(obj) = result.as_object_mut() {
-        obj.insert("action".to_string(), json!("promote_live"));
-        obj.insert("paper_mode".to_string(), json!(paper_mode));
-        obj.insert(
-            "paper_db".to_string(),
-            json!(paper_db.to_string_lossy().to_string()),
-        );
-        obj.insert("dry_run".to_string(), json!(dry_run));
-    }
-    Ok(Json(result))
+    Err(HubError::Forbidden(
+        "live promotion tooling was retired with the zero-Python repository cutover".into(),
+    ))
 }
 
 /// POST /api/config/actions/rollback-live — Roll back live config to previous deployment version.

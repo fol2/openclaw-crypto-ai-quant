@@ -227,7 +227,7 @@ pub fn load_symbols(
 }
 
 /// Load symbols considered "active" during the given time range using a universe
-/// history SQLite database (see `tools/sync_universe_history.py`).
+/// history SQLite database.
 ///
 /// A symbol is considered active when its observed listing interval overlaps with
 /// the backtest window:

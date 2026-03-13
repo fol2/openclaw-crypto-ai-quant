@@ -8,26 +8,20 @@ die() {
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 version_file="${repo_root}/VERSION"
-pyproject_file="${repo_root}/pyproject.toml"
-crates_root="${repo_root}/backtester/crates"
 
 [[ -f "${version_file}" ]] || die "Missing VERSION file at ${version_file}"
-[[ -f "${pyproject_file}" ]] || die "Missing pyproject.toml at ${pyproject_file}"
-[[ -d "${crates_root}" ]] || die "Missing crates directory at ${crates_root}"
 
 version="$(tr -d '[:space:]' < "${version_file}")"
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION must match SemVer X.Y.Z (got '${version}')"
 
-pyproject_version="$(awk -F'"' '/^version = "/ { print $2; exit }' "${pyproject_file}")"
-[[ -n "${pyproject_version}" ]] || die "Cannot parse version from ${pyproject_file}"
-[[ "${pyproject_version}" == "${version}" ]] || die "pyproject version '${pyproject_version}' != VERSION '${version}'"
-
-mapfile -t cargo_tomls < <(find "${crates_root}" -mindepth 2 -maxdepth 2 -type f -name Cargo.toml | sort)
-(( ${#cargo_tomls[@]} > 0 )) || die "No crate Cargo.toml files found under ${crates_root}"
+mapfile -t cargo_tomls < <(find "${repo_root}" -type f -name Cargo.toml \
+  ! -path "${repo_root}/target/*" \
+  ! -path "${repo_root}/.git/*" | sort)
+(( ${#cargo_tomls[@]} > 0 )) || die "No Cargo.toml files found under ${repo_root}"
 
 for cargo_toml in "${cargo_tomls[@]}"; do
   crate_version="$(awk -F'"' '/^version = "/ { print $2; exit }' "${cargo_toml}")"
-  [[ -n "${crate_version}" ]] || die "Cannot parse crate version from ${cargo_toml}"
+  [[ -n "${crate_version}" ]] || continue
   [[ "${crate_version}" == "${version}" ]] || die "Crate version '${crate_version}' != VERSION '${version}' in ${cargo_toml}"
 done
 

@@ -1,47 +1,25 @@
 # Release Process
 
-This project uses a tag-driven release model with a single source of truth for versions.
+## Version Source
 
-## Single Source of Truth
+`VERSION` is the single human-edited version marker.
 
-- `VERSION` is authoritative.
-- `pyproject.toml` and all `backtester/crates/*/Cargo.toml` versions must match `VERSION`.
-- `ws_sidecar/Cargo.toml` and `hub/Cargo.toml` should also be kept in sync (not currently enforced by CI).
-- Release tags must match the same version in `vX.Y.Z` format.
+`tools/release/set_version.sh` updates:
 
-Enforcement:
+- `VERSION`
+- all tracked `Cargo.toml` crate versions
 
-- Local and CI checks: `tools/release/check_versions.sh`
-- CI guardrail: `.github/workflows/version-governance.yml`
+`tools/release/check_versions.sh` verifies:
 
-## Standard Release Flow
+- `VERSION` is valid SemVer
+- every tracked `Cargo.toml` matches `VERSION`
+- the current tag, when present, matches `VERSION`
 
-1. Prepare a version bump in a dedicated worktree branch:
-   - `tools/release/set_version.sh 0.1.1`
-2. Open an atomic PR targeting `master`, review, then merge.
-3. Cut an annotated tag from the merged commit:
-   - `git tag -a v0.1.1 <commit-sha> -m "Release 0.1.1"`
-   - `git push origin v0.1.1`
-4. GitHub Actions builds assets and publishes the release automatically via `.github/workflows/release-on-tag.yml`.
-
-## Release Assets
-
-The release workflow publishes:
-
-- `mei-backtester-linux-x86_64-vX.Y.Z`
-- `config-examples-vX.Y.Z.tar.gz`
-- `systemd-examples-vX.Y.Z.tar.gz`
-- `release-manifest-vX.Y.Z.txt`
-- `SHA256SUMS`
-
-You can build the same asset set locally:
+## Typical Flow
 
 ```bash
-tools/release/build_assets.sh 0.1.1
+tools/release/set_version.sh 0.1.1
+tools/release/check_versions.sh
+git commit -am "release: bump version to 0.1.1"
+git tag v0.1.1
 ```
-
-Default local output path:
-
-- `artifacts/releases/vX.Y.Z/`
-
-This keeps root-level housekeeping clean and avoids ad-hoc release files in the repository root.

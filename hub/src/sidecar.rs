@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 /// Async Unix-socket JSON-RPC client for the WS sidecar.
 ///
 /// Protocol: newline-delimited JSON, one request → one response.
-/// Compatible with `exchange/sidecar.py` `SidecarWSClient`.
+/// Compatible with the Unix-socket sidecar client contract used by the runtime stack.
 pub struct SidecarClient {
     sock_path: PathBuf,
     conn: Mutex<Option<SidecarConn>>,
