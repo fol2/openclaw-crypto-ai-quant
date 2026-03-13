@@ -660,9 +660,8 @@ fn round_to_significant_figures(value: f64, sig_figs: u32) -> Option<f64> {
     if !value.is_finite() || value <= 0.0 || sig_figs == 0 {
         return None;
     }
-    let exponent = value.abs().log10().floor() as i32;
-    let scale = 10f64.powi(sig_figs as i32 - 1 - exponent);
-    let rounded = round_half_even(value * scale) / scale;
+    let precision = sig_figs.saturating_sub(1) as usize;
+    let rounded = format!("{value:.precision$e}").parse::<f64>().ok()?;
     if rounded.is_finite() && rounded > 0.0 {
         Some(rounded)
     } else {
@@ -675,31 +674,18 @@ fn round_to_decimal_places(value: f64, decimals: i32) -> Option<f64> {
         return None;
     }
     let rounded = if decimals >= 0 {
-        let factor = 10f64.powi(decimals);
-        round_half_even(value * factor) / factor
+        format!("{value:.precision$}", precision = decimals as usize)
+            .parse::<f64>()
+            .ok()?
     } else {
         let factor = 10f64.powi(-decimals);
-        round_half_even(value / factor) * factor
+        let scaled = format!("{:.0}", value / factor).parse::<f64>().ok()?;
+        scaled * factor
     };
     if rounded.is_finite() && rounded > 0.0 {
         Some(rounded)
     } else {
         None
-    }
-}
-
-fn round_half_even(value: f64) -> f64 {
-    let floor = value.floor();
-    let fractional = value - floor;
-    let tolerance = 1e-12 * value.abs().max(1.0);
-    if fractional < 0.5 - tolerance {
-        floor
-    } else if fractional > 0.5 + tolerance {
-        floor + 1.0
-    } else if (floor as i64) % 2 == 0 {
-        floor
-    } else {
-        floor + 1.0
     }
 }
 
@@ -1060,6 +1046,13 @@ mod tests {
         let price = market_order_limit_px(0.1555, false, 0.01, 0, false).unwrap();
         assert!((price - 0.15394).abs() < 1e-9);
         assert_eq!(float_to_wire(price).unwrap(), "0.15394");
+    }
+
+    #[test]
+    fn market_order_limit_px_matches_python_sdk_on_decimal_tie_cases() {
+        let price = market_order_limit_px(323.1818181818, false, 0.01, 5, false).unwrap();
+        assert!((price - 319.9).abs() < 1e-9);
+        assert_eq!(float_to_wire(price).unwrap(), "319.9");
     }
 
     #[test]
