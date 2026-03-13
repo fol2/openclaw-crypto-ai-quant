@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, promoteLiveConfig, rollbackLiveConfig } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, rollbackLiveConfig } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -17,8 +17,6 @@
   const SERVICE_STATUS_REFRESH_MS = 30_000;
 
   type ModeRuntimeState = 'on' | 'off' | 'error' | 'unknown';
-  type PromotePaperMode = 'paper1' | 'paper2' | 'paper3';
-
   let snap: any = $state(null);
   let volumes: Record<string, number> = $state({});
   let focusSym = $state('');
@@ -42,7 +40,6 @@
   let chartHeight = $state(240);
   let chartDragging = $state(false);
   let chartPrefsLoaded = $state(false);
-  let promoteSourceMode = $state<PromotePaperMode>('paper1');
   let configActionBusy = $state('');
   let configActionNotice = $state('');
   let configActionError = $state('');
@@ -1111,14 +1108,6 @@
     String(snap?.config?.live_service || MODE_SERVICE_MAP.live)
   );
 
-  function normalisePromoteMode(raw: string): PromotePaperMode | '' {
-    const mode = String(raw || '').trim().toLowerCase();
-    if (mode === 'paper' || mode === 'paper1') return 'paper1';
-    if (mode === 'paper2') return 'paper2';
-    if (mode === 'paper3') return 'paper3';
-    return '';
-  }
-
   function actionErrorMessage(payload: any, fallback: string): string {
     const direct = String(payload?.error || '').trim();
     if (direct) return direct;
@@ -1130,33 +1119,6 @@
       if (line) return line;
     }
     return fallback;
-  }
-
-  async function onPromoteToLive() {
-    if (!adminActionsEnabled || configActionBusy) return;
-    const sourceMode: PromotePaperMode = normalisePromoteMode(promoteSourceMode) || 'paper1';
-    const sourceLabel = getModeLabel(sourceMode);
-    const confirmText = `Promote ${sourceLabel} to live now?\n\nThis updates the live YAML used by ${liveServiceName}.`;
-    if (typeof window !== 'undefined' && !window.confirm(confirmText)) return;
-
-    configActionBusy = 'promote';
-    configActionNotice = '';
-    configActionError = '';
-    try {
-      const res = await promoteLiveConfig({ paper_mode: sourceMode, dry_run: false });
-      if (!res?.ok) {
-        throw new Error(actionErrorMessage(res, `Promote failed for ${sourceLabel}.`));
-      }
-      const configId = String(res?.parsed?.config_id || '').trim();
-      configActionNotice = configId
-        ? `Promote complete: ${sourceLabel} -> live (${configId}).`
-        : `Promote complete: ${sourceLabel} -> live.`;
-      await refresh();
-    } catch (e: any) {
-      configActionError = e?.message || 'Promote failed.';
-    } finally {
-      configActionBusy = '';
-    }
   }
 
   async function onRollbackLive() {
@@ -1192,11 +1154,6 @@
       configActionBusy = '';
     }
   }
-
-  $effect(() => {
-    const mode = normalisePromoteMode(appState.mode);
-    if (mode) promoteSourceMode = mode;
-  });
 
   // ── Range selector for PnL / DD ───────────────────────────────────────
   let metricsRange = $state<'today' | 'since' | 'all'>('today');
@@ -1317,25 +1274,7 @@
   {#if adminActionsEnabled}
     <div class="config-actions-bar">
       <div class="config-actions-left">
-        <label class="config-actions-label" for="promote-source-mode">Promote Source</label>
-        <select
-          id="promote-source-mode"
-          class="config-actions-select"
-          bind:value={promoteSourceMode}
-          disabled={Boolean(configActionBusy)}
-        >
-          <option value="paper1">{getModeLabel('paper1')}</option>
-          <option value="paper2">{getModeLabel('paper2')}</option>
-          <option value="paper3">{getModeLabel('paper3')}</option>
-        </select>
-
-        <button
-          class="config-action-btn promote"
-          onclick={onPromoteToLive}
-          disabled={Boolean(configActionBusy)}
-        >
-          {configActionBusy === 'promote' ? 'Promoting...' : 'Promote To Live'}
-        </button>
+        <span class="config-actions-note">Live promotion has been retired from the Hub.</span>
 
         <button
           class="config-action-btn rollback"
