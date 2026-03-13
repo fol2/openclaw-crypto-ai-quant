@@ -4,9 +4,10 @@ use bt_core::config::{
     PipelineProfileConfig, RuntimeConfig, StrategyConfig,
 };
 use bt_core::engine::{run_simulation, RunSimulationInput};
-use bt_core::sweep::SweepSpec;
+use bt_core::sweep::{SweepAxis, SweepSpec};
 use bt_gpu::buffers::{GpuComboState, GpuTraceEvent, GPU_TRACE_CAP};
 use bt_gpu::run_gpu_sweep_with_states;
+use bt_gpu::tpe_sweep::{run_tpe_sweep, TpeConfig};
 use cudarc::driver::CudaDevice;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -364,6 +365,137 @@ fn cpu_gpu_main_bar_exit_order_prefers_full_before_partial_take_profit() {
     assert_eq!(
         gpu_exit.reason, TRACE_REASON_EXIT_TP,
         "GPU main-bar loop must honour full-before-partial take-profit order"
+    );
+}
+
+#[test]
+fn tpe_smoke_respects_reordered_exit_profile_via_shared_gpu_contract() {
+    if let Err(err) = CudaDevice::new(0) {
+        eprintln!("Skipping: CUDA unavailable: {:?}", err);
+        return;
+    }
+
+    let profile = "gpu_tpe_full_before_partial";
+    let mut cfg = permissive_cfg(profile);
+    cfg.trade.tp_atr_mult = 20.0;
+    cfg.trade.enable_partial_tp = true;
+    cfg.trade.tp_partial_pct = 0.5;
+    cfg.trade.tp_partial_atr_mult = 19.5;
+    cfg.trade.tp_partial_min_notional_usd = 1.0;
+    cfg.trade.enable_vol_buffered_trailing = false;
+    cfg.trade.enable_rsi_overextension_exit = false;
+    cfg.trade.smart_exit_adx_exhaustion_lt = 0.0;
+    cfg.trade.smart_exit_adx_exhaustion_lt_low_conf = 0.0;
+    cfg.trade.tsme_min_profit_atr = 999.0;
+    cfg.pipeline = PipelineConfig {
+        default_profile: "production".to_string(),
+        profiles: BTreeMap::from([(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.stop_loss.ase".to_string(),
+                            "exit.stop_loss.dase".to_string(),
+                            "exit.stop_loss.slb".to_string(),
+                            "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.breakeven".to_string(),
+                            "exit.take_profit.full".to_string(),
+                            "exit.take_profit.partial".to_string(),
+                        ],
+                        disabled: vec![
+                            "exit.trailing.low_conf_override".to_string(),
+                            "exit.trailing.vol_buffer".to_string(),
+                            "exit.trailing.base".to_string(),
+                            "exit.smart.trend_exhaustion".to_string(),
+                            "exit.smart.ema_macro_breakdown".to_string(),
+                            "exit.smart.stagnation".to_string(),
+                            "exit.smart.funding_headwind".to_string(),
+                            "exit.smart.tsme".to_string(),
+                            "exit.smart.mmde".to_string(),
+                            "exit.smart.rsi_overextension".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        )]),
+    };
+
+    let hour = 3_600_000i64;
+    let mut bars = Vec::new();
+    for idx in 0..180 {
+        bars.push(bar_1h(idx as i64 * hour, 100.0));
+    }
+    for idx in 180..199 {
+        bars.push(bar_1h(idx as i64 * hour, 100.0 + (idx - 179) as f64));
+    }
+    bars.push(bar_1h(199 * hour, 160.0));
+    let mut candles: CandleData = FxHashMap::default();
+    candles.insert("BTC".to_string(), bars);
+
+    let spec = SweepSpec {
+        axes: vec![SweepAxis {
+            path: "trade.leverage".to_string(),
+            values: vec![1.0],
+            gate: None,
+        }],
+        initial_balance: 1_000.0,
+        lookback: 0,
+    };
+
+    let tpe = run_tpe_sweep(
+        &candles,
+        &cfg,
+        &spec,
+        None,
+        &TpeConfig {
+            trials: 1,
+            batch_size: 1,
+            seed: 42,
+        },
+        None,
+        None,
+        None,
+        1,
+    );
+    assert_eq!(tpe.completed_trials, 1, "TPE should complete one trial");
+    assert_eq!(tpe.results.len(), 1, "TPE should return one top-k result");
+    let tpe_result = &tpe.results[0];
+    assert_eq!(tpe_result.output_mode, "gpu_tpe");
+    assert_eq!(
+        tpe_result.overrides,
+        vec![("trade.leverage".to_string(), 1.0)]
+    );
+
+    let (gpu_rows, states, _symbols) = with_gpu_trace(0, || {
+        run_gpu_sweep_with_states(&candles, &cfg, &spec, None, None, None, None)
+    });
+    assert_eq!(
+        gpu_rows.len(),
+        1,
+        "direct GPU sweep should produce one result"
+    );
+    assert_eq!(
+        states.len(),
+        1,
+        "direct GPU sweep should return one combo state"
+    );
+    let gpu_result = &gpu_rows[0];
+
+    assert_eq!(tpe_result.config_id, gpu_result.config_id);
+    assert_eq!(tpe_result.total_trades, gpu_result.total_trades);
+    assert!((tpe_result.final_balance - gpu_result.final_balance).abs() <= 1e-9);
+    assert!((tpe_result.profit_factor - gpu_result.profit_factor).abs() <= 1e-9);
+    assert!((tpe_result.max_drawdown_pct - gpu_result.max_drawdown_pct).abs() <= 1e-9);
+
+    let first_exit = first_exit_trace(&states[0]);
+    assert_eq!(first_exit.kind, TRACE_KIND_CLOSE);
+    assert_eq!(
+        first_exit.reason, TRACE_REASON_EXIT_TP,
+        "reordered exit profile should reach GPU kernel via TPE and close with full TP first"
     );
 }
 
