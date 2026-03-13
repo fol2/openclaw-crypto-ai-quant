@@ -34,6 +34,10 @@ selection:
       service: openclaw-ai-quant-trader-v8-paper3
       yaml_path: config/strategy_overrides.paper3.yaml
 
+deployment:
+  apply_to_paper: true
+  restart_services: true
+
 profiles:
   daily:
     sweep_spec: backtester/sweeps/full_144v.yaml
@@ -45,6 +49,7 @@ profiles:
     tpe_seed: 42
     sweep_top_k: 50000
     shortlist_per_mode: 5
+    allow_unsafe_gpu_sweep: false
 
   deep:
     sweep_spec: backtester/sweeps/full_144v.yaml
@@ -56,3 +61,4 @@ profiles:
     tpe_seed: 42
     sweep_top_k: 50000
     shortlist_per_mode: 8
+    allow_unsafe_gpu_sweep: false

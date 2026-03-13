@@ -8,7 +8,6 @@ use bt_data::sqlite_loader::query_time_range_multi;
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -93,6 +92,7 @@ struct FactoryDefaults {
     profiles: BTreeMap<String, FactoryProfileSettings>,
     validation: ValidationSettings,
     selection: SelectionSettings,
+    deployment: DeploymentSettings,
 }
 
 impl Default for FactoryDefaults {
@@ -109,6 +109,7 @@ impl Default for FactoryDefaults {
             profiles,
             validation: ValidationSettings::default(),
             selection: SelectionSettings::default(),
+            deployment: DeploymentSettings::default(),
         }
     }
 }
@@ -125,6 +126,7 @@ struct FactoryProfileSettings {
     tpe_seed: u64,
     sweep_top_k: usize,
     shortlist_per_mode: usize,
+    allow_unsafe_gpu_sweep: bool,
 }
 
 impl FactoryProfileSettings {
@@ -139,6 +141,7 @@ impl FactoryProfileSettings {
             tpe_seed: 42,
             sweep_top_k: 50_000,
             shortlist_per_mode: 5,
+            allow_unsafe_gpu_sweep: false,
         }
     }
 
@@ -220,6 +223,22 @@ impl Default for SelectionSettings {
                     yaml_path: PathBuf::from("config/strategy_overrides.paper3.yaml"),
                 },
             ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct DeploymentSettings {
+    apply_to_paper: bool,
+    restart_services: bool,
+}
+
+impl Default for DeploymentSettings {
+    fn default() -> Self {
+        Self {
+            apply_to_paper: true,
+            restart_services: true,
         }
     }
 }
@@ -407,7 +426,7 @@ struct SelectionReport {
     interval: String,
     deploy_stage: String,
     deployed: bool,
-    deployments: Vec<JsonValue>,
+    deployments: Vec<DeploymentEvent>,
     promotion_stage: String,
     selection_policy: &'static str,
     selection_stage: String,
@@ -443,6 +462,17 @@ struct PaperTargetSummary {
     service: String,
     slot: usize,
     yaml_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeploymentEvent {
+    role: String,
+    source_config_path: String,
+    promoted_config_path: String,
+    target_yaml_path: String,
+    service: String,
+    restarted_service: bool,
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -516,6 +546,8 @@ struct SelectionReportInput<'a> {
     base_cfg: &'a StrategyConfig,
     blocked: bool,
     blocked_reason: String,
+    deployments: Vec<DeploymentEvent>,
+    selection_warnings: Vec<String>,
 }
 
 struct RunMetadataInput<'a> {
@@ -667,6 +699,25 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
 
     let selected = select_roles(&validated, &settings.selection);
     let gate_report = build_gate_report(&run_id, &validated, &selected, &settings.selection);
+    let (deployed, deployments, selection_warnings) = if gate_report.blocked {
+        (false, Vec::new(), Vec::new())
+    } else {
+        match deploy_selected_configs(
+            &paths.project_dir,
+            &run_dir,
+            &validated,
+            &selected,
+            &settings.selection,
+            &settings.deployment,
+        ) {
+            Ok(events) => (true, events, Vec::new()),
+            Err(err) => (
+                false,
+                Vec::new(),
+                vec![format!("paper_deploy_failed: {err}")],
+            ),
+        }
+    };
     let selection_report = build_selection_report(SelectionReportInput {
         run_id: &run_id,
         run_dir: &run_dir,
@@ -678,11 +729,10 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         base_cfg: &base_cfg,
         blocked: gate_report.blocked,
         blocked_reason: gate_report.blocked_reason.clone(),
+        deployments: deployments.clone(),
+        selection_warnings: selection_warnings.clone(),
     })?;
     write_reports(&run_dir, &validated, &gate_report, &selection_report)?;
-    if !gate_report.blocked {
-        write_promoted_configs(&run_dir, &selected, &settings.selection)?;
-    }
     let metadata = build_run_metadata(RunMetadataInput {
         run_id: &run_id,
         paths: &paths,
@@ -702,8 +752,12 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         run_dir: run_dir.display().to_string(),
         report_json: run_dir.join("reports/report.json").display().to_string(),
         selection_json: run_dir.join("reports/selection.json").display().to_string(),
-        blocked: gate_report.blocked,
-        blocked_reason: gate_report.blocked_reason.clone(),
+        blocked: gate_report.blocked || !deployed,
+        blocked_reason: if !selection_warnings.is_empty() {
+            selection_warnings.join("; ")
+        } else {
+            gate_report.blocked_reason.clone()
+        },
         selected_roles: selected,
     })
 }
@@ -902,8 +956,10 @@ fn run_sweep(
             .arg("--tpe-batch")
             .arg(profile.tpe_batch.to_string())
             .arg("--tpe-seed")
-            .arg(profile.tpe_seed.to_string())
-            .arg("--allow-unsafe-gpu-sweep");
+            .arg(profile.tpe_seed.to_string());
+    }
+    if profile.allow_unsafe_gpu_sweep {
+        cmd.arg("--allow-unsafe-gpu-sweep");
     }
     run_command(&mut cmd, &paths.project_dir, stdout_path, stderr_path)
         .context("run factory sweep")?;
@@ -1485,6 +1541,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         base_cfg,
         blocked,
         blocked_reason,
+        deployments,
+        selection_warnings,
     } = input;
     let selected_items = selected
         .iter()
@@ -1508,19 +1566,44 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         .or_else(|| best_overall_candidate(validated))
         .ok_or_else(|| anyhow!("missing selected primary candidate"))?;
     let active_targets = active_paper_targets(selection);
+    let deployment_failed = !selection_warnings.is_empty();
+    let deploy_stage = if blocked {
+        "blocked"
+    } else if deployment_failed {
+        "failed"
+    } else if deployments.is_empty() {
+        "pending"
+    } else {
+        "paper_applied"
+    };
     Ok(SelectionReport {
         version: "factory_cycle_selection_v2",
         run_id: run_id.to_string(),
         run_dir: run_dir.display().to_string(),
         interval: base_cfg.engine.interval.clone(),
-        deploy_stage: "pending".to_string(),
-        deployed: false,
-        deployments: Vec::new(),
-        promotion_stage: "pending".to_string(),
+        deploy_stage: deploy_stage.to_string(),
+        deployed: !blocked && !deployment_failed && !deployments.is_empty(),
+        deployments,
+        promotion_stage: if blocked || deployment_failed {
+            "blocked"
+        } else {
+            "paper_applied"
+        }
+        .to_string(),
         selection_policy: DEFAULT_SELECTION_POLICY,
-        selection_stage: if blocked { "blocked" } else { "selected" }.to_string(),
-        selection_warnings: Vec::new(),
-        step5_gate_status: if blocked { "blocked" } else { "passed" }.to_string(),
+        selection_stage: if blocked || deployment_failed {
+            "blocked"
+        } else {
+            "selected"
+        }
+        .to_string(),
+        selection_warnings,
+        step5_gate_status: if blocked || deployment_failed {
+            "blocked"
+        } else {
+            "passed"
+        }
+        .to_string(),
         step5_gate_block_reason: blocked_reason,
         effective_config_id: effective_config_id.to_string(),
         effective_config_path: effective_config_path.display().to_string(),
@@ -1600,38 +1683,26 @@ fn write_reports(
     Ok(())
 }
 
-fn write_promoted_configs(
+fn deploy_selected_configs(
+    project_dir: &Path,
     run_dir: &Path,
+    validated: &[ValidationItem],
     selected: &[SelectionCandidate],
     selection: &SelectionSettings,
-) -> Result<()> {
+    deployment: &DeploymentSettings,
+) -> Result<Vec<DeploymentEvent>> {
+    let mut events = Vec::new();
     for role in selected {
         let target = selection
             .paper_targets
             .iter()
             .find(|item| item.role == role.role)
             .ok_or_else(|| anyhow!("missing paper target for role={}", role.role))?;
-        let source_item = selected
+        let source_item = validated
             .iter()
-            .find(|item| item.role == role.role)
+            .find(|item| item.config_id == role.config_id)
             .ok_or_else(|| anyhow!("missing selected candidate for role={}", role.role))?;
-        let report_path = run_dir.join("reports/report.json");
-        let report_text = fs::read_to_string(&report_path)
-            .with_context(|| format!("read {}", report_path.display()))?;
-        let report_doc: JsonValue =
-            serde_json::from_str(&report_text).context("parse report.json for promoted write")?;
-        let config_path = report_doc["items"]
-            .as_array()
-            .and_then(|items| {
-                items.iter().find_map(|item| {
-                    if item["config_id"].as_str() == Some(source_item.config_id.as_str()) {
-                        item["config_path"].as_str().map(PathBuf::from)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .ok_or_else(|| anyhow!("selected config not found in report.json"))?;
+        let config_path = PathBuf::from(&source_item.config_path);
         let target_path = run_dir
             .join("promoted_configs")
             .join(format!("{}.yaml", target.role));
@@ -1642,8 +1713,40 @@ fn write_promoted_configs(
                 target_path.display()
             )
         })?;
+        let live_target_path = resolve_under_project(project_dir, &target.yaml_path);
+        if deployment.apply_to_paper {
+            if let Some(parent) = live_target_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            fs::copy(&config_path, &live_target_path).with_context(|| {
+                format!(
+                    "copy selected config {} -> {}",
+                    config_path.display(),
+                    live_target_path.display()
+                )
+            })?;
+        }
+        let restarted_service = if deployment.apply_to_paper && deployment.restart_services {
+            restart_user_service(target.service.as_str())?
+        } else {
+            false
+        };
+        events.push(DeploymentEvent {
+            role: target.role.clone(),
+            source_config_path: config_path.display().to_string(),
+            promoted_config_path: target_path.display().to_string(),
+            target_yaml_path: live_target_path.display().to_string(),
+            service: target.service.clone(),
+            restarted_service,
+            status: if deployment.apply_to_paper {
+                "applied".to_string()
+            } else {
+                "staged_only".to_string()
+            },
+        });
     }
-    Ok(())
+    Ok(events)
 }
 
 fn build_run_metadata(input: RunMetadataInput<'_>) -> Result<RunMetadata> {
@@ -1788,6 +1891,28 @@ fn run_command(
         );
     }
     Ok(output)
+}
+
+fn restart_user_service(service: &str) -> Result<bool> {
+    let unit = if service.ends_with(".service") {
+        service.to_string()
+    } else {
+        format!("{service}.service")
+    };
+    let output = Command::new("systemctl")
+        .arg("--user")
+        .arg("restart")
+        .arg(&unit)
+        .output()
+        .with_context(|| format!("restart {unit}"))?;
+    if !output.status.success() {
+        bail!(
+            "systemctl --user restart {} failed: {}",
+            unit,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(true)
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

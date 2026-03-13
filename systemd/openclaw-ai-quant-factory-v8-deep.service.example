@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=0
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=%h/.config/openclaw/ai-quant-v8.env
 ExecStart=$PROJECT_DIR/target/release/aiq-factory run --config $PROJECT_DIR/config/strategy_overrides.yaml --settings $PROJECT_DIR/config/factory_defaults.yaml --profile deep --json
