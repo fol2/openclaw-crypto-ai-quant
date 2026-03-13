@@ -235,13 +235,15 @@ pub fn execute_open(
             return Ok(existing_manual_execution_payload("open", &existing));
         }
     }
-    validate_manual_confirmation(
-        &conn,
-        confirm_token,
-        MANUAL_CONFIRM_ACTION_OPEN,
-        param_hash,
-        chrono::Utc::now().timestamp_millis(),
-    )?;
+    if early_retry_claim.is_none() {
+        validate_manual_confirmation(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            param_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+    }
 
     let client = build_client(cfg)?;
     let prepared = prepare_open(&client, cfg, request)?;
@@ -541,13 +543,15 @@ pub fn execute_close(
             return Ok(existing_manual_execution_payload("close", &existing));
         }
     }
-    validate_manual_confirmation(
-        &conn,
-        confirm_token,
-        MANUAL_CONFIRM_ACTION_CLOSE,
-        param_hash,
-        chrono::Utc::now().timestamp_millis(),
-    )?;
+    if early_retry_claim.is_none() {
+        validate_manual_confirmation(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_CLOSE,
+            param_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+    }
 
     let client = build_client(cfg)?;
     let prepared = prepare_close(&client, request)?;
