@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod factory_capability;
 mod heartbeat;
 mod hyperliquid;
 mod routes;

@@ -234,6 +234,10 @@ export async function cancelSweep(id: string) {
 
 // ── Factory API ─────────────────────────────────────────────────────
 
+export async function getFactoryCapability() {
+  return apiFetch('/api/factory/capability');
+}
+
 export async function getFactoryRuns() {
   return apiFetch('/api/factory/runs');
 }

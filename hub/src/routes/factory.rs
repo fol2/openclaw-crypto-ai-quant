@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -10,12 +11,16 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::error::HubError;
+use crate::factory_capability::{
+    disabled_response, FactoryCapability, FACTORY_SERVICE_UNITS, FACTORY_SETTINGS_PATH,
+};
 use crate::state::AppState;
 use crate::subprocess::JobStatus;
 
 /// Build factory sub-router.
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/factory/capability", get(get_capability))
         // Existing read-only artifact routes
         .route("/api/factory/runs", get(list_runs))
         .route("/api/factory/runs/{date}/{run_id}", get(run_detail))
@@ -34,6 +39,15 @@ pub fn routes() -> Router<Arc<AppState>> {
         // Timer routes
         .route("/api/factory/timer", get(get_timer))
         .route("/api/factory/timer/{action}", post(timer_action))
+}
+
+fn capability(state: &AppState) -> FactoryCapability {
+    FactoryCapability::current(&state.config)
+}
+
+/// GET /api/factory/capability — current dormant/active contract state.
+async fn get_capability(State(state): State<Arc<AppState>>) -> Json<FactoryCapability> {
+    Json(capability(&state))
 }
 
 // ── Artifact routes (existing) ─────────────────────────────────────
@@ -237,7 +251,7 @@ async fn run_candidates(
 
 /// Resolve settings file path.
 fn settings_path(state: &AppState) -> PathBuf {
-    state.config.aiq_root.join("config/factory_defaults.yaml")
+    state.config.aiq_root.join(FACTORY_SETTINGS_PATH)
 }
 
 /// Load saved factory defaults (returns empty Value if file doesn't exist).
@@ -254,13 +268,14 @@ fn load_settings(state: &AppState) -> Value {
 }
 
 /// POST /api/factory/run — launch a new factory cycle.
-async fn run_factory(
-    State(_state): State<Arc<AppState>>,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, HubError> {
-    Err(HubError::Forbidden(
-        "factory automation was retired with the zero-Python repository cutover".into(),
-    ))
+async fn run_factory(State(state): State<Arc<AppState>>, Json(_body): Json<Value>) -> Response {
+    let cap = capability(&state);
+    if !cap.execution_enabled {
+        return disabled_response(&cap, "run");
+    }
+
+    HubError::Internal("Factory execution support is not wired into this Hub build yet.".into())
+        .into_response()
 }
 
 /// GET /api/factory/jobs — list all factory jobs.
@@ -307,16 +322,19 @@ async fn job_status(
 }
 
 /// DELETE /api/factory/jobs/{id} — cancel a running factory job.
-async fn cancel_job(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, HubError> {
+async fn cancel_job(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let cap = capability(&state);
+    if !cap.execution_enabled {
+        return disabled_response(&cap, "cancel");
+    }
+
     let mut jobs = state.jobs.jobs.lock().await;
-    let job = jobs
-        .get_mut(&id)
-        .ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
+    let job = match jobs.get_mut(&id) {
+        Some(job) => job,
+        None => return HubError::NotFound(format!("job {id} not found")).into_response(),
+    };
     if job.status != JobStatus::Running {
-        return Err(HubError::BadRequest("job is not running".into()));
+        return HubError::BadRequest("job is not running".into()).into_response();
     }
     job.status = JobStatus::Cancelled;
     job.finished_at = Some(chrono::Utc::now().to_rfc3339());
@@ -326,7 +344,7 @@ async fn cancel_job(
         let _ = child.kill().await;
     }
 
-    Ok(Json(json!({ "ok": true, "cancelled": id })))
+    Json(json!({ "ok": true, "cancelled": id })).into_response()
 }
 
 // ── Settings routes ────────────────────────────────────────────────
@@ -337,30 +355,35 @@ async fn get_settings(State(state): State<Arc<AppState>>) -> Result<Json<Value>,
 }
 
 /// PUT /api/factory/settings — save factory defaults.
-async fn put_settings(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, HubError> {
+async fn put_settings(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let cap = capability(&state);
+    if !cap.execution_enabled {
+        return disabled_response(&cap, "settings.put");
+    }
+
     let path = settings_path(&state);
-    let yaml = serde_yaml::to_string(&body)?;
-    fs::write(&path, &yaml)?;
-    Ok(Json(json!({ "ok": true })))
+    let yaml = match serde_yaml::to_string(&body) {
+        Ok(yaml) => yaml,
+        Err(err) => return HubError::from(err).into_response(),
+    };
+    if let Err(err) = fs::write(&path, &yaml) {
+        return HubError::from(err).into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
 }
 
 // ── Timer routes ───────────────────────────────────────────────────
 
 /// Factory timer unit names.
-const FACTORY_TIMER: &str = "openclaw-ai-quant-factory-v8.timer";
-const FACTORY_DEEP_TIMER: &str = "openclaw-ai-quant-factory-v8-deep.timer";
-
 /// GET /api/factory/timer — timer status.
 async fn get_timer(State(_state): State<Arc<AppState>>) -> Result<Json<Value>, HubError> {
+    let capability = capability(&_state);
     let mut timers = Vec::new();
-    for timer in [FACTORY_TIMER, FACTORY_DEEP_TIMER] {
+    for timer in FACTORY_SERVICE_UNITS.map(|name| format!("{name}.timer")) {
         let output = Command::new("systemctl")
             .arg("--user")
             .arg("show")
-            .arg(timer)
+            .arg(&timer)
             .arg("--property=ActiveState,NextElapseUSecRealtime,LoadState")
             .output()
             .await
@@ -387,33 +410,44 @@ async fn get_timer(State(_state): State<Arc<AppState>>) -> Result<Json<Value>, H
             "load": load,
             "enabled": enabled,
             "next_trigger": next_elapse,
+            "mode": capability.mode,
         }));
     }
 
-    Ok(Json(json!({ "timers": timers })))
+    Ok(Json(json!({ "capability": capability, "timers": timers })))
 }
 
 /// POST /api/factory/timer/{action} — enable or disable factory timer.
-async fn timer_action(Path(action): Path<String>) -> Result<Json<Value>, HubError> {
+async fn timer_action(State(state): State<Arc<AppState>>, Path(action): Path<String>) -> Response {
+    let cap = capability(&state);
+    if !cap.execution_enabled {
+        return disabled_response(&cap, "timer");
+    }
+
     match action.as_str() {
         "enable" | "disable" => {}
         _ => {
-            return Err(HubError::BadRequest(format!(
+            return HubError::BadRequest(format!(
                 "invalid action: {action} (valid: enable, disable)"
-            )));
+            ))
+            .into_response();
         }
     }
 
     let mut results = Vec::new();
-    for timer in [FACTORY_TIMER, FACTORY_DEEP_TIMER] {
+    for timer in FACTORY_SERVICE_UNITS.map(|name| format!("{name}.timer")) {
         // enable/disable controls auto-start
         let output = Command::new("systemctl")
             .arg("--user")
             .arg(&action)
-            .arg(timer)
+            .arg(&timer)
             .output()
             .await
-            .map_err(|e| HubError::Internal(format!("systemctl failed: {e}")))?;
+            .map_err(|e| HubError::Internal(format!("systemctl failed: {e}")));
+        let output = match output {
+            Ok(output) => output,
+            Err(err) => return err.into_response(),
+        };
 
         let success = output.status.success();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -424,7 +458,7 @@ async fn timer_action(Path(action): Path<String>) -> Result<Json<Value>, HubErro
             let _ = Command::new("systemctl")
                 .arg("--user")
                 .arg(extra_action)
-                .arg(timer)
+                .arg(&timer)
                 .output()
                 .await;
         }
@@ -437,5 +471,5 @@ async fn timer_action(Path(action): Path<String>) -> Result<Json<Value>, HubErro
         }));
     }
 
-    Ok(Json(json!({ "ok": true, "results": results })))
+    Json(json!({ "ok": true, "results": results })).into_response()
 }

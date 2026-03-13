@@ -1,6 +1,12 @@
 # Success Metrics & Guardrails
 
-Operational metrics and risk limits that define "working" for the strategy factory system.
+Operational metrics and risk limits that define "working" for the active strategy
+lifecycle.
+
+The repository no longer treats automated factory execution as an active
+production surface. These thresholds still define the desired candidate →
+paper → live promotion path, whether that path is run manually or by a future
+reactivated factory contract.
 
 ## Risk Limits
 

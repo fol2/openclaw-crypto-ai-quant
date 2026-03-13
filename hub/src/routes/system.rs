@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::error::HubError;
+use crate::factory_capability::{FactoryCapability, FACTORY_SERVICE_UNITS};
 use crate::state::AppState;
 
 /// Build system sub-router.
@@ -29,6 +30,8 @@ const ALLOWED_SERVICES: &[&str] = &[
     "openclaw-ai-quant-trader-v8-paper1",
     "openclaw-ai-quant-trader-v8-paper2",
     "openclaw-ai-quant-trader-v8-paper3",
+    "openclaw-ai-quant-factory-v8",
+    "openclaw-ai-quant-factory-v8-deep",
     "openclaw-ai-quant-funding",
     "openclaw-ai-quant-funding-v8",
     "openclaw-ai-quant-ws-sidecar",
@@ -46,9 +49,14 @@ fn validate_service(name: &str) -> Result<(), HubError> {
     }
 }
 
+fn is_factory_service(name: &str) -> bool {
+    FACTORY_SERVICE_UNITS.contains(&name)
+}
+
 /// GET /api/system/services — List systemd user services with status.
-async fn list_services(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
+async fn list_services(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
     let mut services = Vec::new();
+    let factory_capability = FactoryCapability::current(&state.config);
 
     for svc_name in ALLOWED_SERVICES {
         let unit = format!("{svc_name}.service");
@@ -88,7 +96,9 @@ async fn list_services(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<V
             ),
         };
 
-        let status = if active == "active" {
+        let status = if is_factory_service(svc_name) && !factory_capability.execution_enabled {
+            "dormant"
+        } else if active == "active" {
             "ok"
         } else if load == "not-found" {
             "unknown"
@@ -103,6 +113,7 @@ async fn list_services(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<V
             "pid": pid,
             "load": load,
             "status": status,
+            "dormant": is_factory_service(svc_name) && !factory_capability.execution_enabled,
         }));
     }
 
@@ -111,9 +122,15 @@ async fn list_services(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<V
 
 /// POST /api/system/services/{name}/{action} — Restart/start/stop a service.
 async fn service_action(
+    State(state): State<Arc<AppState>>,
     axum::extract::Path((name, action)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<Value>, HubError> {
     validate_service(&name)?;
+    if is_factory_service(&name) && !FactoryCapability::current(&state.config).execution_enabled {
+        return Err(HubError::Forbidden(
+            "factory services are dormant until a Hub build with the `factory` feature is deployed and AI_QUANT_FACTORY_ENABLE=1 is set".into(),
+        ));
+    }
 
     match action.as_str() {
         "restart" | "start" | "stop" => {}

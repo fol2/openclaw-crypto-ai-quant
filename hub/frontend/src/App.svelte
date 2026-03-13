@@ -1,30 +1,38 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import './app.css';
   import Sidebar from './components/Sidebar.svelte';
+  import { getFactoryCapability } from './lib/api';
   import Dashboard from './pages/Dashboard.svelte';
   import Config from './pages/Config.svelte';
   import Backtest from './pages/Backtest.svelte';
   import Sweep from './pages/Sweep.svelte';
+  import Factory from './pages/Factory.svelte';
   import GridView from './pages/GridView.svelte';
   import Statements from './pages/Statements.svelte';
   import System from './pages/System.svelte';
 
-  function normalisePage(page: string): string {
-    return page === 'factory' ? 'dashboard' : page;
-  }
-
-  let currentPage = $state(normalisePage(window.location.hash.slice(1) || 'dashboard'));
+  let factoryCapability = $state<any | null>(null);
+  let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
   let sidebarOpen = $state(false);
   let sidebarCollapsed = $state(true);
 
   function handleHashChange() {
-    currentPage = normalisePage(window.location.hash.slice(1) || 'dashboard');
+    currentPage = window.location.hash.slice(1) || 'dashboard';
     sidebarOpen = false;
   }
 
   $effect(() => {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
+  });
+
+  onMount(async () => {
+    try {
+      factoryCapability = await getFactoryCapability();
+    } catch {
+      factoryCapability = null;
+    }
   });
 </script>
 
@@ -44,7 +52,14 @@
   <button class="overlay" onclick={() => sidebarOpen = false} aria-label="Close menu"></button>
 {/if}
 
-<Sidebar {currentPage} open={sidebarOpen} collapsed={sidebarCollapsed} onNavigate={() => sidebarOpen = false} onToggleCollapse={() => sidebarCollapsed = !sidebarCollapsed} />
+<Sidebar
+  {currentPage}
+  showFactory={true}
+  open={sidebarOpen}
+  collapsed={sidebarCollapsed}
+  onNavigate={() => sidebarOpen = false}
+  onToggleCollapse={() => sidebarCollapsed = !sidebarCollapsed}
+/>
 
 <main class="main-content">
   {#if currentPage === 'dashboard'}
@@ -55,6 +70,8 @@
     <Backtest />
   {:else if currentPage === 'sweep'}
     <Sweep />
+  {:else if currentPage === 'factory'}
+    <Factory />
   {:else if currentPage === 'grid'}
     <GridView />
   {:else if currentPage === 'statements'}

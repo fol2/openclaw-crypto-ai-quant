@@ -22,7 +22,7 @@ body:
         - Monitor Dashboard (monitor/)
         - Tools (tools/)
         - Configuration (config/)
-        - Strategy Factory (factory)
+        - Factory Contract (dormant / reactivation)
         - Other
     validations:
       required: true
