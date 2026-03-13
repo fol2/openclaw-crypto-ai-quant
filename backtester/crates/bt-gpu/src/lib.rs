@@ -96,6 +96,14 @@ fn interval_to_seconds(interval: &str) -> u32 {
     0
 }
 
+pub(crate) fn resolve_effective_strategy_config(
+    cfg: &StrategyConfig,
+) -> Result<StrategyConfig, String> {
+    bt_core::execution_contract::resolve_execution_config(cfg, None)
+        .map(|resolved| resolved.effective_cfg)
+        .map_err(|err| format!("execution contract resolution failed: {err}"))
+}
+
 /// Run a GPU-accelerated parameter sweep.
 ///
 /// **All-GPU pipeline**: Raw candles uploaded once → indicator kernel computes
@@ -546,7 +554,8 @@ fn run_gpu_sweep_internal(
                 for (path, value) in ind_combo {
                     bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
                 }
-                buffers::GpuIndicatorConfig::from_strategy_config(&cfg, spec.lookback)
+                let effective_cfg = resolve_effective_strategy_config(&cfg).unwrap_or(cfg);
+                buffers::GpuIndicatorConfig::from_strategy_config(&effective_cfg, spec.lookback)
             })
             .collect();
 
@@ -618,14 +627,25 @@ fn run_gpu_sweep_internal(
                 for (path, value) in trade_overrides {
                     bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
                 }
-                let mut gpu_cfg = match buffers::GpuComboConfig::from_strategy_config(&cfg) {
-                    Ok(v) => v,
+                let effective_cfg = match resolve_effective_strategy_config(&cfg) {
+                    Ok(cfg) => cfg,
                     Err(e) => {
-                        eprintln!("[GPU] invalid combo config conversion: {e} — skipping batch");
+                        eprintln!("[GPU] invalid combo execution contract: {e} — skipping batch");
                         skip_batch = true;
                         break;
                     }
                 };
+                let mut gpu_cfg =
+                    match buffers::GpuComboConfig::from_strategy_config(&effective_cfg) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!(
+                                "[GPU] invalid combo config conversion: {e} — skipping batch"
+                            );
+                            skip_batch = true;
+                            break;
+                        }
+                    };
                 gpu_cfg.snapshot_offset = snap_off;
                 gpu_cfg.breadth_offset = br_off;
                 gpu_configs.push(gpu_cfg);

@@ -643,11 +643,8 @@ impl StrategyConfig {
         self.thresholds.entry.ave_avg_atr_window
     }
 
-    pub fn resolve_behaviour_plan(
-        &self,
-        profile_override: Option<&str>,
-    ) -> Result<ResolvedBehaviourPlan, bt_signals::behaviour::BehaviourResolveError> {
-        let profile = profile_override
+    pub fn resolve_active_profile(&self, profile_override: Option<&str>) -> String {
+        profile_override
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
@@ -662,7 +659,14 @@ impl StrategyConfig {
                 } else {
                     configured.to_string()
                 }
-            });
+            })
+    }
+
+    pub fn resolve_behaviour_plan(
+        &self,
+        profile_override: Option<&str>,
+    ) -> Result<ResolvedBehaviourPlan, bt_signals::behaviour::BehaviourResolveError> {
+        let profile = self.resolve_active_profile(profile_override);
         let profile_config = merge_behaviour_profile(
             crate::behaviour::builtin_behaviour_profile(&profile).unwrap_or_default(),
             self.pipeline

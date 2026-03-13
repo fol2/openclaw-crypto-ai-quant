@@ -263,14 +263,14 @@ pub struct GpuComboConfig {
     pub reef_long_rsi_extreme_gt: f32,
     pub reef_short_rsi_extreme_lt: f32,
 
-    // Dynamic leverage [10-13]
-    // [10] reserved (was enable_dynamic_leverage, removed — always dynamic now)
-    pub _reserved10: u32,
+    // Dynamic leverage + smart-exit contract [10-13]
+    // [10] smart-exit behaviour mask (bit-per-behaviour, see constants below)
+    pub smart_exit_behaviour_mask: u32,
     pub leverage_low: f32,
     pub leverage_medium: f32,
     pub leverage_high: f32,
-    // [14] reserved (was leverage_max_cap, removed)
-    pub _reserved14: f32,
+    // [14] non-smart exit behaviour mask (bit-per-behaviour, see constants below)
+    pub exit_behaviour_mask: u32,
     // Trailing config (repurposed pad slots) [15]
     pub trailing_rsi_floor_default: f32,
 
@@ -872,8 +872,12 @@ mod tests {
     use super::{
         GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
     };
-    use bt_core::config::StrategyConfig;
+    use bt_core::config::{
+        BehaviourGroupConfig, BehaviourProfileConfig, PipelineConfig, PipelineProfileConfig,
+        RuntimeConfig, StrategyConfig,
+    };
     use bytemuck::{checked, Zeroable};
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_gpu_indicator_config_uses_threshold_ave_window() {
@@ -998,6 +1002,74 @@ mod tests {
             GpuComboConfig::from_strategy_config(&cfg).is_ok(),
             "default config should not overflow"
         );
+    }
+
+    #[test]
+    fn test_gpu_combo_config_uses_resolved_execution_contract() {
+        let profile = "gpu_modular";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime = RuntimeConfig {
+            profile: profile.to_string(),
+            ..RuntimeConfig::default()
+        };
+        cfg.pipeline = PipelineConfig {
+            default_profile: "production".to_string(),
+            profiles: BTreeMap::from([(
+                profile.to_string(),
+                PipelineProfileConfig {
+                    behaviours: BehaviourProfileConfig {
+                        entry_sizing: BehaviourGroupConfig {
+                            disabled: vec![
+                                "entry.sizing.dynamic".to_string(),
+                                "entry.sizing.confidence_multiplier".to_string(),
+                                "entry.sizing.adx_multiplier".to_string(),
+                                "entry.sizing.volatility_scalar".to_string(),
+                                "entry.sizing.min_notional_bump".to_string(),
+                            ],
+                            ..BehaviourGroupConfig::default()
+                        },
+                        entry_progression: BehaviourGroupConfig {
+                            disabled: vec![
+                                "entry.progression.pyramiding".to_string(),
+                                "entry.progression.add_cooldown".to_string(),
+                            ],
+                            ..BehaviourGroupConfig::default()
+                        },
+                        risk: BehaviourGroupConfig {
+                            disabled: vec![
+                                "risk.entry_cooldown".to_string(),
+                                "risk.exit_cooldown".to_string(),
+                                "risk.pesc".to_string(),
+                            ],
+                            ..BehaviourGroupConfig::default()
+                        },
+                        ..BehaviourProfileConfig::default()
+                    },
+                    ..PipelineProfileConfig::default()
+                },
+            )]),
+        };
+
+        let resolved = bt_core::execution_contract::resolve_execution_config(&cfg, None)
+            .expect("execution contract must resolve");
+        let gpu = GpuComboConfig::from_strategy_config(&resolved.effective_cfg)
+            .expect("resolved config must lower into GPU combo config");
+
+        assert_eq!(gpu.enable_dynamic_sizing, 0);
+        assert!((gpu.confidence_mult_high - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.confidence_mult_medium - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.confidence_mult_low - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.adx_sizing_min_mult - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.adx_sizing_full_adx - 0.0).abs() < f32::EPSILON);
+        assert!((gpu.vol_baseline_pct - 0.0).abs() < f32::EPSILON);
+        assert!((gpu.vol_scalar_min - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.vol_scalar_max - 1.0).abs() < f32::EPSILON);
+        assert_eq!(gpu.bump_to_min_notional, 0);
+        assert_eq!(gpu.enable_pyramiding, 0);
+        assert_eq!(gpu.add_cooldown_minutes, 0);
+        assert_eq!(gpu.entry_cooldown_s, 0);
+        assert_eq!(gpu.exit_cooldown_s, 0);
+        assert_eq!(gpu.reentry_cooldown_minutes, 0);
     }
 
     #[test]

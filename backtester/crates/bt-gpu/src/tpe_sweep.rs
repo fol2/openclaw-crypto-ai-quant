@@ -1220,7 +1220,16 @@ fn evaluate_trade_only_batch(
         for (path, value) in overrides {
             bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
         }
-        let mut gpu_cfg = match buffers::GpuComboConfig::from_strategy_config(&cfg) {
+        let effective_cfg = match crate::resolve_effective_strategy_config(&cfg) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return failed_batch_results(
+                    trial_n,
+                    &format!("GpuComboConfig execution contract failed: {e}"),
+                );
+            }
+        };
+        let mut gpu_cfg = match buffers::GpuComboConfig::from_strategy_config(&effective_cfg) {
             Ok(v) => v,
             Err(e) => {
                 return failed_batch_results(
@@ -1312,7 +1321,7 @@ fn evaluate_mixed_batch_arena(
             for (path, value) in overrides {
                 bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
             }
-            cfg
+            crate::resolve_effective_strategy_config(&cfg).unwrap_or(cfg)
         })
         .collect();
 
