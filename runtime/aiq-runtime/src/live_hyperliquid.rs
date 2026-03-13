@@ -479,7 +479,8 @@ impl HyperliquidClient {
         if let serde_json::Value::Object(extra) = extra {
             body.extend(extra);
         }
-        self.client
+        let response = self
+            .client
             .post(
                 self.base_url
                     .join("info")
@@ -487,11 +488,8 @@ impl HyperliquidClient {
             )
             .json(&serde_json::Value::Object(body))
             .send()
-            .context("Hyperliquid info request failed")?
-            .error_for_status()
-            .context("Hyperliquid info returned an error status")?
-            .json()
-            .context("failed to parse Hyperliquid info response")
+            .context("Hyperliquid info request failed")?;
+        parse_json_response(response, "Hyperliquid info")
     }
 
     fn post_action(&self, action: Value) -> Result<serde_json::Value> {
@@ -505,7 +503,8 @@ impl HyperliquidClient {
             "vaultAddress": serde_json::Value::Null,
             "expiresAfter": serde_json::Value::Null,
         });
-        self.client
+        let response = self
+            .client
             .post(
                 self.base_url
                     .join("exchange")
@@ -513,11 +512,8 @@ impl HyperliquidClient {
             )
             .json(&payload)
             .send()
-            .context("Hyperliquid exchange request failed")?
-            .error_for_status()
-            .context("Hyperliquid exchange returned an error status")?
-            .json()
-            .context("failed to parse Hyperliquid exchange response")
+            .context("Hyperliquid exchange request failed")?;
+        parse_json_response(response, "Hyperliquid exchange")
     }
 }
 
@@ -740,6 +736,20 @@ fn parse_number(raw: &str, field: &str) -> Result<f64> {
         .with_context(|| format!("failed to parse Hyperliquid numeric field {field}: {raw}"))
 }
 
+fn parse_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    label: &str,
+) -> Result<T> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        anyhow::bail!("{label} returned HTTP {} {}", status, body.trim());
+    }
+    response
+        .json()
+        .with_context(|| format!("failed to parse {label} response"))
+}
+
 fn parse_positions(response: ClearinghouseStateResponse) -> Result<Vec<HyperliquidPosition>> {
     let mut positions = Vec::new();
     for asset in response.asset_positions {
@@ -814,7 +824,12 @@ fn msgpack_value_to_json(value: &Value) -> serde_json::Value {
         }
         Value::F32(value) => serde_json::Value::from(*value),
         Value::F64(value) => serde_json::Value::from(*value),
-        Value::String(value) => serde_json::Value::String(value.to_string()),
+        Value::String(value) => serde_json::Value::String(
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| value.to_string()),
+        ),
         Value::Binary(value) => serde_json::Value::String(format!("0x{}", hex::encode(value))),
         Value::Array(values) => {
             serde_json::Value::Array(values.iter().map(msgpack_value_to_json).collect())
@@ -822,11 +837,21 @@ fn msgpack_value_to_json(value: &Value) -> serde_json::Value {
         Value::Map(entries) => {
             let mut map = serde_json::Map::new();
             for (key, value) in entries {
-                map.insert(key.to_string(), msgpack_value_to_json(value));
+                map.insert(map_key_to_json_string(key), msgpack_value_to_json(value));
             }
             serde_json::Value::Object(map)
         }
         Value::Ext(_, value) => serde_json::Value::String(format!("0x{}", hex::encode(value))),
+    }
+}
+
+fn map_key_to_json_string(key: &Value) -> String {
+    match key {
+        Value::String(value) => value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string()),
+        other => other.to_string(),
     }
 }
 
@@ -1004,5 +1029,39 @@ mod tests {
         assert!((positions[0].leverage - 4.0).abs() < 1e-9);
         assert!((positions[1].entry_price - 0.094602).abs() < 1e-9);
         assert!((positions[1].margin_used - 41.451039).abs() < 1e-9);
+    }
+
+    #[test]
+    fn msgpack_json_preserves_raw_string_keys_and_values() {
+        let action = map_value(vec![
+            ("type", Value::from("order")),
+            (
+                "orders",
+                Value::Array(vec![map_value(vec![
+                    ("a", Value::from(159_i64)),
+                    ("b", Value::from(true)),
+                    ("p", Value::from("36.61452001")),
+                    ("s", Value::from("2.82")),
+                    ("r", Value::from(true)),
+                    (
+                        "t",
+                        map_value(vec![(
+                            "limit",
+                            map_value(vec![("tif", Value::from("Ioc"))]),
+                        )]),
+                    ),
+                ])]),
+            ),
+            ("grouping", Value::from("na")),
+        ]);
+
+        let json_value = msgpack_value_to_json(&action);
+        assert_eq!(json_value["type"], "order");
+        assert_eq!(json_value["grouping"], "na");
+        assert_eq!(json_value["orders"][0]["p"], "36.61452001");
+        assert_eq!(json_value["orders"][0]["t"]["limit"]["tif"], "Ioc");
+        let encoded = json_value.to_string();
+        assert!(!encoded.contains("\\\"type\\\""));
+        assert!(!encoded.contains("\\\"order\\\""));
     }
 }
