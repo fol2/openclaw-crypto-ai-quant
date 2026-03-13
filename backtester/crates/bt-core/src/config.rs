@@ -663,13 +663,60 @@ impl StrategyConfig {
                     configured.to_string()
                 }
             });
-        let profile_config = self
-            .pipeline
-            .profiles
-            .get(&profile)
-            .map(|profile| profile.behaviours.clone())
-            .unwrap_or_default();
+        let profile_config = merge_behaviour_profile(
+            crate::behaviour::builtin_behaviour_profile(&profile).unwrap_or_default(),
+            self.pipeline
+                .profiles
+                .get(&profile)
+                .map(|profile| profile.behaviours.clone())
+                .unwrap_or_default(),
+        );
         crate::behaviour::resolve_behaviour_plan(&profile, &profile_config)
+    }
+}
+
+fn merge_behaviour_group(
+    base: BehaviourGroupConfig,
+    override_group: BehaviourGroupConfig,
+) -> BehaviourGroupConfig {
+    BehaviourGroupConfig {
+        order: if override_group.order.is_empty() {
+            base.order
+        } else {
+            override_group.order
+        },
+        enabled: if override_group.enabled.is_empty() {
+            base.enabled
+        } else {
+            override_group.enabled
+        },
+        disabled: if override_group.disabled.is_empty() {
+            base.disabled
+        } else {
+            override_group.disabled
+        },
+    }
+}
+
+fn merge_behaviour_profile(
+    base: BehaviourProfileConfig,
+    override_profile: BehaviourProfileConfig,
+) -> BehaviourProfileConfig {
+    BehaviourProfileConfig {
+        gates: merge_behaviour_group(base.gates, override_profile.gates),
+        signal_modes: merge_behaviour_group(base.signal_modes, override_profile.signal_modes),
+        signal_confidence: merge_behaviour_group(
+            base.signal_confidence,
+            override_profile.signal_confidence,
+        ),
+        exits: merge_behaviour_group(base.exits, override_profile.exits),
+        engine: merge_behaviour_group(base.engine, override_profile.engine),
+        entry_sizing: merge_behaviour_group(base.entry_sizing, override_profile.entry_sizing),
+        entry_progression: merge_behaviour_group(
+            base.entry_progression,
+            override_profile.entry_progression,
+        ),
+        risk: merge_behaviour_group(base.risk, override_profile.risk),
     }
 }
 
@@ -1579,6 +1626,10 @@ global:
       parity_baseline:
         ranker: confidence_adx
         disabled_stages: ["broker_execution"]
+        behaviours:
+          exits:
+            order: ["exit.take_profit.full", "exit.take_profit.partial"]
+            disabled: ["exit.take_profit.partial"]
 symbols:
   BTC:
     pipeline:
@@ -1600,6 +1651,17 @@ live:
         assert_eq!(
             profile.disabled_stages,
             vec!["broker_execution", "oms_transition"]
+        );
+        assert_eq!(
+            profile.behaviours.exits.order,
+            vec![
+                "exit.take_profit.full".to_string(),
+                "exit.take_profit.partial".to_string()
+            ]
+        );
+        assert_eq!(
+            profile.behaviours.exits.disabled,
+            vec!["exit.take_profit.partial".to_string()]
         );
 
         let cfg_live = load_config(tmp.to_str().unwrap(), Some("BTC"), true);
@@ -1720,5 +1782,32 @@ global:
             .get(serde_yaml::Value::String("leverage".to_string()))
             .unwrap()
             .is_null());
+    }
+
+    #[test]
+    fn test_builtin_parity_baseline_behaviour_profile_resolves_explicit_exit_order() {
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = "parity_baseline".to_string();
+
+        let plan = cfg.resolve_behaviour_plan(None).unwrap();
+
+        assert_eq!(plan.exits.items[0].id, "exit.stop_loss.ase");
+        assert_eq!(plan.exits.items[3].id, "exit.stop_loss.base");
+        assert_eq!(plan.exits.items[8].id, "exit.take_profit.partial");
+        assert!(plan.exits.is_enabled("exit.smart.tsme"));
+    }
+
+    #[test]
+    fn test_builtin_parity_exit_isolation_disables_non_base_exit_modifiers() {
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = "parity_exit_isolation".to_string();
+
+        let plan = cfg.resolve_behaviour_plan(None).unwrap();
+
+        assert!(!plan.exits.is_enabled("exit.stop_loss.breakeven"));
+        assert!(!plan.exits.is_enabled("exit.take_profit.partial"));
+        assert!(!plan.exits.is_enabled("exit.smart.trend_breakdown"));
+        assert!(plan.exits.is_enabled("exit.stop_loss.base"));
+        assert!(plan.exits.is_enabled("exit.take_profit.full"));
     }
 }

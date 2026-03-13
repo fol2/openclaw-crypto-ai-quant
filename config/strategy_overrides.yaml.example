@@ -23,7 +23,7 @@ global:
     leverage_high: 5.0                # SWEPT (default 5.0, same)
 
     # --- Execution ---
-    use_bbo_for_fills: true           # engine-only (backtester: no orderbook data)
+    use_bbo_for_fills: true           # runtime-only (backtester: no orderbook data)
     slippage_bps: 10.0                # conservative, matches backtester
 
     # --- Dynamic sizing ---
@@ -105,8 +105,8 @@ global:
     glitch_atr_mult: 12.0             # default
 
     # --- Rate limits ---
-    entry_cooldown_s: 20              # engine-only (backtester: N/A, sub-bar timing)
-    exit_cooldown_s: 15               # engine-only (backtester: N/A, sub-bar timing)
+    entry_cooldown_s: 20              # runtime-only (backtester: N/A, sub-bar timing)
+    exit_cooldown_s: 15               # runtime-only (backtester: N/A, sub-bar timing)
     max_entry_orders_per_loop: 6      # default
 
   indicators:
@@ -203,7 +203,103 @@ global:
     - ZK
     - ZRO
 
-  engine:                             # engine-only (Rust ignores)
+  runtime:
+    profile: production               # explicit default; empty follows pipeline.default_profile
+
+  pipeline:
+    default_profile: production
+    profiles:
+      parity_baseline:
+        disabled_stages:
+          - broker_execution
+          - fill_reconciliation
+        behaviours:
+          gates:
+            order:
+              - gate.ranging_vote
+              - gate.anomaly_filter
+              - gate.extension_filter
+              - gate.volume_confirmation
+              - gate.adx_rising
+              - gate.adx_floor
+              - gate.adx_floor.tmc_cap
+              - gate.adx_floor.ave_multiplier
+              - gate.alignment.macro
+              - gate.alignment.btc
+              - gate.override.slow_drift_unrange
+          signal_modes:
+            order:
+              - signal.mode.standard_trend
+              - signal.mode.pullback
+              - signal.mode.slow_drift
+          signal_confidence:
+            order:
+              - signal.confidence.high_volume_upgrade
+          exits:
+            order:
+              - exit.stop_loss.ase
+              - exit.stop_loss.dase
+              - exit.stop_loss.slb
+              - exit.stop_loss.base
+              - exit.stop_loss.breakeven
+              - exit.trailing.low_conf_override
+              - exit.trailing.vol_buffer
+              - exit.trailing.base
+              - exit.take_profit.partial
+              - exit.take_profit.full
+              - exit.smart.trend_breakdown
+              - exit.smart.trend_exhaustion
+              - exit.smart.ema_macro_breakdown
+              - exit.smart.stagnation
+              - exit.smart.funding_headwind
+              - exit.smart.tsme
+              - exit.smart.mmde
+              - exit.smart.rsi_overextension
+          engine:
+            order:
+              - engine.atr_floor
+              - engine.reverse_signal
+              - engine.regime_filter
+              - engine.entry_budget
+          entry_sizing:
+            order:
+              - entry.sizing.dynamic
+              - entry.sizing.confidence_multiplier
+              - entry.sizing.adx_multiplier
+              - entry.sizing.volatility_scalar
+              - entry.sizing.min_notional_bump
+          entry_progression:
+            order:
+              - entry.progression.pyramiding
+              - entry.progression.add_cooldown
+              - entry.progression.tp1_block_add
+          risk:
+            order:
+              - risk.exposure_guard
+              - risk.entry_cooldown
+              - risk.exit_cooldown
+              - risk.pesc
+      parity_exit_isolation:
+        disabled_stages:
+          - broker_execution
+          - fill_reconciliation
+        behaviours:
+          exits:
+            disabled:
+              - exit.stop_loss.breakeven
+              - exit.trailing.low_conf_override
+              - exit.trailing.vol_buffer
+              - exit.take_profit.partial
+              - exit.smart.trend_breakdown
+              - exit.smart.trend_exhaustion
+              - exit.smart.ema_macro_breakdown
+              - exit.smart.stagnation
+              - exit.smart.funding_headwind
+              - exit.smart.tsme
+              - exit.smart.mmde
+              - exit.smart.rsi_overextension
+
+  engine:                             # shared runtime/backtester interval contract
     interval: 30m                     # main indicator candle (NOT hot-reloadable)
     entry_interval: 3m                # entry signal granularity (hot-reloadable)
     exit_interval: 3m                 # exit price candle (hot-reloadable)
@@ -216,6 +312,8 @@ global:
 # Notes:
 # - Changing global.engine.interval requires a restart (engine.interval is not hot-reloadable).
 # - entry_interval / exit_interval are hot-reloadable.
+# - Switch `global.runtime.profile` to `parity_baseline` or `parity_exit_isolation`
+#   when you want a deterministic parity/debug lane without editing Rust code.
 modes:
   primary:
     global:

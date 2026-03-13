@@ -46,11 +46,16 @@ active profile:
 ```bash
 cargo run -p aiq-runtime -- pipeline --mode paper --json
 cargo run -p aiq-runtime -- pipeline --mode live --profile parity_baseline --json
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_exit_isolation --json
 ```
 
 Look for `behaviours.gates`, `behaviours.signal_modes`, `behaviours.exits`,
 `behaviours.entry_sizing`, `behaviours.entry_progression`, and `behaviours.risk`
 when validating a parity lane.
+
+Use `parity_baseline` when you need production-like behaviour ordering with no
+broker execution, and `parity_exit_isolation` when you want to focus on base
+stop-loss, trailing, and full take-profit behaviour without modifier noise.
 
 For exit-path debugging, confirm both the resolved `behaviours.exits` order and
 the emitted `behaviour_trace` in the paper/live report. That trace now tells you

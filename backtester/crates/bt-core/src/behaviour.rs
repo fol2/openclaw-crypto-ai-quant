@@ -178,6 +178,67 @@ impl ResolvedBehaviourPlan {
     }
 }
 
+fn ordered_group(descriptors: &[BehaviourDescriptor]) -> BehaviourGroupConfig {
+    BehaviourGroupConfig {
+        order: descriptors
+            .iter()
+            .map(|descriptor| descriptor.id.to_string())
+            .collect(),
+        enabled: Vec::new(),
+        disabled: Vec::new(),
+    }
+}
+
+fn ordered_exit_group() -> BehaviourGroupConfig {
+    BehaviourGroupConfig {
+        order: DEFAULT_EXIT_BEHAVIOURS
+            .iter()
+            .chain(DEFAULT_EXIT_SMART_EXTENDED_BEHAVIOURS.iter())
+            .map(|descriptor| descriptor.id.to_string())
+            .collect(),
+        enabled: Vec::new(),
+        disabled: Vec::new(),
+    }
+}
+
+fn parity_baseline_profile() -> BehaviourProfileConfig {
+    BehaviourProfileConfig {
+        gates: ordered_group(&DEFAULT_GATE_BEHAVIOURS),
+        signal_modes: ordered_group(&DEFAULT_SIGNAL_MODE_BEHAVIOURS),
+        signal_confidence: ordered_group(&DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS),
+        exits: ordered_exit_group(),
+        engine: ordered_group(&DEFAULT_ENGINE_BEHAVIOURS),
+        entry_sizing: ordered_group(&DEFAULT_ENTRY_SIZING_BEHAVIOURS),
+        entry_progression: ordered_group(&DEFAULT_ENTRY_PROGRESSION_BEHAVIOURS),
+        risk: ordered_group(&DEFAULT_RISK_BEHAVIOURS),
+    }
+}
+
+pub fn builtin_behaviour_profile(profile: &str) -> Option<BehaviourProfileConfig> {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "parity_baseline" => Some(parity_baseline_profile()),
+        "parity_exit_isolation" => {
+            let mut profile = parity_baseline_profile();
+            profile.exits.disabled = vec![
+                "exit.stop_loss.breakeven".to_string(),
+                "exit.trailing.low_conf_override".to_string(),
+                "exit.trailing.vol_buffer".to_string(),
+                "exit.take_profit.partial".to_string(),
+                "exit.smart.trend_breakdown".to_string(),
+                "exit.smart.trend_exhaustion".to_string(),
+                "exit.smart.ema_macro_breakdown".to_string(),
+                "exit.smart.stagnation".to_string(),
+                "exit.smart.funding_headwind".to_string(),
+                "exit.smart.tsme".to_string(),
+                "exit.smart.mmde".to_string(),
+                "exit.smart.rsi_overextension".to_string(),
+            ];
+            Some(profile)
+        }
+        _ => None,
+    }
+}
+
 pub fn resolve_behaviour_plan(
     profile: &str,
     config: &BehaviourProfileConfig,
