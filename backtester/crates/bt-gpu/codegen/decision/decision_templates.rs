@@ -31,6 +31,26 @@ pub const DECISION_HEADER: &str = "\
 // =============================================================================
 
 #pragma once
+
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_ASE = 1u << 0;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_DASE = 1u << 1;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_SLB = 1u << 2;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_BASE = 1u << 3;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN = 1u << 4;
+static constexpr unsigned int GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE = 1u << 5;
+static constexpr unsigned int GPU_EXIT_MASK_TRAILING_VOL_BUFFER = 1u << 6;
+static constexpr unsigned int GPU_EXIT_MASK_TRAILING_BASE = 1u << 7;
+static constexpr unsigned int GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL = 1u << 8;
+static constexpr unsigned int GPU_EXIT_MASK_TAKE_PROFIT_FULL = 1u << 9;
+
+static constexpr unsigned int GPU_SMART_EXIT_MASK_TREND_BREAKDOWN = 1u << 0;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_TREND_EXHAUSTION = 1u << 1;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN = 1u << 2;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_STAGNATION = 1u << 3;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_FUNDING_HEADWIND = 1u << 4;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_TSME = 1u << 5;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_MMDE = 1u << 6;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION = 1u << 7;
 ";
 
 // The SOURCE_HASHES line will be injected by the drift detector (AQC-1200)
@@ -556,6 +576,10 @@ __device__ double compute_sl_price_codegen(
     // ATR fallback: legacy positions with no ATR recorded
     double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
 
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u) {
+        return 0.0;
+    }
+
     double sl_mult = (double)cfg.sl_atr_mult;
 
     // ── 1. ASE (ADX Slope-Adjusted Stop) ─────────────────────────────────
@@ -567,7 +591,9 @@ __device__ double compute_sl_price_codegen(
     } else {              // POS_SHORT
         is_underwater = (current_price > entry_price);
     }
-    if (adx_slope < 0.0 && is_underwater) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_ASE) != 0u
+        && adx_slope < 0.0
+        && is_underwater) {
         sl_mult *= 0.8;
     }
 
@@ -576,7 +602,7 @@ __device__ double compute_sl_price_codegen(
 
     // ── 3. DASE (Dynamic ADX Stop Expansion) ─────────────────────────────
     // If ADX > 40 and position is profitable by > 0.5 ATR, widen by 15%.
-    if (adx > 40.0) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_DASE) != 0u && adx > 40.0) {
         double profit_in_atr;
         if (pos_type == 1) {  // POS_LONG
             profit_in_atr = (current_price - entry_price) / eff_atr;
@@ -590,7 +616,7 @@ __device__ double compute_sl_price_codegen(
 
     // ── 4. SLB (Saturation Loyalty Buffer) ───────────────────────────────
     // If ADX > 45 (saturated/strong trend), widen overall SL by 10%.
-    if (adx > 45.0) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB) != 0u && adx > 45.0) {
         sl_mult *= 1.10;
     }
 
@@ -605,7 +631,9 @@ __device__ double compute_sl_price_codegen(
     // ── 5. Breakeven Stop ────────────────────────────────────────────────
     // If profit exceeds breakeven_start_atr ATRs, move SL to
     // entry +/- breakeven_buffer_atr ATRs (protecting at least entry).
-    if (cfg.enable_breakeven_stop != 0u && cfg.breakeven_start_atr > 0.0f) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN) != 0u
+        && cfg.enable_breakeven_stop != 0u
+        && cfg.breakeven_start_atr > 0.0f) {
         double be_start = eff_atr * (double)cfg.breakeven_start_atr;
         double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
 
@@ -659,11 +687,16 @@ __device__ double compute_trailing_codegen(
     // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
     double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
 
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_BASE) == 0u) {
+        return current_trailing_sl;
+    }
+
     // ── Per-confidence overrides for trailing start / distance ─────────────
     double trailing_start = (double)cfg.trailing_start_atr;
     double trailing_dist  = (double)cfg.trailing_distance_atr;
 
-    if (confidence == 0) {  // Confidence::Low == 0
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE) != 0u
+        && confidence == 0) {  // Confidence::Low == 0
         if (cfg.trailing_start_atr_low_conf > 0.0f) {
             trailing_start = (double)cfg.trailing_start_atr_low_conf;
         }
@@ -687,7 +720,8 @@ __device__ double compute_trailing_codegen(
     double effective_dist = trailing_dist;
 
     // VBTS (Vol-Buffered Trailing Stop, v5.015): widen when BB expanding.
-    if (cfg.enable_vol_buffered_trailing != 0u
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER) != 0u
+        && cfg.enable_vol_buffered_trailing != 0u
         && bb_width_ratio > (double)cfg.trailing_vbts_bb_threshold) {
         effective_dist *= (double)cfg.trailing_vbts_mult;
     }
@@ -796,6 +830,16 @@ __device__ TpResult check_tp_codegen(
     result.fraction = 0.0;
     result.exit_code = 0;
 
+    bool partial_tp_enabled =
+        (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL) != 0u
+        && cfg.enable_partial_tp != 0u;
+    bool full_tp_enabled =
+        (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TAKE_PROFIT_FULL) != 0u;
+
+    if (!partial_tp_enabled && !full_tp_enabled) {
+        return result;
+    }
+
     // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
     double atr = (entry_atr > 0.0) ? entry_atr : (entry_price * 0.005);
 
@@ -808,7 +852,7 @@ __device__ TpResult check_tp_codegen(
     }
 
     // ── Partial TP path ────────────────────────────────────────────────────
-    if (cfg.enable_partial_tp != 0u) {
+    if (partial_tp_enabled) {
         if (tp1_taken == 0u) {
             // Determine partial TP level: use dedicated mult if set,
             // otherwise same as full TP.
@@ -886,7 +930,7 @@ __device__ TpResult check_tp_codegen(
         tp_hit = (current_price <= tp_price);
     }
 
-    if (!tp_hit) {
+    if (!full_tp_enabled || !tp_hit) {
         return result;  // action=0, hold
     }
 
