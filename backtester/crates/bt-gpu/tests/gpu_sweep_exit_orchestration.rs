@@ -15,6 +15,8 @@ use std::sync::Mutex;
 
 const TRACE_KIND_CLOSE: u32 = 3;
 const TRACE_KIND_PARTIAL: u32 = 4;
+const TRACE_REASON_PARTIAL: u32 = 8;
+const TRACE_REASON_EXIT_TRAILING: u32 = 4;
 const TRACE_REASON_EXIT_TP: u32 = 5;
 
 static GPU_TRACE_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -30,6 +32,29 @@ fn bar_1h(t: i64, close: f64) -> OhlcvBar {
         v: 1_000.0,
         n: 1,
     }
+}
+
+fn sub_bar_3m(t: i64, close: f64) -> OhlcvBar {
+    OhlcvBar {
+        t,
+        t_close: t + 180_000,
+        o: close,
+        h: close,
+        l: close,
+        c: close,
+        v: 1_000.0,
+        n: 1,
+    }
+}
+
+fn linear_sub_bars(start_t: i64, from_close: f64, to_close: f64) -> Vec<OhlcvBar> {
+    (0..20)
+        .map(|slot| {
+            let alpha = (slot as f64 + 1.0) / 20.0;
+            let close = from_close + (to_close - from_close) * alpha;
+            sub_bar_3m(start_t + ((slot as i64) + 1) * 180_000, close)
+        })
+        .collect()
 }
 
 fn permissive_cfg(profile: &str) -> StrategyConfig {
@@ -80,6 +105,13 @@ fn first_exit_trace(state: &GpuComboState) -> GpuTraceEvent {
         .expect("expected at least one GPU exit trace event")
 }
 
+fn exit_trace_events(state: &GpuComboState) -> Vec<GpuTraceEvent> {
+    collect_trace_events(state)
+        .into_iter()
+        .filter(|ev| ev.kind == TRACE_KIND_CLOSE || ev.kind == TRACE_KIND_PARTIAL)
+        .collect()
+}
+
 fn with_gpu_trace<T>(symbol_idx: u32, f: impl FnOnce() -> T) -> T {
     let _guard = GPU_TRACE_ENV_LOCK.lock().expect("trace env mutex poisoned");
     const KEYS: [&str; 3] = [
@@ -114,6 +146,76 @@ fn sweep_spec() -> SweepSpec {
         initial_balance: 1_000.0,
         lookback: 0,
     }
+}
+
+fn build_sub_bar_trailing_fixture() -> (CandleData, CandleData) {
+    let hour = 3_600_000i64;
+    let mut closes = vec![100.0; 70];
+    closes.extend([
+        100.5, 101.0, 101.8, 102.6, 103.4, 104.2, 105.0, 105.8, 106.6, 107.4, 108.2,
+    ]);
+    let main = closes
+        .iter()
+        .enumerate()
+        .map(|(idx, close)| bar_1h(idx as i64 * hour, *close))
+        .collect::<Vec<_>>();
+    let mut sub = Vec::new();
+    for idx in 1..(closes.len() - 1) {
+        sub.extend(linear_sub_bars(
+            (idx as i64 - 1) * hour,
+            closes[idx - 1],
+            closes[idx],
+        ));
+    }
+    let start = (closes.len() as i64 - 2) * hour;
+    for (slot, close) in [
+        109.0, 110.0, 111.0, 110.6, 110.0, 109.4, 108.8, 108.2, 107.8, 107.4,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sub.push(sub_bar_3m(start + ((slot as i64) + 1) * 180_000, close));
+    }
+
+    let mut candles: CandleData = FxHashMap::default();
+    candles.insert("BTC".to_string(), main);
+    let mut sub_candles: CandleData = FxHashMap::default();
+    sub_candles.insert("BTC".to_string(), sub);
+    (candles, sub_candles)
+}
+
+fn build_sub_bar_tp_continuation_fixture() -> (CandleData, CandleData) {
+    let hour = 3_600_000i64;
+    let mut closes = vec![100.0; 70];
+    closes.extend([
+        100.4, 100.8, 101.2, 101.6, 102.0, 102.4, 102.8, 103.2, 103.6, 104.0, 104.4,
+    ]);
+    let main = closes
+        .iter()
+        .enumerate()
+        .map(|(idx, close)| bar_1h(idx as i64 * hour, *close))
+        .collect::<Vec<_>>();
+    let mut sub = Vec::new();
+    for idx in 1..(closes.len() - 1) {
+        sub.extend(linear_sub_bars(
+            (idx as i64 - 1) * hour,
+            closes[idx - 1],
+            closes[idx],
+        ));
+    }
+    let start = (closes.len() as i64 - 2) * hour;
+    for (slot, close) in [105.0, 106.5, 108.0, 109.5, 111.0, 112.5, 113.0]
+        .into_iter()
+        .enumerate()
+    {
+        sub.push(sub_bar_3m(start + ((slot as i64) + 1) * 180_000, close));
+    }
+
+    let mut candles: CandleData = FxHashMap::default();
+    candles.insert("BTC".to_string(), main);
+    let mut sub_candles: CandleData = FxHashMap::default();
+    sub_candles.insert("BTC".to_string(), sub);
+    (candles, sub_candles)
 }
 
 fn sweep_engine_source() -> String {
@@ -262,5 +364,249 @@ fn cpu_gpu_main_bar_exit_order_prefers_full_before_partial_take_profit() {
     assert_eq!(
         gpu_exit.reason, TRACE_REASON_EXIT_TP,
         "GPU main-bar loop must honour full-before-partial take-profit order"
+    );
+}
+
+#[test]
+fn cpu_gpu_sub_bar_trailing_exit_matches_cpu_reason() {
+    if let Err(err) = CudaDevice::new(0) {
+        eprintln!("Skipping: CUDA unavailable: {:?}", err);
+        return;
+    }
+
+    let profile = "gpu_sub_bar_trailing";
+    let mut cfg = permissive_cfg(profile);
+    cfg.engine.entry_interval = "3m".to_string();
+    cfg.engine.exit_interval = "3m".to_string();
+    cfg.trade.sl_atr_mult = 99.0;
+    cfg.trade.tp_atr_mult = 99.0;
+    cfg.trade.enable_partial_tp = false;
+    cfg.trade.trailing_start_atr = 0.5;
+    cfg.trade.trailing_distance_atr = 0.5;
+    cfg.trade.enable_vol_buffered_trailing = false;
+    cfg.trade.enable_rsi_overextension_exit = false;
+    cfg.trade.smart_exit_adx_exhaustion_lt = 0.0;
+    cfg.trade.smart_exit_adx_exhaustion_lt_low_conf = 0.0;
+    cfg.trade.tsme_min_profit_atr = 999.0;
+    cfg.pipeline = PipelineConfig {
+        default_profile: "production".to_string(),
+        profiles: BTreeMap::from([(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.stop_loss.ase".to_string(),
+                            "exit.stop_loss.dase".to_string(),
+                            "exit.stop_loss.slb".to_string(),
+                            "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.breakeven".to_string(),
+                            "exit.trailing.low_conf_override".to_string(),
+                            "exit.trailing.vol_buffer".to_string(),
+                            "exit.trailing.base".to_string(),
+                            "exit.take_profit.partial".to_string(),
+                            "exit.take_profit.full".to_string(),
+                        ],
+                        disabled: vec![
+                            "exit.smart.trend_exhaustion".to_string(),
+                            "exit.smart.ema_macro_breakdown".to_string(),
+                            "exit.smart.stagnation".to_string(),
+                            "exit.smart.funding_headwind".to_string(),
+                            "exit.smart.tsme".to_string(),
+                            "exit.smart.mmde".to_string(),
+                            "exit.smart.rsi_overextension".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        )]),
+    };
+
+    let (candles, sub_candles) = build_sub_bar_trailing_fixture();
+
+    let cpu = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 0,
+        exit_candles: Some(&sub_candles),
+        entry_candles: Some(&sub_candles),
+        funding_rates: None,
+        init_state: None,
+        from_ts: None,
+        to_ts: None,
+    });
+    let cpu_exit = cpu
+        .trades
+        .iter()
+        .rev()
+        .find(|trade| trade.is_close())
+        .unwrap_or_else(|| {
+            panic!(
+                "CPU run should emit at least one close; trades={:?}",
+                cpu.trades
+                    .iter()
+                    .map(|trade| format!(
+                        "{}:{}@{}",
+                        trade.action, trade.reason, trade.timestamp_ms
+                    ))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        cpu_exit.reason, "Trailing Stop",
+        "CPU sub-bar fixture should close via trailing stop, got `{}`",
+        cpu_exit.reason
+    );
+
+    let (_rows, states, _symbols) = with_gpu_trace(0, || {
+        run_gpu_sweep_with_states(
+            &candles,
+            &cfg,
+            &sweep_spec(),
+            None,
+            Some(&sub_candles),
+            None,
+            None,
+        )
+    });
+    let state = states
+        .first()
+        .copied()
+        .expect("GPU run should return one combo state");
+    let gpu_exit = exit_trace_events(&state)
+        .into_iter()
+        .last()
+        .expect("GPU run should emit at least one exit trace");
+    assert_eq!(
+        gpu_exit.reason, TRACE_REASON_EXIT_TRAILING,
+        "GPU sub-bar fixture should close via trailing trace reason"
+    );
+}
+
+#[test]
+fn cpu_gpu_sub_bar_partial_then_full_tp_continuation_matches_cpu_sequence() {
+    if let Err(err) = CudaDevice::new(0) {
+        eprintln!("Skipping: CUDA unavailable: {:?}", err);
+        return;
+    }
+
+    let profile = "gpu_sub_bar_tp_continuation";
+    let mut cfg = permissive_cfg(profile);
+    cfg.engine.entry_interval = "3m".to_string();
+    cfg.engine.exit_interval = "3m".to_string();
+    cfg.trade.sl_atr_mult = 99.0;
+    cfg.trade.tp_atr_mult = 2.5;
+    cfg.trade.enable_partial_tp = true;
+    cfg.trade.tp_partial_pct = 0.5;
+    cfg.trade.tp_partial_atr_mult = 1.5;
+    cfg.trade.tp_partial_min_notional_usd = 1.0;
+    cfg.trade.trailing_start_atr = 99.0;
+    cfg.trade.trailing_distance_atr = 99.0;
+    cfg.trade.enable_vol_buffered_trailing = false;
+    cfg.trade.enable_rsi_overextension_exit = false;
+    cfg.trade.smart_exit_adx_exhaustion_lt = 0.0;
+    cfg.trade.smart_exit_adx_exhaustion_lt_low_conf = 0.0;
+    cfg.trade.tsme_min_profit_atr = 999.0;
+    cfg.pipeline = PipelineConfig {
+        default_profile: "production".to_string(),
+        profiles: BTreeMap::from([(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.stop_loss.ase".to_string(),
+                            "exit.stop_loss.dase".to_string(),
+                            "exit.stop_loss.slb".to_string(),
+                            "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.breakeven".to_string(),
+                            "exit.trailing.low_conf_override".to_string(),
+                            "exit.trailing.vol_buffer".to_string(),
+                            "exit.trailing.base".to_string(),
+                            "exit.take_profit.partial".to_string(),
+                            "exit.take_profit.full".to_string(),
+                        ],
+                        disabled: vec![
+                            "exit.smart.trend_exhaustion".to_string(),
+                            "exit.smart.ema_macro_breakdown".to_string(),
+                            "exit.smart.stagnation".to_string(),
+                            "exit.smart.funding_headwind".to_string(),
+                            "exit.smart.tsme".to_string(),
+                            "exit.smart.mmde".to_string(),
+                            "exit.smart.rsi_overextension".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        )]),
+    };
+
+    let (candles, sub_candles) = build_sub_bar_tp_continuation_fixture();
+
+    let cpu = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 0,
+        exit_candles: Some(&sub_candles),
+        entry_candles: Some(&sub_candles),
+        funding_rates: None,
+        init_state: None,
+        from_ts: None,
+        to_ts: None,
+    });
+    let cpu_exit_sequence = cpu
+        .trades
+        .iter()
+        .filter(|trade| trade.is_close())
+        .map(|trade| trade.reason.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        cpu_exit_sequence
+            .windows(2)
+            .any(|window| window == ["Take Profit (Partial)", "Take Profit"]),
+        "CPU sub-bar fixture should partial-then-full close, got {:?}",
+        cpu.trades
+            .iter()
+            .map(|trade| format!("{}:{}@{}", trade.action, trade.reason, trade.timestamp_ms))
+            .collect::<Vec<_>>()
+    );
+
+    let (_rows, states, _symbols) = with_gpu_trace(0, || {
+        run_gpu_sweep_with_states(
+            &candles,
+            &cfg,
+            &sweep_spec(),
+            None,
+            Some(&sub_candles),
+            None,
+            None,
+        )
+    });
+    let state = states
+        .first()
+        .copied()
+        .expect("GPU run should return one combo state");
+    let gpu_exit_sequence = exit_trace_events(&state)
+        .into_iter()
+        .map(|event| (event.kind, event.reason))
+        .collect::<Vec<_>>();
+    assert!(
+        gpu_exit_sequence.windows(2).any(|window| {
+            window
+                == [
+                    (TRACE_KIND_PARTIAL, TRACE_REASON_PARTIAL),
+                    (TRACE_KIND_CLOSE, TRACE_REASON_EXIT_TP),
+                ]
+        }),
+        "GPU sub-bar fixture should trace partial-then-full TP continuation, got {:?}",
+        gpu_exit_sequence
     );
 }
