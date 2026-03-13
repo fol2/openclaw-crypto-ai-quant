@@ -133,7 +133,7 @@ pub struct HyperliquidClient {
     base_url: Url,
     signing_key: SigningKey,
     pub main_address: String,
-    asset_map: Mutex<Option<HashMap<String, u32>>>,
+    asset_map: Mutex<Option<HashMap<String, HyperliquidAssetMeta>>>,
 }
 
 impl HyperliquidClient {
@@ -319,36 +319,29 @@ impl HyperliquidClient {
     }
 
     pub fn asset_meta(&self, symbol: &str) -> Result<HyperliquidAssetMeta> {
-        #[derive(Debug, Deserialize)]
-        struct MetaResponse {
-            universe: Vec<UniverseAsset>,
-        }
-
-        #[derive(Debug, Deserialize)]
-        struct UniverseAsset {
-            name: String,
-            #[serde(rename = "szDecimals")]
-            sz_decimals: u32,
-            #[serde(rename = "maxLeverage")]
-            max_leverage: u32,
-        }
-
         let requested = symbol.trim().to_ascii_uppercase();
-        let meta: MetaResponse =
-            self.info("meta", serde_json::Value::Object(Default::default()))?;
-        let (asset, universe_asset) = meta
-            .universe
-            .into_iter()
-            .enumerate()
-            .find(|(_, asset)| asset.name.trim().eq_ignore_ascii_case(&requested))
-            .with_context(|| format!("unknown Hyperliquid symbol: {requested}"))?;
+        let cached = self
+            .asset_map
+            .lock()
+            .map_err(|_| anyhow::anyhow!("asset map mutex poisoned"))?;
+        if let Some(map) = cached.as_ref() {
+            if let Some(meta) = map.get(&requested) {
+                return Ok(meta.clone());
+            }
+        }
+        drop(cached);
 
-        Ok(HyperliquidAssetMeta {
-            asset: asset as u32,
-            symbol: universe_asset.name.trim().to_ascii_uppercase(),
-            sz_decimals: universe_asset.sz_decimals,
-            max_leverage: universe_asset.max_leverage,
-        })
+        let map = self.load_asset_meta_map()?;
+        let meta = map
+            .get(&requested)
+            .cloned()
+            .with_context(|| format!("unknown Hyperliquid symbol: {requested}"))?;
+        let mut cached = self
+            .asset_map
+            .lock()
+            .map_err(|_| anyhow::anyhow!("asset map mutex poisoned"))?;
+        *cached = Some(map);
+        Ok(meta)
     }
 
     pub fn open_orders(&self) -> Result<Vec<serde_json::Value>> {
@@ -427,17 +420,10 @@ impl HyperliquidClient {
     }
 
     fn asset_for_symbol(&self, symbol: &str) -> Result<u32> {
-        let cached = self
-            .asset_map
-            .lock()
-            .map_err(|_| anyhow::anyhow!("asset map mutex poisoned"))?;
-        if let Some(map) = cached.as_ref() {
-            if let Some(asset) = map.get(&symbol.trim().to_ascii_uppercase()) {
-                return Ok(*asset);
-            }
-        }
-        drop(cached);
+        Ok(self.asset_meta(symbol)?.asset)
+    }
 
+    fn load_asset_meta_map(&self) -> Result<HashMap<String, HyperliquidAssetMeta>> {
         #[derive(Debug, Deserialize)]
         struct MetaResponse {
             universe: Vec<UniverseAsset>,
@@ -446,27 +432,31 @@ impl HyperliquidClient {
         #[derive(Debug, Deserialize)]
         struct UniverseAsset {
             name: String,
+            #[serde(rename = "szDecimals")]
+            sz_decimals: u32,
+            #[serde(rename = "maxLeverage")]
+            max_leverage: u32,
         }
 
         let meta: MetaResponse =
             self.info("meta", serde_json::Value::Object(Default::default()))?;
-        let map = meta
+        Ok(meta
             .universe
             .into_iter()
             .enumerate()
-            .map(|(idx, asset)| (asset.name.trim().to_ascii_uppercase(), idx as u32))
-            .collect::<HashMap<_, _>>();
-        let requested = symbol.trim().to_ascii_uppercase();
-        let asset = map
-            .get(&requested)
-            .copied()
-            .with_context(|| format!("unknown Hyperliquid symbol: {requested}"))?;
-        let mut cached = self
-            .asset_map
-            .lock()
-            .map_err(|_| anyhow::anyhow!("asset map mutex poisoned"))?;
-        *cached = Some(map);
-        Ok(asset)
+            .map(|(idx, asset)| {
+                let symbol = asset.name.trim().to_ascii_uppercase();
+                (
+                    symbol.clone(),
+                    HyperliquidAssetMeta {
+                        asset: idx as u32,
+                        symbol,
+                        sz_decimals: asset.sz_decimals,
+                        max_leverage: asset.max_leverage,
+                    },
+                )
+            })
+            .collect())
     }
 
     fn mid_for_symbol(&self, symbol: &str) -> Result<f64> {
@@ -672,7 +662,7 @@ fn round_to_significant_figures(value: f64, sig_figs: u32) -> Option<f64> {
     }
     let exponent = value.abs().log10().floor() as i32;
     let scale = 10f64.powi(sig_figs as i32 - 1 - exponent);
-    let rounded = (value * scale).round() / scale;
+    let rounded = round_half_even(value * scale) / scale;
     if rounded.is_finite() && rounded > 0.0 {
         Some(rounded)
     } else {
@@ -686,15 +676,30 @@ fn round_to_decimal_places(value: f64, decimals: i32) -> Option<f64> {
     }
     let rounded = if decimals >= 0 {
         let factor = 10f64.powi(decimals);
-        (value * factor).round() / factor
+        round_half_even(value * factor) / factor
     } else {
         let factor = 10f64.powi(-decimals);
-        (value / factor).round() * factor
+        round_half_even(value / factor) * factor
     };
     if rounded.is_finite() && rounded > 0.0 {
         Some(rounded)
     } else {
         None
+    }
+}
+
+fn round_half_even(value: f64) -> f64 {
+    let floor = value.floor();
+    let fractional = value - floor;
+    let tolerance = 1e-12 * value.abs().max(1.0);
+    if fractional < 0.5 - tolerance {
+        floor
+    } else if fractional > 0.5 + tolerance {
+        floor + 1.0
+    } else if (floor as i64) % 2 == 0 {
+        floor
+    } else {
+        floor + 1.0
     }
 }
 
@@ -1048,6 +1053,13 @@ mod tests {
         let price = market_order_limit_px(36.5525, false, 0.01, 2, false).unwrap();
         assert!((price - 36.187).abs() < 1e-9);
         assert_eq!(float_to_wire(price).unwrap(), "36.187");
+    }
+
+    #[test]
+    fn market_order_limit_px_uses_bankers_rounding_like_python_sdk() {
+        let price = market_order_limit_px(0.1555, false, 0.01, 0, false).unwrap();
+        assert!((price - 0.15394).abs() < 1e-9);
+        assert_eq!(float_to_wire(price).unwrap(), "0.15394");
     }
 
     #[test]
