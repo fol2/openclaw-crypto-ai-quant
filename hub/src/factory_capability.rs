@@ -40,7 +40,7 @@ impl FactoryCapability {
                 "Factory execution was requested, but this Hub build still exposes only the dormant contract. A future build must wire the executor before {}=1 can activate it.",
                 FACTORY_ENABLE_ENV
             ),
-            (true, false) => format!(
+            (true, false, _) => format!(
                 "Factory execution is compiled in, but policy keeps it dormant until {}=1.",
                 FACTORY_ENABLE_ENV
             ),
