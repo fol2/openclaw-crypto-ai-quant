@@ -45,9 +45,18 @@ pub struct HyperliquidFill {
     pub raw: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HyperliquidAssetMeta {
+    pub asset: u32,
+    pub symbol: String,
+    pub sz_decimals: u32,
+    pub max_leverage: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveOrderType {
     LimitIoc,
+    LimitGtc,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -322,6 +331,79 @@ impl HyperliquidClient {
         })
     }
 
+    pub fn asset_meta(&self, symbol: &str) -> Result<HyperliquidAssetMeta> {
+        #[derive(Debug, Deserialize)]
+        struct MetaResponse {
+            universe: Vec<UniverseAsset>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct UniverseAsset {
+            name: String,
+            #[serde(rename = "szDecimals")]
+            sz_decimals: u32,
+            #[serde(rename = "maxLeverage")]
+            max_leverage: u32,
+        }
+
+        let requested = symbol.trim().to_ascii_uppercase();
+        let meta: MetaResponse =
+            self.info("meta", serde_json::Value::Object(Default::default()))?;
+        let (asset, universe_asset) = meta
+            .universe
+            .into_iter()
+            .enumerate()
+            .find(|(_, asset)| asset.name.trim().eq_ignore_ascii_case(&requested))
+            .with_context(|| format!("unknown Hyperliquid symbol: {requested}"))?;
+
+        Ok(HyperliquidAssetMeta {
+            asset: asset as u32,
+            symbol: universe_asset.name.trim().to_ascii_uppercase(),
+            sz_decimals: universe_asset.sz_decimals,
+            max_leverage: universe_asset.max_leverage,
+        })
+    }
+
+    pub fn open_orders(&self) -> Result<Vec<serde_json::Value>> {
+        self.info(
+            "frontendOpenOrders",
+            json!({
+                "user": self.main_address,
+            }),
+        )
+    }
+
+    pub fn cancel_order(&self, symbol: &str, oid: u64) -> Result<serde_json::Value> {
+        let asset = self.asset_for_symbol(symbol)?;
+        let action = map_value(vec![
+            ("type", Value::from("cancel")),
+            (
+                "cancels",
+                Value::Array(vec![map_value(vec![
+                    ("a", Value::from(i64::from(asset))),
+                    ("o", Value::from(oid as i64)),
+                ])]),
+            ),
+        ]);
+        self.post_action(action)
+    }
+
+    pub fn cancel_order_by_cloid(&self, symbol: &str, cloid: &str) -> Result<serde_json::Value> {
+        validate_cloid(cloid)?;
+        let asset = self.asset_for_symbol(symbol)?;
+        let action = map_value(vec![
+            ("type", Value::from("cancelByCloid")),
+            (
+                "cancels",
+                Value::Array(vec![map_value(vec![
+                    ("asset", Value::from(i64::from(asset))),
+                    ("cloid", Value::from(cloid)),
+                ])]),
+            ),
+        ]);
+        self.post_action(action)
+    }
+
     pub fn order(&self, order: OrderRequest) -> Result<serde_json::Value> {
         let asset = self.asset_for_symbol(&order.symbol)?;
         let mut fields = vec![
@@ -336,6 +418,10 @@ impl HyperliquidClient {
                     LiveOrderType::LimitIoc => map_value(vec![(
                         "limit",
                         map_value(vec![("tif", Value::from("Ioc"))]),
+                    )]),
+                    LiveOrderType::LimitGtc => map_value(vec![(
+                        "limit",
+                        map_value(vec![("tif", Value::from("Gtc"))]),
                     )]),
                 },
             ),

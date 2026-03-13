@@ -650,6 +650,20 @@ fn ingest_recent_fills(
                     ref_bid: None,
                     ref_ask: None,
                 });
+                let manual_intent_id = matched
+                    .as_ref()
+                    .map(|matched| matched.intent_id.as_str())
+                    .filter(|intent_id| intent_id.starts_with("manual_"));
+                let manual_fill = manual_intent_id.is_some()
+                    || fill
+                        .raw
+                        .get("cloid")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_ascii_lowercase().starts_with("0x6d616e5f"))
+                        .unwrap_or(false);
+                if manual_fill {
+                    record_manual_fill_trade(live_db, &input, &fill.raw, manual_intent_id)?;
+                }
                 if input.action == "CLOSE" {
                     let close_reason = matched
                         .as_ref()
@@ -797,6 +811,67 @@ fn parse_fill_match_input(raw: &serde_json::Value) -> Result<Option<ParsedFillIn
             .map(|value| value.to_string().trim_matches('"').to_string())
             .filter(|value| !value.is_empty()),
     }))
+}
+
+fn record_manual_fill_trade(
+    live_db: &Path,
+    input: &ParsedFillInput,
+    raw_fill: &serde_json::Value,
+    intent_id: Option<&str>,
+) -> Result<()> {
+    let conn = rusqlite::Connection::open(live_db)?;
+    let meta_json = json!({
+        "source": "manual_trade",
+        "fill": raw_fill,
+        "oms": {
+            "intent_id": intent_id,
+            "client_order_id": raw_fill.get("cloid").and_then(|value| value.as_str()),
+            "exchange_order_id": input.exchange_order_id,
+            "matched_via": if intent_id.is_some() { "live_fill_ingest" } else { "manual_cloid_prefix" },
+        }
+    })
+    .to_string();
+
+    conn.execute(
+        "INSERT OR IGNORE INTO trades (
+            timestamp, symbol, action, type, price, size, notional, reason, reason_code,
+            confidence, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage,
+            margin_used, meta_json, fill_hash, fill_tid
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        params![
+            chrono::DateTime::from_timestamp_millis(input.ts_ms)
+                .map(|timestamp| timestamp.to_rfc3339())
+                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+            input.symbol,
+            input.action,
+            input.pos_type,
+            input.price,
+            input.size,
+            input.notional_usd,
+            "manual_trade",
+            "manual_trade",
+            "MANUAL",
+            input.pnl_usd,
+            input.fee_usd,
+            raw_fill
+                .get("feeToken")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+            if input.notional_usd > 0.0 {
+                Some(input.fee_usd / input.notional_usd)
+            } else {
+                None
+            },
+            Option::<f64>::None,
+            Option::<f64>::None,
+            Option::<f64>::None,
+            Option::<f64>::None,
+            meta_json,
+            input.fill_hash.as_deref(),
+            input.fill_tid,
+        ],
+    )?;
+    Ok(())
 }
 
 fn classify_fill_direction(
