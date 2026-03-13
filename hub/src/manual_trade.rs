@@ -18,9 +18,13 @@ const DEFAULT_MAX_NOTIONAL_USD: f64 = 5_000.0;
 const MIN_NOTIONAL_USD: f64 = 10.0;
 const FILL_POLL_TIMEOUT: Duration = Duration::from_secs(8);
 const FILL_POLL_INTERVAL: Duration = Duration::from_millis(800);
+const MANUAL_CONFIRM_TTL_MS: i64 = 60_000;
+const MANUAL_CONFIRM_RETENTION_MS: i64 = 86_400_000;
 const MANUAL_CLOID_PREFIX: &[u8] = b"man_";
 const MANUAL_RUNTIME_STREAM: &str = "manual_trade";
 const MANUAL_RUNTIME_MODE: &str = "live";
+const MANUAL_CONFIRM_ACTION_OPEN: &str = "OPEN";
+const MANUAL_CONFIRM_ACTION_CLOSE: &str = "CLOSE";
 
 #[derive(Debug, Clone)]
 pub struct ManualTradeOpenRequest {
@@ -95,6 +99,7 @@ struct ManualIntentRecord<'a> {
     requested_notional: f64,
     leverage: Option<f64>,
     status: &'a str,
+    dedupe_key: Option<&'a str>,
     client_order_id: &'a str,
     reason: &'a str,
     confidence: &'a str,
@@ -123,6 +128,33 @@ struct FillWriteSummary {
     filled_size: f64,
 }
 
+#[derive(Clone)]
+struct ExistingManualIntent {
+    intent_id: String,
+    created_ts_ms: i64,
+    symbol: String,
+    action: String,
+    side: String,
+    status: String,
+    requested_size: Option<f64>,
+    leverage: Option<f64>,
+    dedupe_key: Option<String>,
+    client_order_id: Option<String>,
+    exchange_order_id: Option<String>,
+    last_error: Option<String>,
+    sent_ts_ms: Option<i64>,
+    meta_json: Option<String>,
+}
+
+enum ManualExecutionClaim {
+    Submit {
+        intent_id: String,
+        cloid: String,
+        resumed_existing: bool,
+    },
+    Existing(ExistingManualIntent),
+}
+
 pub fn preview_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, false)?;
     let client = build_client(cfg)?;
@@ -147,55 +179,143 @@ pub fn preview_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result
     }))
 }
 
-pub fn execute_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result<Value, HubError> {
+pub fn issue_confirm_token(
+    cfg: &HubConfig,
+    action: &str,
+    param_hash: &str,
+    symbol: &str,
+    preview: &Value,
+) -> Result<String, HubError> {
+    enforce_manual_trade_ready(cfg, false)?;
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    purge_stale_manual_confirmations(&conn, now_ms)?;
+    if let Some(token) = find_reusable_manual_confirmation(&conn, action, param_hash, now_ms)? {
+        return Ok(token);
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO manual_trade_confirmations (
+            confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash,
+            status, preview_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED', ?7)",
+        params![
+            &token,
+            now_ms,
+            now_ms + MANUAL_CONFIRM_TTL_MS,
+            action,
+            symbol.trim().to_ascii_uppercase(),
+            param_hash,
+            preview.to_string(),
+        ],
+    )?;
+    Ok(token)
+}
+
+pub fn execute_open(
+    cfg: &HubConfig,
+    request: &ManualTradeOpenRequest,
+    confirm_token: &str,
+    param_hash: &str,
+) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, true)?;
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    let mut early_retry_claim: Option<(String, String)> = None;
+    if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
+        if should_resume_existing_manual_submission(&existing) {
+            validate_resumed_open_request(&existing, request)?;
+            if let Some(recovered) =
+                recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
+            {
+                bind_manual_confirmation_to_intent(&conn, confirm_token, &recovered.intent_id)?;
+                return Ok(existing_manual_execution_payload("open", &recovered));
+            }
+            early_retry_claim = Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
+        } else {
+            bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
+            return Ok(existing_manual_execution_payload("open", &existing));
+        }
+    }
+    if early_retry_claim.is_none() {
+        validate_manual_confirmation(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            param_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+    }
+
     let client = build_client(cfg)?;
     let prepared = prepare_open(&client, cfg, request)?;
-    let intent_id = format!("manual_{}", uuid::Uuid::new_v4().simple());
-    let cloid = manual_cloid_from_intent_id(&intent_id);
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
     let created_ts_ms = chrono::Utc::now().timestamp_millis();
-    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    let intent_id = manual_intent_id_from_confirm_token(confirm_token);
+    let cloid = manual_cloid_from_intent_id(&intent_id);
 
-    insert_manual_intent(
-        &conn,
-        ManualIntentRecord {
-            intent_id: &intent_id,
-            created_ts_ms,
-            symbol: &prepared.symbol,
-            action: "OPEN",
-            side: &prepared.side,
-            requested_size: prepared.est_size,
-            requested_notional: prepared.est_notional_usd,
-            leverage: Some(f64::from(prepared.leverage)),
-            status: "NEW",
-            client_order_id: &cloid,
-            reason: "manual_trade",
-            confidence: "MANUAL",
-            meta_json: json!({
-                "source": "manual_trade",
-                "request": {
-                    "order_type": request.order_type,
-                    "side": request.side,
-                    "notional_usd": request.notional_usd,
-                    "leverage": request.leverage,
-                    "limit_price": request.limit_price,
-                },
-                "prepared": {
-                    "est_size": prepared.est_size,
-                    "est_notional_usd": prepared.est_notional_usd,
-                    "mid_price": prepared.mid_price,
-                    "direction": prepared.direction,
-                }
-            })
-            .to_string(),
-        },
-    )?;
+    let (intent_id, cloid, resumed_existing) = if let Some((intent_id, cloid)) = early_retry_claim {
+        (intent_id, cloid, true)
+    } else {
+        let claim = initialise_manual_execution(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            param_hash,
+            ManualIntentRecord {
+                intent_id: &intent_id,
+                created_ts_ms,
+                symbol: &prepared.symbol,
+                action: "OPEN",
+                side: &prepared.side,
+                requested_size: prepared.est_size,
+                requested_notional: prepared.est_notional_usd,
+                leverage: Some(f64::from(prepared.leverage)),
+                status: "NEW",
+                dedupe_key: Some(confirm_token),
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: json!({
+                    "source": "manual_trade",
+                    "request": {
+                        "order_type": request.order_type,
+                        "side": request.side,
+                        "notional_usd": request.notional_usd,
+                        "leverage": request.leverage,
+                        "limit_price": request.limit_price,
+                    },
+                    "prepared": {
+                        "est_size": prepared.est_size,
+                        "est_notional_usd": prepared.est_notional_usd,
+                        "mid_price": prepared.mid_price,
+                        "direction": prepared.direction,
+                    }
+                })
+                .to_string(),
+            },
+        )?;
+        match claim {
+            ManualExecutionClaim::Submit {
+                intent_id,
+                cloid,
+                resumed_existing,
+            } => (intent_id, cloid, resumed_existing),
+            ManualExecutionClaim::Existing(existing) => {
+                return Ok(existing_manual_execution_payload("open", &existing));
+            }
+        }
+    };
     write_manual_runtime_log(
         &conn,
         "INFO",
         &format!(
-            "manual_trade intent_created intent_id={} symbol={} action=OPEN side={} order_type={} requested_size={} requested_notional={}",
+            "manual_trade {} intent_id={} symbol={} action=OPEN side={} order_type={} requested_size={} requested_notional={}",
+            if resumed_existing {
+                "intent_resumed"
+            } else {
+                "intent_created"
+            },
             intent_id,
             prepared.symbol,
             prepared.side,
@@ -405,12 +525,39 @@ pub fn preview_close(
 pub fn execute_close(
     cfg: &HubConfig,
     request: &ManualTradeCloseRequest,
+    confirm_token: &str,
+    param_hash: &str,
 ) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, true)?;
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    let mut early_retry_claim: Option<(String, String)> = None;
+    if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
+        if should_resume_existing_manual_submission(&existing) {
+            validate_resumed_close_request(&existing, request)?;
+            if let Some(recovered) =
+                recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
+            {
+                bind_manual_confirmation_to_intent(&conn, confirm_token, &recovered.intent_id)?;
+                return Ok(existing_manual_execution_payload("close", &recovered));
+            }
+            early_retry_claim = Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
+        } else {
+            bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
+            return Ok(existing_manual_execution_payload("close", &existing));
+        }
+    }
+    if early_retry_claim.is_none() {
+        validate_manual_confirmation(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_CLOSE,
+            param_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+    }
+
     let client = build_client(cfg)?;
     let prepared = prepare_close(&client, request)?;
-    let intent_id = format!("manual_{}", uuid::Uuid::new_v4().simple());
-    let cloid = manual_cloid_from_intent_id(&intent_id);
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
     let created_ts_ms = chrono::Utc::now().timestamp_millis();
     let side = if prepared.is_buy { "BUY" } else { "SELL" };
@@ -419,45 +566,69 @@ pub fn execute_close(
     } else {
         "REDUCE"
     };
-    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    let intent_id = manual_intent_id_from_confirm_token(confirm_token);
+    let cloid = manual_cloid_from_intent_id(&intent_id);
 
-    insert_manual_intent(
-        &conn,
-        ManualIntentRecord {
-            intent_id: &intent_id,
-            created_ts_ms,
-            symbol: &prepared.symbol,
-            action: close_action,
-            side,
-            requested_size: prepared.close_size,
-            requested_notional: prepared.close_size * prepared.mid_price,
-            leverage: Some(prepared.leverage),
-            status: "NEW",
-            client_order_id: &cloid,
-            reason: "manual_trade",
-            confidence: "MANUAL",
-            meta_json: json!({
-                "source": "manual_trade",
-                "request": {
-                    "order_type": request.order_type,
-                    "close_pct": request.close_pct,
-                    "limit_price": request.limit_price,
-                },
-                "prepared": {
-                    "close_size": prepared.close_size,
-                    "current_size": prepared.current_size,
-                    "mid_price": prepared.mid_price,
-                    "pos_type": prepared.pos_type,
-                }
-            })
-            .to_string(),
-        },
-    )?;
+    let (intent_id, cloid, resumed_existing) = if let Some((intent_id, cloid)) = early_retry_claim {
+        (intent_id, cloid, true)
+    } else {
+        let claim = initialise_manual_execution(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_CLOSE,
+            param_hash,
+            ManualIntentRecord {
+                intent_id: &intent_id,
+                created_ts_ms,
+                symbol: &prepared.symbol,
+                action: close_action,
+                side,
+                requested_size: prepared.close_size,
+                requested_notional: prepared.close_size * prepared.mid_price,
+                leverage: Some(prepared.leverage),
+                status: "NEW",
+                dedupe_key: Some(confirm_token),
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: json!({
+                    "source": "manual_trade",
+                    "request": {
+                        "order_type": request.order_type,
+                        "close_pct": request.close_pct,
+                        "limit_price": request.limit_price,
+                    },
+                    "prepared": {
+                        "close_size": prepared.close_size,
+                        "current_size": prepared.current_size,
+                        "mid_price": prepared.mid_price,
+                        "pos_type": prepared.pos_type,
+                    }
+                })
+                .to_string(),
+            },
+        )?;
+        match claim {
+            ManualExecutionClaim::Submit {
+                intent_id,
+                cloid,
+                resumed_existing,
+            } => (intent_id, cloid, resumed_existing),
+            ManualExecutionClaim::Existing(existing) => {
+                return Ok(existing_manual_execution_payload("close", &existing));
+            }
+        }
+    };
     write_manual_runtime_log(
         &conn,
         "INFO",
         &format!(
-            "manual_trade intent_created intent_id={} symbol={} action={} side={} order_type={} requested_size={} current_size={}",
+            "manual_trade {} intent_id={} symbol={} action={} side={} order_type={} requested_size={} current_size={}",
+            if resumed_existing {
+                "intent_resumed"
+            } else {
+                "intent_created"
+            },
             intent_id,
             prepared.symbol,
             close_action,
@@ -826,6 +997,26 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
         CREATE INDEX IF NOT EXISTS idx_oms_intents_symbol_status ON oms_intents(symbol, status, sent_ts_ms);
         CREATE INDEX IF NOT EXISTS idx_oms_intents_client_order_id ON oms_intents(client_order_id);
 
+        CREATE TABLE IF NOT EXISTS manual_trade_confirmations (
+            confirm_token TEXT PRIMARY KEY,
+            created_ts_ms INTEGER NOT NULL,
+            expires_ts_ms INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            symbol TEXT,
+            param_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            intent_id TEXT,
+            preview_json TEXT,
+            last_error TEXT,
+            consumed_ts_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_manual_trade_confirmations_hash
+            ON manual_trade_confirmations(action, param_hash, created_ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_manual_trade_confirmations_status_expiry
+            ON manual_trade_confirmations(status, expires_ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_manual_trade_confirmations_intent
+            ON manual_trade_confirmations(intent_id);
+
         CREATE TABLE IF NOT EXISTS oms_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             intent_id TEXT,
@@ -886,13 +1077,476 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
     Ok(())
 }
 
-fn insert_manual_intent(conn: &Connection, record: ManualIntentRecord<'_>) -> Result<(), HubError> {
+fn purge_stale_manual_confirmations(conn: &Connection, now_ms: i64) -> Result<(), HubError> {
+    conn.execute(
+        "DELETE FROM manual_trade_confirmations
+         WHERE created_ts_ms < ?1",
+        [now_ms - MANUAL_CONFIRM_RETENTION_MS],
+    )?;
+    conn.execute(
+        "UPDATE manual_trade_confirmations
+         SET status = 'EXPIRED', last_error = 'confirm token expired'
+         WHERE status = 'PREVIEWED' AND expires_ts_ms < ?1",
+        [now_ms],
+    )?;
+    Ok(())
+}
+
+fn find_reusable_manual_confirmation(
+    conn: &Connection,
+    action: &str,
+    param_hash: &str,
+    now_ms: i64,
+) -> Result<Option<String>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT confirm_token
+         FROM manual_trade_confirmations
+         WHERE action = ?1 AND param_hash = ?2 AND status = 'PREVIEWED' AND expires_ts_ms >= ?3
+         ORDER BY created_ts_ms DESC
+         LIMIT 1",
+    )?;
+    let token = stmt.query_row(params![action, param_hash, now_ms], |row| row.get(0));
+    match token {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn validate_manual_confirmation(
+    conn: &Connection,
+    confirm_token: &str,
+    action: &str,
+    expected_hash: &str,
+    now_ms: i64,
+) -> Result<(), HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT action, param_hash, expires_ts_ms
+         FROM manual_trade_confirmations
+         WHERE confirm_token = ?1",
+    )?;
+    let row = stmt.query_row([confirm_token], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    let (stored_action, stored_hash, expires_ts_ms) = match row {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(HubError::BadRequest("invalid or expired confirm token".into()))
+        }
+        Err(error) => return Err(HubError::Db(error.to_string())),
+    };
+    if expires_ts_ms < now_ms {
+        return Err(HubError::BadRequest("confirm token expired".into()));
+    }
+    if stored_action != action || stored_hash != expected_hash {
+        return Err(HubError::BadRequest(
+            "confirm token does not match parameters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn bind_manual_confirmation_to_intent(
+    conn: &Connection,
+    confirm_token: &str,
+    intent_id: &str,
+) -> Result<(), HubError> {
+    conn.execute(
+        "UPDATE manual_trade_confirmations
+         SET status = 'BOUND', intent_id = ?1, consumed_ts_ms = COALESCE(consumed_ts_ms, ?2)
+         WHERE confirm_token = ?3",
+        params![intent_id, chrono::Utc::now().timestamp_millis(), confirm_token],
+    )?;
+    Ok(())
+}
+
+fn load_existing_manual_intent_by_dedupe_key(
+    conn: &Connection,
+    dedupe_key: &str,
+) -> Result<Option<ExistingManualIntent>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT intent_id, created_ts_ms, symbol, action, side, status, requested_size, leverage,
+                dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms, meta_json
+         FROM oms_intents
+         WHERE dedupe_key = ?1
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([dedupe_key], |row| {
+        Ok(ExistingManualIntent {
+            intent_id: row.get(0)?,
+            created_ts_ms: row.get(1)?,
+            symbol: row.get(2)?,
+            action: row.get(3)?,
+            side: row.get(4)?,
+            status: row.get(5)?,
+            requested_size: row.get(6)?,
+            leverage: row.get(7)?,
+            dedupe_key: row.get(8)?,
+            client_order_id: row.get(9)?,
+            exchange_order_id: row.get(10)?,
+            last_error: row.get(11)?,
+            sent_ts_ms: row.get(12)?,
+            meta_json: row.get(13)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn existing_intent_cloid(existing: &ExistingManualIntent) -> String {
+    existing
+        .client_order_id
+        .clone()
+        .unwrap_or_else(|| manual_cloid_from_intent_id(&existing.intent_id))
+}
+
+fn should_resume_existing_manual_submission(existing: &ExistingManualIntent) -> bool {
+    existing.sent_ts_ms.is_none() && existing.status.eq_ignore_ascii_case("NEW")
+}
+
+fn existing_manual_execution_payload(kind: &str, existing: &ExistingManualIntent) -> Value {
+    json!({
+        "ok": true,
+        "status": if should_resume_existing_manual_submission(existing) {
+            "pending"
+        } else if existing.status.eq_ignore_ascii_case("REJECTED") {
+            "rejected"
+        } else {
+            "submitted"
+        },
+        "deduped": true,
+        "kind": kind,
+        "intent_id": existing.intent_id,
+        "symbol": existing.symbol,
+        "action": existing.action,
+        "side": existing.side,
+        "intent_status": existing.status,
+        "client_order_id": existing.client_order_id,
+        "exchange_order_id": existing.exchange_order_id,
+        "last_error": existing.last_error,
+        "sent_ts_ms": existing.sent_ts_ms,
+    })
+}
+
+fn same_optional_price(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => (left - right).abs() < 1e-9,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn parse_resume_request_meta(existing: &ExistingManualIntent) -> Result<Value, HubError> {
+    existing
+        .meta_json
+        .as_deref()
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing meta_json for retry validation",
+                existing.intent_id
+            ))
+        })
+        .and_then(|raw| serde_json::from_str(raw).map_err(HubError::from))
+}
+
+fn validate_resumed_open_request(
+    existing: &ExistingManualIntent,
+    request: &ManualTradeOpenRequest,
+) -> Result<(), HubError> {
+    let meta = parse_resume_request_meta(existing)?;
+    let stored = meta
+        .get("request")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing request metadata",
+                existing.intent_id
+            ))
+        })?;
+    let stored_side = stored
+        .get("side")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    let stored_notional = stored
+        .get("notional_usd")
+        .and_then(parse_json_number)
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing stored notional",
+                existing.intent_id
+            ))
+        })?;
+    let stored_leverage = stored
+        .get("leverage")
+        .and_then(parse_json_integer)
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing stored leverage",
+                existing.intent_id
+            ))
+        })? as u32;
+    let stored_order_type = stored
+        .get("order_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let stored_limit_price = stored.get("limit_price").and_then(parse_json_number);
+
+    if existing.symbol.trim().to_ascii_uppercase() != request.symbol.trim().to_ascii_uppercase()
+        || stored_side != request.side.trim().to_ascii_uppercase()
+        || (stored_notional - request.notional_usd).abs() >= 1e-9
+        || stored_leverage != request.leverage
+        || stored_order_type != request.order_type.trim().to_ascii_lowercase()
+        || !same_optional_price(stored_limit_price, request.limit_price)
+    {
+        return Err(HubError::BadRequest(
+            "confirm token does not match parameters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resumed_close_request(
+    existing: &ExistingManualIntent,
+    request: &ManualTradeCloseRequest,
+) -> Result<(), HubError> {
+    let meta = parse_resume_request_meta(existing)?;
+    let stored = meta
+        .get("request")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing request metadata",
+                existing.intent_id
+            ))
+        })?;
+    let stored_close_pct = stored
+        .get("close_pct")
+        .and_then(parse_json_number)
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing stored close_pct",
+                existing.intent_id
+            ))
+        })?;
+    let stored_order_type = stored
+        .get("order_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let stored_limit_price = stored.get("limit_price").and_then(parse_json_number);
+
+    if existing.symbol.trim().to_ascii_uppercase() != request.symbol.trim().to_ascii_uppercase()
+        || (stored_close_pct - request.close_pct).abs() >= 1e-9
+        || stored_order_type != request.order_type.trim().to_ascii_lowercase()
+        || !same_optional_price(stored_limit_price, request.limit_price)
+    {
+        return Err(HubError::BadRequest(
+            "confirm token does not match parameters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn find_matching_open_order<'a>(
+    orders: &'a [Value],
+    existing: &ExistingManualIntent,
+    cloid: &str,
+) -> Option<&'a Value> {
+    let symbol_upper = existing.symbol.trim().to_ascii_uppercase();
+    orders.iter().find(|order| {
+        let order_symbol = order
+            .get("coin")
+            .or_else(|| order.get("symbol"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_ascii_uppercase());
+        if order_symbol.as_deref() != Some(symbol_upper.as_str()) {
+            return false;
+        }
+        let order_cloid = order
+            .get("cloid")
+            .or_else(|| order.get("clientOrderId"))
+            .or_else(|| order.get("client_order_id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim);
+        order_cloid == Some(cloid)
+    })
+}
+
+fn recover_existing_new_manual_execution(
+    cfg: &HubConfig,
+    conn: &mut Connection,
+    existing: &ExistingManualIntent,
+) -> Result<Option<ExistingManualIntent>, HubError> {
+    let client = build_client(cfg)?;
+    let cloid = existing_intent_cloid(existing);
+    let start_ms = existing.created_ts_ms.saturating_sub(5_000);
+    let fills = poll_fill(
+        &client,
+        &existing.symbol,
+        start_ms,
+        &cloid,
+        existing.exchange_order_id.as_deref(),
+    )?;
+    if !fills.is_empty() {
+        let account_value_usd = client
+            .account_snapshot()
+            .map_err(|error| HubError::Internal(error.to_string()))?
+            .account_value_usd;
+        let fill_summary = record_manual_fill_batch(
+            conn,
+            &fills,
+            &existing.symbol,
+            &existing.intent_id,
+            &cloid,
+            account_value_usd,
+            existing.leverage.unwrap_or(1.0).max(1.0),
+        )?;
+        let requested_size = existing.requested_size.unwrap_or(fill_summary.filled_size);
+        let status = if fill_summary.parse_failures > 0 {
+            "UNKNOWN"
+        } else if fill_summary.filled_size + 1e-9 >= requested_size {
+            "FILLED"
+        } else {
+            "PARTIAL"
+        };
+        let last_error = if fill_summary.parse_failures > 0 {
+            "one_or_more_fills_failed_to_parse_into_trades"
+        } else {
+            ""
+        };
+        update_manual_intent_status(conn, &existing.intent_id, status, last_error)?;
+        write_manual_runtime_log(
+            conn,
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            &format!(
+                "manual_trade recovered_pending_intent intent_id={} symbol={} observed_fills={} parsed_trade_rows={} filled_size={} status={}",
+                existing.intent_id,
+                existing.symbol,
+                fill_summary.observed_fills,
+                fill_summary.parsed_trade_rows,
+                fill_summary.filled_size,
+                status
+            ),
+        )?;
+        return load_existing_manual_intent_by_dedupe_key(
+            conn,
+            existing.dedupe_key.as_deref().ok_or_else(|| {
+                HubError::Internal(format!(
+                    "manual intent {} is missing its dedupe key",
+                    existing.intent_id
+                ))
+            })?,
+        );
+    }
+
+    let open_orders = client
+        .open_orders()
+        .map_err(|error| HubError::Internal(format!("failed to inspect open orders: {error}")))?;
+    if let Some(order) = find_matching_open_order(&open_orders, existing, &cloid) {
+        let exchange_order_id = order
+            .get("oid")
+            .and_then(parse_json_integer)
+            .map(|value| value.to_string());
+        record_manual_order_submission(
+            conn,
+            ManualOrderSubmission {
+                intent_id: &existing.intent_id,
+                sent_ts_ms: chrono::Utc::now().timestamp_millis(),
+                symbol: &existing.symbol,
+                side: &existing.side,
+                order_type: "recovered_open_order",
+                requested_size: existing.requested_size.unwrap_or(0.0),
+                reduce_only: matches!(existing.action.as_str(), "CLOSE" | "REDUCE"),
+                client_order_id: &cloid,
+                exchange_order_id: exchange_order_id.as_deref(),
+                status: "SENT",
+                last_error: "",
+                raw_json: order.to_string(),
+            },
+        )?;
+        write_manual_runtime_log(
+            conn,
+            "INFO",
+            &format!(
+                "manual_trade recovered_pending_open_order intent_id={} symbol={} exchange_order_id={}",
+                existing.intent_id,
+                existing.symbol,
+                exchange_order_id.as_deref().unwrap_or("unknown")
+            ),
+        )?;
+        return load_existing_manual_intent_by_dedupe_key(
+            conn,
+            existing.dedupe_key.as_deref().ok_or_else(|| {
+                HubError::Internal(format!(
+                    "manual intent {} is missing its dedupe key",
+                    existing.intent_id
+                ))
+            })?,
+        );
+    }
+
+    Ok(None)
+}
+
+fn initialise_manual_execution(
+    conn: &Connection,
+    confirm_token: &str,
+    action: &str,
+    expected_hash: &str,
+    record: ManualIntentRecord<'_>,
+) -> Result<ManualExecutionClaim, HubError> {
+    let new_intent_id = record.intent_id.to_string();
+    let new_cloid = record.client_order_id.to_string();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    purge_stale_manual_confirmations(conn, now_ms)?;
+    if let Some(existing) = load_existing_manual_intent_by_dedupe_key(conn, confirm_token)? {
+        bind_manual_confirmation_to_intent(conn, confirm_token, &existing.intent_id)?;
+        return Ok(ManualExecutionClaim::Existing(existing));
+    }
+
+    validate_manual_confirmation(conn, confirm_token, action, expected_hash, now_ms)?;
+    let inserted = insert_manual_intent(conn, record)?;
+    if !inserted {
+        if let Some(existing) = load_existing_manual_intent_by_dedupe_key(conn, confirm_token)? {
+            bind_manual_confirmation_to_intent(conn, confirm_token, &existing.intent_id)?;
+            return Ok(ManualExecutionClaim::Existing(existing));
+        }
+        return Err(HubError::Internal(format!(
+            "manual intent insert dedupe race without existing intent for {}",
+            new_intent_id
+        )));
+    }
+    bind_manual_confirmation_to_intent(conn, confirm_token, &new_intent_id)?;
+    Ok(ManualExecutionClaim::Submit {
+        intent_id: new_intent_id,
+        cloid: new_cloid,
+        resumed_existing: false,
+    })
+}
+
+fn insert_manual_intent(conn: &Connection, record: ManualIntentRecord<'_>) -> Result<bool, HubError> {
     let changed = conn.execute(
         "INSERT OR IGNORE INTO oms_intents (
             intent_id, created_ts_ms, symbol, action, side, requested_size,
             requested_notional, leverage, reason, confidence, status,
-            client_order_id, meta_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            dedupe_key, client_order_id, meta_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             record.intent_id,
             record.created_ts_ms,
@@ -905,17 +1559,12 @@ fn insert_manual_intent(conn: &Connection, record: ManualIntentRecord<'_>) -> Re
             record.reason,
             record.confidence,
             record.status,
+            record.dedupe_key,
             record.client_order_id,
             record.meta_json,
         ],
     )?;
-    if changed == 0 {
-        return Err(HubError::Internal(format!(
-            "failed to insert manual OMS intent {}",
-            record.intent_id
-        )));
-    }
-    Ok(())
+    Ok(changed > 0)
 }
 
 fn update_manual_intent_status(
@@ -1735,6 +2384,11 @@ fn manual_cloid_from_intent_id(intent_id: &str) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
+fn manual_intent_id_from_confirm_token(confirm_token: &str) -> String {
+    let digest = sha3::Sha3_256::digest(confirm_token.as_bytes());
+    format!("manual_{}", hex::encode(&digest[..16]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1797,6 +2451,7 @@ mod tests {
                 requested_notional: 102.39138,
                 leverage: Some(4.0),
                 status: "NEW",
+                dedupe_key: None,
                 client_order_id: &cloid,
                 reason: "manual_trade",
                 confidence: "MANUAL",
@@ -1898,6 +2553,7 @@ mod tests {
                 requested_notional: 107.5629,
                 leverage: Some(4.0),
                 status: "NEW",
+                dedupe_key: None,
                 client_order_id: &cloid,
                 reason: "manual_trade",
                 confidence: "MANUAL",
@@ -1963,6 +2619,7 @@ mod tests {
                 requested_notional: 107.5629,
                 leverage: Some(10.0),
                 status: "NEW",
+                dedupe_key: None,
                 client_order_id: &cloid,
                 reason: "manual_trade",
                 confidence: "MANUAL",
@@ -2017,5 +2674,196 @@ mod tests {
 
         assert_eq!(status, "REJECTED");
         assert!(raw_json.contains("Order has invalid price."));
+    }
+
+    #[test]
+    fn manual_confirmations_reuse_preview_token_until_bound() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash, status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED')",
+            params![
+                "confirm-preview-token",
+                now_ms,
+                now_ms + MANUAL_CONFIRM_TTL_MS,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                "hash_open",
+            ],
+        )
+        .unwrap();
+
+        let token = find_reusable_manual_confirmation(
+            &conn,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            "hash_open",
+            now_ms,
+        )
+        .unwrap();
+        assert_eq!(token.as_deref(), Some("confirm-preview-token"));
+
+        bind_manual_confirmation_to_intent(&conn, "confirm-preview-token", "manual_bound").unwrap();
+
+        let token_after_bind = find_reusable_manual_confirmation(
+            &conn,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            "hash_open",
+            now_ms,
+        )
+        .unwrap();
+        assert!(token_after_bind.is_none());
+    }
+
+    #[test]
+    fn manual_execution_claim_reuses_existing_intent_for_same_confirm_token() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let confirm_token = "confirm-execute-token";
+        let param_hash = "open_hash";
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash, status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED')",
+            params![
+                confirm_token,
+                now_ms,
+                now_ms + MANUAL_CONFIRM_TTL_MS,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                param_hash,
+            ],
+        )
+        .unwrap();
+
+        let intent_id = manual_intent_id_from_confirm_token(confirm_token);
+        let cloid = manual_cloid_from_intent_id(&intent_id);
+        let record = ManualIntentRecord {
+            intent_id: &intent_id,
+            created_ts_ms: now_ms,
+            symbol: "ETH",
+            action: "OPEN",
+            side: "SELL",
+            requested_size: 0.0515,
+            requested_notional: 107.5629,
+            leverage: Some(10.0),
+            status: "NEW",
+            dedupe_key: Some(confirm_token),
+            client_order_id: &cloid,
+            reason: "manual_trade",
+            confidence: "MANUAL",
+            meta_json: "{}".to_string(),
+        };
+        let first = initialise_manual_execution(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            param_hash,
+            record,
+        )
+        .unwrap();
+        match first {
+            ManualExecutionClaim::Submit {
+                intent_id: first_intent_id,
+                resumed_existing,
+                ..
+            } => {
+                assert_eq!(first_intent_id, intent_id);
+                assert!(!resumed_existing);
+            }
+            ManualExecutionClaim::Existing(_) => panic!("expected new intent claim"),
+        }
+
+        let duplicate = initialise_manual_execution(
+            &conn,
+            confirm_token,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            param_hash,
+            ManualIntentRecord {
+                intent_id: &intent_id,
+                created_ts_ms: now_ms,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "NEW",
+                dedupe_key: Some(confirm_token),
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        match duplicate {
+            ManualExecutionClaim::Existing(existing) => {
+                assert_eq!(existing.intent_id, intent_id);
+                assert_eq!(existing.status, "NEW");
+            }
+            ManualExecutionClaim::Submit { .. } => panic!("expected duplicate to reuse intent"),
+        }
+
+        let intent_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oms_intents", [], |row| row.get(0))
+            .unwrap();
+        let confirmation_status: String = conn
+            .query_row(
+                "SELECT status FROM manual_trade_confirmations WHERE confirm_token = ?1",
+                [confirm_token],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(intent_count, 1);
+        assert_eq!(confirmation_status, "BOUND");
+    }
+
+    #[test]
+    fn resumed_open_retry_rejects_changed_request_body() {
+        let existing = ExistingManualIntent {
+            intent_id: "manual_resume".to_string(),
+            created_ts_ms: 1_773_500_000_000,
+            symbol: "ETH".to_string(),
+            action: "OPEN".to_string(),
+            side: "SELL".to_string(),
+            status: "NEW".to_string(),
+            requested_size: Some(0.0515),
+            leverage: Some(10.0),
+            dedupe_key: Some("confirm-open".to_string()),
+            client_order_id: Some("0x6d616e5f1234567890abcdef12345678".to_string()),
+            exchange_order_id: None,
+            last_error: None,
+            sent_ts_ms: None,
+            meta_json: Some(
+                json!({
+                    "request": {
+                        "order_type": "market",
+                        "side": "SELL",
+                        "notional_usd": 500.0,
+                        "leverage": 10,
+                        "limit_price": Value::Null
+                    }
+                })
+                .to_string(),
+            ),
+        };
+        let changed_request = ManualTradeOpenRequest {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 750.0,
+            leverage: 10,
+            order_type: "market".to_string(),
+            limit_price: None,
+        };
+
+        let error = validate_resumed_open_request(&existing, &changed_request).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("confirm token does not match parameters"));
     }
 }
