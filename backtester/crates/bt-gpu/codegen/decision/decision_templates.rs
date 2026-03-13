@@ -732,13 +732,20 @@ __device__ double compute_sl_price_codegen(
                 } else {
                     sl_price = entry_price + (eff_atr * sl_mult);
                 }
+                if (breakeven_active) {
+                    double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+                    if (pos_type == 1) {
+                        sl_price = fmax(sl_price, entry_price + be_buffer);
+                    } else {
+                        sl_price = fmin(sl_price, entry_price - be_buffer);
+                    }
+                }
             }
             continue;
         }
 
         if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN) {
             if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN) != 0u
-                && sl_price > 0.0
                 && cfg.enable_breakeven_stop != 0u
                 && cfg.breakeven_start_atr > 0.0f) {
                 double be_start = eff_atr * (double)cfg.breakeven_start_atr;
@@ -747,12 +754,16 @@ __device__ double compute_sl_price_codegen(
                 if (pos_type == 1) {
                     if ((current_price - entry_price) >= be_start) {
                         breakeven_active = true;
-                        sl_price = fmax(sl_price, entry_price + be_buffer);
+                        if (sl_price > 0.0) {
+                            sl_price = fmax(sl_price, entry_price + be_buffer);
+                        }
                     }
                 } else {
                     if ((entry_price - current_price) >= be_start) {
                         breakeven_active = true;
-                        sl_price = fmin(sl_price, entry_price - be_buffer);
+                        if (sl_price > 0.0) {
+                            sl_price = fmin(sl_price, entry_price - be_buffer);
+                        }
                     }
                 }
             }

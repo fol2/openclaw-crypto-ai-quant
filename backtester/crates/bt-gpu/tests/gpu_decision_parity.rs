@@ -837,6 +837,17 @@ fn test_sl_codegen_modifier_ordering() {
 }
 
 #[test]
+fn test_sl_codegen_reapplies_breakeven_when_base_appears_later() {
+    let src = get_sl_cuda_source();
+    assert!(
+        src.contains("if (breakeven_active)") &&
+        src.contains("sl_price = fmax(sl_price, entry_price + be_buffer)") &&
+        src.contains("sl_price = fmin(sl_price, entry_price - be_buffer)"),
+        "SL codegen must carry a pre-activated breakeven state into later raw-SL recomputes"
+    );
+}
+
+#[test]
 fn test_sl_numerical_parity_with_fixtures() {
     // For each fixture, compute SL using the Rust reference and verify that
     // the CUDA codegen would produce the same result (given same inputs and
