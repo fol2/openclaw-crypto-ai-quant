@@ -51,6 +51,14 @@ static constexpr unsigned int GPU_SMART_EXIT_MASK_FUNDING_HEADWIND = 1u << 4;
 static constexpr unsigned int GPU_SMART_EXIT_MASK_TSME = 1u << 5;
 static constexpr unsigned int GPU_SMART_EXIT_MASK_MMDE = 1u << 6;
 static constexpr unsigned int GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION = 1u << 7;
+
+static constexpr unsigned int GPU_SIGNAL_MODE_MASK_STANDARD_TREND = 1u << 0;
+static constexpr unsigned int GPU_SIGNAL_MODE_MASK_PULLBACK = 1u << 1;
+static constexpr unsigned int GPU_SIGNAL_MODE_MASK_SLOW_DRIFT = 1u << 2;
+
+static constexpr unsigned int GPU_SIGNAL_MODE_ID_STANDARD_TREND = 0u;
+static constexpr unsigned int GPU_SIGNAL_MODE_ID_PULLBACK = 1u;
+static constexpr unsigned int GPU_SIGNAL_MODE_ID_SLOW_DRIFT = 2u;
 ";
 
 // The SOURCE_HASHES line will be injected by the drift detector (AQC-1200)
@@ -380,23 +388,40 @@ __device__ SignalResult generate_signal_codegen(
         }
     }
 
-    // =================================================================
-    // Mode 1: Standard trend entry  (entry.rs lines 43-49)
-    // =================================================================
-    if (all_gates_pass) {
-        int signal = 0;     // SIG_NEUTRAL
-        int confidence = 1; // CONF_MEDIUM
+    unsigned int signal_mode_order[3] = {
+        cfg.signal_mode_order_0,
+        cfg.signal_mode_order_1,
+        cfg.signal_mode_order_2
+    };
 
-        // ── Direction from alignment + close vs EMA_fast ──
-        if (bullish_alignment && close > ema_fast && btc_ok_long) {
-            signal = 1;  // SIG_BUY
-        } else if (bearish_alignment && close < ema_fast && btc_ok_short) {
-            signal = 2;  // SIG_SELL
-        }
+    for (int mode_idx = 0; mode_idx < 3; ++mode_idx) {
+        unsigned int mode_id = signal_mode_order[mode_idx];
 
-        // CPU parity: failing Mode 1 must fall through to Mode 2/3,
-        // not return neutral early.
-        if (signal != 0) {
+        // =================================================================
+        // Mode 1: Standard trend entry  (entry.rs lines 43-49)
+        // =================================================================
+        if (mode_id == GPU_SIGNAL_MODE_ID_STANDARD_TREND) {
+            if ((cfg.signal_mode_behaviour_mask & GPU_SIGNAL_MODE_MASK_STANDARD_TREND) == 0u) {
+                continue;
+            }
+            if (!all_gates_pass) {
+                continue;
+            }
+
+            int signal = 0;     // SIG_NEUTRAL
+            int confidence = 1; // CONF_MEDIUM
+
+            // ── Direction from alignment + close vs EMA_fast ──
+            if (bullish_alignment && close > ema_fast && btc_ok_long) {
+                signal = 1;  // SIG_BUY
+            } else if (bearish_alignment && close < ema_fast && btc_ok_short) {
+                signal = 2;  // SIG_SELL
+            }
+
+            if (signal == 0) {
+                continue;
+            }
+
             // ── DRE (Dynamic RSI Elasticity) ──
             double adx_min = (double)cfg.dre_min_adx;
             double adx_max = (double)cfg.dre_max_adx;
@@ -409,11 +434,9 @@ __device__ SignalResult generate_signal_codegen(
 
             bool mode1_ok = true;
 
-            // ── RSI gate ──
             if (signal == 1 && rsi <= rsi_long_limit) { mode1_ok = false; }
             if (signal == 2 && rsi >= rsi_short_limit) { mode1_ok = false; }
 
-            // ── MACD histogram gate ──
             if (mode1_ok) {
                 bool macd_ok;
                 if (signal == 1) {
@@ -424,10 +447,7 @@ __device__ SignalResult generate_signal_codegen(
                 if (!macd_ok) { mode1_ok = false; }
             }
 
-            // ── StochRSI filter ──
             if (mode1_ok && cfg.use_stoch_rsi_filter != 0u) {
-                // CUDA indicator snapshots are f32; apply a tiny tolerance to avoid
-                // boundary flips versus CPU f64 around StochRSI thresholds.
                 const double stoch_eps = 1e-6;
                 if (signal == 1 && stoch_k > ((double)cfg.stoch_rsi_block_long_gt + stoch_eps)) {
                     mode1_ok = false;
@@ -438,7 +458,6 @@ __device__ SignalResult generate_signal_codegen(
             }
 
             if (mode1_ok) {
-                // ── Volume-based confidence upgrade to High ──
                 if (vol_sma > 0.0 && volume > vol_sma * (double)cfg.high_conf_volume_mult) {
                     confidence = 2;  // CONF_HIGH
                 }
@@ -449,67 +468,80 @@ __device__ SignalResult generate_signal_codegen(
                 result.effective_min_adx = effective_min_adx;
                 return result;
             }
+            continue;
         }
-    }
 
-    // =================================================================
-    // Mode 2: Pullback continuation  (entry.rs lines 54-66)
-    // =================================================================
-    if (cfg.enable_pullback_entries != 0u) {
-        bool pullback_gates_ok =
-            !is_anomaly
-            && !is_extended
-            && !is_ranging
-            && vol_confirm
-            && adx >= (double)cfg.pullback_min_adx;
+        // =================================================================
+        // Mode 2: Pullback continuation  (entry.rs lines 54-66)
+        // =================================================================
+        if (mode_id == GPU_SIGNAL_MODE_ID_PULLBACK) {
+            if ((cfg.signal_mode_behaviour_mask & GPU_SIGNAL_MODE_MASK_PULLBACK) == 0u) {
+                continue;
+            }
+            if (cfg.enable_pullback_entries == 0u) {
+                continue;
+            }
 
-        if (pullback_gates_ok) {
-            // Cross detection: EMA_fast cross-up / cross-down
+            bool pullback_gates_ok =
+                !is_anomaly
+                && !is_extended
+                && !is_ranging
+                && vol_confirm
+                && adx >= (double)cfg.pullback_min_adx;
+
+            if (!pullback_gates_ok) {
+                continue;
+            }
+
             bool cross_up = (prev_close <= prev_ema_fast) && (close > ema_fast);
             bool cross_dn = (prev_close >= prev_ema_fast) && (close < ema_fast);
-
             int pullback_conf = (int)cfg.pullback_confidence;
 
-            // ── Long pullback continuation ──
             if (cross_up && bullish_alignment && btc_ok_long) {
                 bool macd_ok = (cfg.pullback_require_macd_sign == 0u) || (macd_hist > 0.0);
                 if (macd_ok && rsi >= (double)cfg.pullback_rsi_long_min) {
                     SignalResult result;
-                    result.signal = 1;  // SIG_BUY
+                    result.signal = 1;
                     result.confidence = pullback_conf;
                     result.effective_min_adx = (double)cfg.pullback_min_adx;
                     return result;
                 }
-            }
-            // ── Short pullback continuation (elif in Python) ──
-            else if (cross_dn && bearish_alignment && btc_ok_short) {
+            } else if (cross_dn && bearish_alignment && btc_ok_short) {
                 bool macd_ok = (cfg.pullback_require_macd_sign == 0u) || (macd_hist < 0.0);
                 if (macd_ok && rsi <= (double)cfg.pullback_rsi_short_max) {
                     SignalResult result;
-                    result.signal = 2;  // SIG_SELL
+                    result.signal = 2;
                     result.confidence = pullback_conf;
                     result.effective_min_adx = (double)cfg.pullback_min_adx;
                     return result;
                 }
             }
+            continue;
         }
-    }
 
-    // =================================================================
-    // Mode 3: Slow drift  (entry.rs lines 71-85)
-    // =================================================================
-    if (cfg.enable_slow_drift_entries != 0u) {
-        bool slow_gates_ok =
-            !is_anomaly
-            && !is_extended
-            && !is_ranging
-            && vol_confirm
-            && adx >= (double)cfg.slow_drift_min_adx;
+        // =================================================================
+        // Mode 3: Slow drift  (entry.rs lines 71-85)
+        // =================================================================
+        if (mode_id == GPU_SIGNAL_MODE_ID_SLOW_DRIFT) {
+            if ((cfg.signal_mode_behaviour_mask & GPU_SIGNAL_MODE_MASK_SLOW_DRIFT) == 0u) {
+                continue;
+            }
+            if (cfg.enable_slow_drift_entries == 0u) {
+                continue;
+            }
 
-        if (slow_gates_ok) {
+            bool slow_gates_ok =
+                !is_anomaly
+                && !is_extended
+                && !is_ranging
+                && vol_confirm
+                && adx >= (double)cfg.slow_drift_min_adx;
+
+            if (!slow_gates_ok) {
+                continue;
+            }
+
             double min_slope = (double)cfg.slow_drift_min_slope_pct;
-
-            // ── Long drift: slope >= +threshold, price above EMA_slow ──
             if (bullish_alignment
                 && close > ema_slow
                 && btc_ok_long
@@ -517,22 +549,20 @@ __device__ SignalResult generate_signal_codegen(
                 bool macd_ok = (cfg.slow_drift_require_macd_sign == 0u) || (macd_hist > 0.0);
                 if (macd_ok && rsi >= (double)cfg.slow_drift_rsi_long_min) {
                     SignalResult result;
-                    result.signal = 1;  // SIG_BUY
-                    result.confidence = 0;  // CONF_LOW (always Low for slow drift)
+                    result.signal = 1;
+                    result.confidence = 0;  // CONF_LOW
                     result.effective_min_adx = (double)cfg.slow_drift_min_adx;
                     return result;
                 }
-            }
-            // ── Short drift: slope <= -threshold, price below EMA_slow (elif) ──
-            else if (bearish_alignment
-                     && close < ema_slow
-                     && btc_ok_short
-                     && ema_slow_slope_pct <= -min_slope) {
+            } else if (bearish_alignment
+                       && close < ema_slow
+                       && btc_ok_short
+                       && ema_slow_slope_pct <= -min_slope) {
                 bool macd_ok = (cfg.slow_drift_require_macd_sign == 0u) || (macd_hist < 0.0);
                 if (macd_ok && rsi <= (double)cfg.slow_drift_rsi_short_max) {
                     SignalResult result;
-                    result.signal = 2;  // SIG_SELL
-                    result.confidence = 0;  // CONF_LOW (always Low for slow drift)
+                    result.signal = 2;
+                    result.confidence = 0;  // CONF_LOW
                     result.effective_min_adx = (double)cfg.slow_drift_min_adx;
                     return result;
                 }

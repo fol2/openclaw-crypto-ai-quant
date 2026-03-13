@@ -3427,18 +3427,18 @@ fn test_pesc_elapsed_time_check() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AQC-1270: Config round-trip 141 fields
+// AQC-1270: Config round-trip 145 fields
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn test_config_round_trip_size_141_fields() {
-    // AQC-1270: Verify GpuComboConfig is 564 bytes = 141 x 4-byte fields.
+    // AQC-1270: Verify GpuComboConfig is 580 bytes = 145 x 4-byte fields.
     // This ensures all fields are accounted for and none were accidentally
     // added or removed without updating the struct size assertion.
     assert_eq!(
         std::mem::size_of::<bt_gpu::buffers::GpuComboConfig>(),
-        564,
-        "GpuComboConfig must be exactly 564 bytes (141 x 4-byte fields)"
+        580,
+        "GpuComboConfig must be exactly 580 bytes (145 x 4-byte fields)"
     );
 }
 
@@ -3539,6 +3539,10 @@ fn test_config_all_decision_fields_referenced_in_codegen() {
         "cfg.slow_drift_rsi_long_min",
         "cfg.slow_drift_rsi_short_max",
         "cfg.slow_drift_require_macd_sign",
+        "cfg.signal_mode_behaviour_mask",
+        "cfg.signal_mode_order_0",
+        "cfg.signal_mode_order_1",
+        "cfg.signal_mode_order_2",
         // Sizing
         "cfg.allocation_pct",
         "cfg.enable_dynamic_sizing",

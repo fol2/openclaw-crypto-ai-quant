@@ -245,7 +245,7 @@ const _: () = assert!(std::mem::size_of::<IndicatorParams>() == 32);
 /// Flattened trade parameters for one sweep combo.
 /// Only trade-affecting fields (not indicator windows).
 ///
-/// 564 bytes.
+/// 580 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuComboConfig {
@@ -443,9 +443,15 @@ pub struct GpuComboConfig {
     // Entry/exit cooldown (seconds) [139-140]
     pub entry_cooldown_s: u32,
     pub exit_cooldown_s: u32,
+
+    // Signal mode behaviour contract [141-144]
+    pub signal_mode_behaviour_mask: u32,
+    pub signal_mode_order_0: u32,
+    pub signal_mode_order_1: u32,
+    pub signal_mode_order_2: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 564);
+const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 580);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuPosition — per-symbol position state
@@ -695,6 +701,17 @@ pub const GPU_SMART_EXIT_MASK_ALL: u32 = GPU_SMART_EXIT_MASK_TREND_BREAKDOWN
     | GPU_SMART_EXIT_MASK_MMDE
     | GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION;
 
+pub const GPU_SIGNAL_MODE_MASK_STANDARD_TREND: u32 = 1 << 0;
+pub const GPU_SIGNAL_MODE_MASK_PULLBACK: u32 = 1 << 1;
+pub const GPU_SIGNAL_MODE_MASK_SLOW_DRIFT: u32 = 1 << 2;
+pub const GPU_SIGNAL_MODE_MASK_ALL: u32 = GPU_SIGNAL_MODE_MASK_STANDARD_TREND
+    | GPU_SIGNAL_MODE_MASK_PULLBACK
+    | GPU_SIGNAL_MODE_MASK_SLOW_DRIFT;
+
+pub const GPU_SIGNAL_MODE_ID_STANDARD_TREND: u32 = 0;
+pub const GPU_SIGNAL_MODE_ID_PULLBACK: u32 = 1;
+pub const GPU_SIGNAL_MODE_ID_SLOW_DRIFT: u32 = 2;
+
 /// Validate that an f64 value fits in f32 without becoming infinite.
 /// Returns `Err` if a finite f64 overflows to infinity in f32.
 fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
@@ -749,6 +766,46 @@ fn build_smart_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourP
     mask
 }
 
+fn build_signal_mode_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -> u32 {
+    let mut mask = GPU_SIGNAL_MODE_MASK_ALL;
+    for item in &plan.signal_modes.items {
+        if item.enabled {
+            continue;
+        }
+        match item.id.as_str() {
+            "signal.mode.standard_trend" => mask &= !GPU_SIGNAL_MODE_MASK_STANDARD_TREND,
+            "signal.mode.pullback" => mask &= !GPU_SIGNAL_MODE_MASK_PULLBACK,
+            "signal.mode.slow_drift" => mask &= !GPU_SIGNAL_MODE_MASK_SLOW_DRIFT,
+            _ => {}
+        }
+    }
+    mask
+}
+
+fn encode_signal_mode_order(
+    plan: &bt_core::behaviour::ResolvedBehaviourPlan,
+) -> Result<[u32; 3], String> {
+    let mut out = [GPU_SIGNAL_MODE_ID_STANDARD_TREND; 3];
+    for (idx, id) in plan.signal_modes.ordered_ids().enumerate() {
+        if idx >= out.len() {
+            return Err(format!(
+                "GPU signal mode order only supports 3 behaviours, got extra `{id}`"
+            ));
+        }
+        out[idx] = match id {
+            "signal.mode.standard_trend" => GPU_SIGNAL_MODE_ID_STANDARD_TREND,
+            "signal.mode.pullback" => GPU_SIGNAL_MODE_ID_PULLBACK,
+            "signal.mode.slow_drift" => GPU_SIGNAL_MODE_ID_SLOW_DRIFT,
+            _ => {
+                return Err(format!(
+                    "unknown signal mode behaviour `{id}` in GPU order encoding"
+                ))
+            }
+        };
+    }
+    Ok(out)
+}
+
 impl GpuComboConfig {
     /// Convert a `StrategyConfig` (f64) into a `GpuComboConfig` (f32).
     ///
@@ -758,6 +815,8 @@ impl GpuComboConfig {
             .map_err(|err| format!("execution contract resolution failed: {err}"))?;
         let exit_behaviour_mask = build_exit_behaviour_mask(&resolved.behaviour_plan);
         let smart_exit_behaviour_mask = build_smart_exit_behaviour_mask(&resolved.behaviour_plan);
+        let signal_mode_behaviour_mask = build_signal_mode_behaviour_mask(&resolved.behaviour_plan);
+        let signal_mode_order = encode_signal_mode_order(&resolved.behaviour_plan)?;
         let cfg = &resolved.effective_cfg;
         let tc = &cfg.trade;
         let fc = &cfg.filters;
@@ -950,6 +1009,10 @@ impl GpuComboConfig {
             tp_mult_weak: checked_f32_field!(tp.tp_mult_weak),
             entry_cooldown_s: tc.entry_cooldown_s as u32,
             exit_cooldown_s: tc.exit_cooldown_s as u32,
+            signal_mode_behaviour_mask,
+            signal_mode_order_0: signal_mode_order[0],
+            signal_mode_order_1: signal_mode_order[1],
+            signal_mode_order_2: signal_mode_order[2],
         })
     }
 }
@@ -960,6 +1023,8 @@ mod tests {
         GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
         GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN, GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
         GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE, GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+        GPU_SIGNAL_MODE_ID_PULLBACK, GPU_SIGNAL_MODE_ID_SLOW_DRIFT,
+        GPU_SIGNAL_MODE_ID_STANDARD_TREND, GPU_SIGNAL_MODE_MASK_STANDARD_TREND,
         GPU_SMART_EXIT_MASK_ALL,
     };
     use bt_core::config::{
@@ -1192,6 +1257,41 @@ mod tests {
             0
         );
         assert_eq!(gpu.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_ALL, 0);
+    }
+
+    #[test]
+    fn test_gpu_combo_config_lowers_signal_mode_reorder_and_disable() {
+        let profile = "gpu_signal_order";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        cfg.pipeline.profiles.insert(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    signal_modes: BehaviourGroupConfig {
+                        order: vec![
+                            "signal.mode.slow_drift".to_string(),
+                            "signal.mode.standard_trend".to_string(),
+                            "signal.mode.pullback".to_string(),
+                        ],
+                        disabled: vec!["signal.mode.standard_trend".to_string()],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        );
+
+        let gpu = GpuComboConfig::from_strategy_config(&cfg)
+            .expect("signal mode reorder/disable should lower into GPU config");
+        assert_eq!(
+            gpu.signal_mode_behaviour_mask & GPU_SIGNAL_MODE_MASK_STANDARD_TREND,
+            0
+        );
+        assert_eq!(gpu.signal_mode_order_0, GPU_SIGNAL_MODE_ID_SLOW_DRIFT);
+        assert_eq!(gpu.signal_mode_order_1, GPU_SIGNAL_MODE_ID_STANDARD_TREND);
+        assert_eq!(gpu.signal_mode_order_2, GPU_SIGNAL_MODE_ID_PULLBACK);
     }
 
     #[test]
