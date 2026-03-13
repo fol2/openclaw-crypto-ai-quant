@@ -113,7 +113,7 @@ pub fn generate_combinations(axes: &[SweepAxis]) -> Vec<Vec<(String, f64)>> {
                 combo
                     .iter()
                     .find(|(p, _)| *p == gate.path)
-                    .map_or(true, |(_, v)| (*v - gate.eq).abs() < 1e-9)
+                    .is_none_or(|(_, v)| (*v - gate.eq).abs() < 1e-9)
             } else {
                 true
             };

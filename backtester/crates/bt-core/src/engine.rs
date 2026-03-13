@@ -219,6 +219,9 @@ fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
 }
 
 fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
+    let behaviour_plan = cfg
+        .resolve_behaviour_plan(None)
+        .unwrap_or_else(|_| crate::behaviour::ResolvedBehaviourPlan::production());
     decision_kernel::KernelParams {
         allow_pyramid: cfg.trade.enable_pyramiding,
         // Engine entry processing closes the existing position first when a reverse
@@ -229,6 +232,7 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
         // sweep kernel which computes kernel_margin_req = notional / cfg.leverage.
         leverage: cfg.trade.leverage.max(1.0),
         exit_params: Some(build_exit_params(cfg)),
+        behaviour_plan,
         ..decision_kernel::KernelParams::default()
     }
 }
@@ -358,7 +362,7 @@ fn kernel_exit_to_engine(result: &KernelExitResult) -> Option<ExitResult> {
 /// Evaluate exit conditions via the kernel's exit logic for a given symbol.
 ///
 /// 1. Syncs engine → kernel position metadata.
-/// 2. Calls `kernel_exits::evaluate_exits()` on the kernel position.
+/// 2. Calls `kernel_exits::evaluate_exits_with_behaviour_plan()` on the kernel position.
 /// 3. Syncs updated trailing_sl / tp1_taken back to the engine position.
 /// 4. Returns an `ExitResult` if an exit was triggered, or `None` to hold.
 fn evaluate_kernel_exit(
@@ -382,7 +386,13 @@ fn evaluate_kernel_exit(
     // Phase 2: evaluate exits on kernel position (mutates trailing_sl in-place)
     let kernel_result = {
         if let Some(kpos) = state.kernel_state.positions.get_mut(symbol) {
-            kernel_exits::evaluate_exits(kpos, snap, &exit_params, ts)
+            kernel_exits::evaluate_exits_with_behaviour_plan(
+                kpos,
+                snap,
+                &exit_params,
+                ts,
+                &state.kernel_params.behaviour_plan.exits,
+            )
         } else {
             return None;
         }
@@ -809,6 +819,11 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         to_ts,
     } = input;
     let use_stoch_rsi = cfg.filters.use_stoch_rsi_filter;
+    let behaviour_plan = cfg
+        .resolve_behaviour_plan(None)
+        .unwrap_or_else(|_| crate::behaviour::ResolvedBehaviourPlan::production());
+    let effective_cfg = apply_engine_behaviour_overrides(cfg, &behaviour_plan);
+    let cfg = &effective_cfg;
 
     // -- Build sorted timeline of unique timestamps --
     let timestamps = build_timeline(candles);
@@ -987,8 +1002,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             // Runs BEFORE warmup guard so that init-state positions are
             // monitored from the very first bar (without init-state,
             // positions are empty during warmup so this is a no-op).
-            // Exit evaluation is delegated to kernel_exits::evaluate_exits()
-            // which handles SL, trailing, TP, glitch guard, and smart exits.
+            // Exit evaluation is delegated to kernel_exits::evaluate_exits_with_behaviour_plan()
+            // which honours the active exit behaviour order and modifiers.
             // The kernel updates trailing_sl/tp1_taken in-place; we sync them
             // back to the engine position after each evaluation.
             if state.positions.contains_key(sym_str)
@@ -1026,10 +1041,28 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
 
             // ── Entry evaluation (collect candidates) ─────────────────
             let btc_bull_opt = btc_bullish;
-            let gate_result =
-                gates::check_gates(&snap, cfg, sym_str, btc_bull_opt, ema_slow_slope_pct);
-            let (mut signal, confidence, entry_adx_threshold) =
-                entry::generate_signal(&snap, &gate_result, cfg, ema_slow_slope_pct);
+            let gate_report = gates::check_gates_with_behaviour_plan(
+                &snap,
+                cfg,
+                sym_str,
+                btc_bull_opt,
+                ema_slow_slope_pct,
+                &behaviour_plan.gates,
+            );
+            let gate_result = gate_report.result;
+            let signal_report = entry::generate_signal_with_behaviour_plan(
+                &snap,
+                &gate_result,
+                cfg,
+                ema_slow_slope_pct,
+                &behaviour_plan.signal_modes,
+                &behaviour_plan.signal_confidence,
+            );
+            let (mut signal, confidence, entry_adx_threshold) = (
+                signal_report.signal,
+                signal_report.confidence,
+                signal_report.entry_adx_threshold,
+            );
 
             // Track gate statistics
             state.gate_stats.total_checks += 1;
@@ -1091,13 +1124,24 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     _ => false,
                 };
                 // Engine-level transforms
-                let atr = apply_atr_floor(snap.atr, snap.close, cfg.trade.min_atr_pct);
+                let atr = apply_atr_floor_with_plan(
+                    snap.atr,
+                    snap.close,
+                    cfg.trade.min_atr_pct,
+                    &behaviour_plan.engine,
+                );
 
                 if signal != Signal::Neutral {
-                    signal = apply_reverse(signal, cfg, breadth_pct);
+                    signal =
+                        apply_reverse_with_plan(signal, cfg, breadth_pct, &behaviour_plan.engine);
                 }
                 if signal != Signal::Neutral {
-                    signal = apply_regime_filter(signal, cfg, breadth_pct);
+                    signal = apply_regime_filter_with_plan(
+                        signal,
+                        cfg,
+                        breadth_pct,
+                        &behaviour_plan.engine,
+                    );
                 }
 
                 if signal == Signal::Neutral {
@@ -1309,7 +1353,13 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                 + unrealized_pnl(&state.positions, &state.indicators, ts, candles, &bar_index);
 
             for cand in &indicator_bar_candidates {
-                if entries_this_bar >= cfg.trade.max_entry_orders_per_loop {
+                let max_entries_per_loop =
+                    if behaviour_plan.engine.is_enabled("engine.entry_budget") {
+                        cfg.trade.max_entry_orders_per_loop
+                    } else {
+                        usize::MAX
+                    };
+                if entries_this_bar >= max_entries_per_loop {
                     if let (Ok(sym_filter), Ok(ts_filter_raw)) = (
                         std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
                         std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
@@ -1321,7 +1371,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                 cand.symbol,
                                 cand.ts,
                                 entries_this_bar,
-                                cfg.trade.max_entry_orders_per_loop
+                                max_entries_per_loop
                             );
                         }
                     }
@@ -1682,6 +1732,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                             sym: sym.as_str(),
                                             snap: &sub_snap,
                                             cfg,
+                                            behaviour_plan: &behaviour_plan,
                                             btc_bullish,
                                             breadth_pct,
                                             ema_slow_slope_pct: slope,
@@ -1744,11 +1795,17 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     };
                     if let Some((ref sym_filter, ts_filter)) = debug_filter {
                         if *sub_ts == ts_filter {
+                            let max_entries_per_loop =
+                                if behaviour_plan.engine.is_enabled("engine.entry_budget") {
+                                    cfg.trade.max_entry_orders_per_loop
+                                } else {
+                                    usize::MAX
+                                };
                             eprintln!(
                                 "[cpu-sub-rank-debug] ts_ms={} entries_this_bar_start={} max_entries={} candidates_at_ts:",
                                 ts_filter,
                                 entries_this_bar,
-                                cfg.trade.max_entry_orders_per_loop
+                                max_entries_per_loop
                             );
                             for (idx, cand) in sub_candidates.iter().enumerate() {
                                 let score = (cand.confidence as i32) * 100 + cand.adx as i32;
@@ -1761,8 +1818,14 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                         }
                     }
 
+                    let max_entries_per_loop =
+                        if behaviour_plan.engine.is_enabled("engine.entry_budget") {
+                            cfg.trade.max_entry_orders_per_loop
+                        } else {
+                            usize::MAX
+                        };
                     for cand in &sub_candidates {
-                        if entries_this_bar >= cfg.trade.max_entry_orders_per_loop {
+                        if entries_this_bar >= max_entries_per_loop {
                             if let Some((ref sym_filter, ts_filter)) = debug_filter {
                                 if cand.ts == ts_filter || cand.symbol == *sym_filter {
                                     eprintln!(
@@ -1770,7 +1833,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                         cand.symbol,
                                         cand.ts,
                                         entries_this_bar,
-                                        cfg.trade.max_entry_orders_per_loop
+                                        max_entries_per_loop
                                     );
                                 }
                             }
@@ -2062,11 +2125,93 @@ fn compute_ema_slow_slope(history: &[f64], window: usize, current_close: f64) ->
     (current - past) / current_close
 }
 
+fn apply_engine_behaviour_overrides(
+    cfg: &StrategyConfig,
+    behaviour_plan: &crate::behaviour::ResolvedBehaviourPlan,
+) -> StrategyConfig {
+    let mut cfg = cfg.clone();
+    if !behaviour_plan
+        .entry_progression
+        .is_enabled("entry.progression.pyramiding")
+    {
+        cfg.trade.enable_pyramiding = false;
+    }
+    if !behaviour_plan
+        .entry_progression
+        .is_enabled("entry.progression.add_cooldown")
+    {
+        cfg.trade.add_cooldown_minutes = 0;
+    }
+    if !behaviour_plan.risk.is_enabled("risk.entry_cooldown") {
+        cfg.trade.entry_cooldown_s = 0;
+    }
+    if !behaviour_plan.risk.is_enabled("risk.exit_cooldown") {
+        cfg.trade.exit_cooldown_s = 0;
+    }
+    if !behaviour_plan.risk.is_enabled("risk.pesc") {
+        cfg.trade.reentry_cooldown_minutes = 0;
+    }
+    if !behaviour_plan
+        .entry_sizing
+        .is_enabled("entry.sizing.dynamic")
+    {
+        cfg.trade.enable_dynamic_sizing = false;
+    }
+    if !behaviour_plan
+        .entry_sizing
+        .is_enabled("entry.sizing.confidence_multiplier")
+    {
+        cfg.trade.confidence_mult_high = 1.0;
+        cfg.trade.confidence_mult_medium = 1.0;
+        cfg.trade.confidence_mult_low = 1.0;
+    }
+    if !behaviour_plan
+        .entry_sizing
+        .is_enabled("entry.sizing.adx_multiplier")
+    {
+        cfg.trade.adx_sizing_min_mult = 1.0;
+        cfg.trade.adx_sizing_full_adx = 0.0;
+    }
+    if !behaviour_plan
+        .entry_sizing
+        .is_enabled("entry.sizing.volatility_scalar")
+    {
+        cfg.trade.vol_baseline_pct = 0.0;
+        cfg.trade.vol_scalar_min = 1.0;
+        cfg.trade.vol_scalar_max = 1.0;
+    }
+    if !behaviour_plan
+        .entry_sizing
+        .is_enabled("entry.sizing.min_notional_bump")
+    {
+        cfg.trade.bump_to_min_notional = false;
+    }
+    cfg
+}
+
 // ---------------------------------------------------------------------------
 // Engine-level transforms
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn apply_atr_floor(atr: f64, price: f64, min_atr_pct: f64) -> f64 {
+    apply_atr_floor_with_plan(
+        atr,
+        price,
+        min_atr_pct,
+        &crate::behaviour::ResolvedBehaviourPlan::production().engine,
+    )
+}
+
+fn apply_atr_floor_with_plan(
+    atr: f64,
+    price: f64,
+    min_atr_pct: f64,
+    behaviour_plan: &bt_signals::behaviour::BehaviourGroupPlan,
+) -> f64 {
+    if !behaviour_plan.is_enabled("engine.atr_floor") {
+        return atr;
+    }
     if min_atr_pct > 0.0 {
         let floor = price * min_atr_pct;
         if atr < floor {
@@ -2076,7 +2221,25 @@ fn apply_atr_floor(atr: f64, price: f64, min_atr_pct: f64) -> f64 {
     atr
 }
 
+#[cfg(test)]
 fn apply_reverse(signal: Signal, cfg: &StrategyConfig, breadth_pct: f64) -> Signal {
+    apply_reverse_with_plan(
+        signal,
+        cfg,
+        breadth_pct,
+        &crate::behaviour::ResolvedBehaviourPlan::production().engine,
+    )
+}
+
+fn apply_reverse_with_plan(
+    signal: Signal,
+    cfg: &StrategyConfig,
+    breadth_pct: f64,
+    behaviour_plan: &bt_signals::behaviour::BehaviourGroupPlan,
+) -> Signal {
+    if !behaviour_plan.is_enabled("engine.reverse_signal") {
+        return signal;
+    }
     let mut should_reverse = cfg.trade.reverse_entry_signal;
 
     // Auto-reverse based on market breadth
@@ -2101,7 +2264,25 @@ fn apply_reverse(signal: Signal, cfg: &StrategyConfig, breadth_pct: f64) -> Sign
     }
 }
 
+#[cfg(test)]
 fn apply_regime_filter(signal: Signal, cfg: &StrategyConfig, breadth_pct: f64) -> Signal {
+    apply_regime_filter_with_plan(
+        signal,
+        cfg,
+        breadth_pct,
+        &crate::behaviour::ResolvedBehaviourPlan::production().engine,
+    )
+}
+
+fn apply_regime_filter_with_plan(
+    signal: Signal,
+    cfg: &StrategyConfig,
+    breadth_pct: f64,
+    behaviour_plan: &bt_signals::behaviour::BehaviourGroupPlan,
+) -> Signal {
+    if !behaviour_plan.is_enabled("engine.regime_filter") {
+        return signal;
+    }
     if !cfg.market_regime.enable_regime_filter {
         return signal;
     }
@@ -2775,6 +2956,7 @@ struct EvaluateSubBarCandidateInput<'a> {
     sym: &'a str,
     snap: &'a IndicatorSnapshot,
     cfg: &'a StrategyConfig,
+    behaviour_plan: &'a crate::behaviour::ResolvedBehaviourPlan,
     btc_bullish: Option<bool>,
     breadth_pct: f64,
     ema_slow_slope_pct: f64,
@@ -2787,14 +2969,34 @@ fn evaluate_sub_bar_candidate(input: EvaluateSubBarCandidateInput<'_>) -> Option
         sym,
         snap,
         cfg,
+        behaviour_plan,
         btc_bullish,
         breadth_pct,
         ema_slow_slope_pct,
         ts,
     } = input;
-    let gate_result = gates::check_gates(snap, cfg, sym, btc_bullish, ema_slow_slope_pct);
-    let (mut signal, confidence, entry_adx_threshold) =
-        entry::generate_signal(snap, &gate_result, cfg, ema_slow_slope_pct);
+    let gate_report = gates::check_gates_with_behaviour_plan(
+        snap,
+        cfg,
+        sym,
+        btc_bullish,
+        ema_slow_slope_pct,
+        &behaviour_plan.gates,
+    );
+    let gate_result = gate_report.result;
+    let signal_report = entry::generate_signal_with_behaviour_plan(
+        snap,
+        &gate_result,
+        cfg,
+        ema_slow_slope_pct,
+        &behaviour_plan.signal_modes,
+        &behaviour_plan.signal_confidence,
+    );
+    let (mut signal, confidence, entry_adx_threshold) = (
+        signal_report.signal,
+        signal_report.confidence,
+        signal_report.entry_adx_threshold,
+    );
     let debug_target = match (
         std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
         std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
@@ -2831,8 +3033,13 @@ fn evaluate_sub_bar_candidate(input: EvaluateSubBarCandidateInput<'_>) -> Option
         return None;
     }
 
-    let atr = apply_atr_floor(snap.atr, snap.close, cfg.trade.min_atr_pct);
-    signal = apply_reverse(signal, cfg, breadth_pct);
+    let atr = apply_atr_floor_with_plan(
+        snap.atr,
+        snap.close,
+        cfg.trade.min_atr_pct,
+        &behaviour_plan.engine,
+    );
+    signal = apply_reverse_with_plan(signal, cfg, breadth_pct, &behaviour_plan.engine);
     if debug_target {
         eprintln!(
             "[cpu-sub-cand-debug] sym={} ts_ms={} after_reverse={:?} breadth={:.6}",
@@ -2848,7 +3055,7 @@ fn evaluate_sub_bar_candidate(input: EvaluateSubBarCandidateInput<'_>) -> Option
         }
         return None;
     }
-    signal = apply_regime_filter(signal, cfg, breadth_pct);
+    signal = apply_regime_filter_with_plan(signal, cfg, breadth_pct, &behaviour_plan.engine);
     if debug_target {
         eprintln!(
             "[cpu-sub-cand-debug] sym={} ts_ms={} after_regime={:?} breadth={:.6}",

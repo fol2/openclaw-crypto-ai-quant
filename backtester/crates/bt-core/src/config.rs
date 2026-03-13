@@ -14,6 +14,7 @@ use std::path::Path;
 // Enums
 // ---------------------------------------------------------------------------
 
+use crate::behaviour::ResolvedBehaviourPlan;
 pub use bt_signals::{Confidence, MacdMode, Signal};
 
 // ---------------------------------------------------------------------------
@@ -573,6 +574,32 @@ pub struct PipelineProfileConfig {
     pub enabled_stages: Vec<String>,
     /// Optional explicit stage block-list removals.
     pub disabled_stages: Vec<String>,
+    /// Behaviour-level execution profile beneath the stage plan.
+    pub behaviours: BehaviourProfileConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct BehaviourGroupConfig {
+    /// Optional preferred order. Unlisted behaviours fall back to the registry order.
+    pub order: Vec<String>,
+    /// Optional explicit allow-list additions.
+    pub enabled: Vec<String>,
+    /// Optional explicit block-list removals.
+    pub disabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct BehaviourProfileConfig {
+    pub gates: BehaviourGroupConfig,
+    pub signal_modes: BehaviourGroupConfig,
+    pub signal_confidence: BehaviourGroupConfig,
+    pub exits: BehaviourGroupConfig,
+    pub engine: BehaviourGroupConfig,
+    pub entry_sizing: BehaviourGroupConfig,
+    pub entry_progression: BehaviourGroupConfig,
+    pub risk: BehaviourGroupConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -614,6 +641,35 @@ impl StrategyConfig {
     /// Canonical AVE average ATR window for runtime indicator paths.
     pub fn effective_ave_avg_atr_window(&self) -> usize {
         self.thresholds.entry.ave_avg_atr_window
+    }
+
+    pub fn resolve_behaviour_plan(
+        &self,
+        profile_override: Option<&str>,
+    ) -> Result<ResolvedBehaviourPlan, bt_signals::behaviour::BehaviourResolveError> {
+        let profile = profile_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                let configured = self.runtime.profile.trim();
+                (!configured.is_empty()).then(|| configured.to_string())
+            })
+            .unwrap_or_else(|| {
+                let configured = self.pipeline.default_profile.trim();
+                if configured.is_empty() {
+                    "production".to_string()
+                } else {
+                    configured.to_string()
+                }
+            });
+        let profile_config = self
+            .pipeline
+            .profiles
+            .get(&profile)
+            .map(|profile| profile.behaviours.clone())
+            .unwrap_or_default();
+        crate::behaviour::resolve_behaviour_plan(&profile, &profile_config)
     }
 }
 
@@ -993,6 +1049,48 @@ fn pipeline_to_json(p: &PipelineConfig) -> serde_json::Value {
                 "stage_order": profile.stage_order,
                 "enabled_stages": profile.enabled_stages,
                 "disabled_stages": profile.disabled_stages,
+                "behaviours": {
+                    "gates": {
+                        "order": profile.behaviours.gates.order,
+                        "enabled": profile.behaviours.gates.enabled,
+                        "disabled": profile.behaviours.gates.disabled,
+                    },
+                    "signal_modes": {
+                        "order": profile.behaviours.signal_modes.order,
+                        "enabled": profile.behaviours.signal_modes.enabled,
+                        "disabled": profile.behaviours.signal_modes.disabled,
+                    },
+                    "signal_confidence": {
+                        "order": profile.behaviours.signal_confidence.order,
+                        "enabled": profile.behaviours.signal_confidence.enabled,
+                        "disabled": profile.behaviours.signal_confidence.disabled,
+                    },
+                    "exits": {
+                        "order": profile.behaviours.exits.order,
+                        "enabled": profile.behaviours.exits.enabled,
+                        "disabled": profile.behaviours.exits.disabled,
+                    },
+                    "engine": {
+                        "order": profile.behaviours.engine.order,
+                        "enabled": profile.behaviours.engine.enabled,
+                        "disabled": profile.behaviours.engine.disabled,
+                    },
+                    "entry_sizing": {
+                        "order": profile.behaviours.entry_sizing.order,
+                        "enabled": profile.behaviours.entry_sizing.enabled,
+                        "disabled": profile.behaviours.entry_sizing.disabled,
+                    },
+                    "entry_progression": {
+                        "order": profile.behaviours.entry_progression.order,
+                        "enabled": profile.behaviours.entry_progression.enabled,
+                        "disabled": profile.behaviours.entry_progression.disabled,
+                    },
+                    "risk": {
+                        "order": profile.behaviours.risk.order,
+                        "enabled": profile.behaviours.risk.enabled,
+                        "disabled": profile.behaviours.risk.disabled,
+                    },
+                },
             }),
         );
     }

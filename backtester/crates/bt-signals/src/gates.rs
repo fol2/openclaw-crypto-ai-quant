@@ -2,6 +2,9 @@
 //!
 //! Faithfully mirrors `mei_alpha_v1.analyze()` lines 3344-3537.
 
+use crate::behaviour::{
+    resolve_group_plan, BehaviourGroupPlan, BehaviourTrace, DEFAULT_GATE_BEHAVIOURS,
+};
 use crate::{IndicatorSnapshotLike, SignalConfigLike};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +52,12 @@ pub struct GateResult {
     pub all_gates_pass: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateEvaluationReport {
+    pub result: GateResult,
+    pub behaviour_trace: Vec<BehaviourTrace>,
+}
+
 // ---------------------------------------------------------------------------
 // Gate evaluation
 // ---------------------------------------------------------------------------
@@ -74,6 +83,29 @@ where
     S: IndicatorSnapshotLike,
     C: SignalConfigLike,
 {
+    check_gates_with_behaviour_plan(
+        snap,
+        cfg,
+        symbol,
+        btc_bullish,
+        ema_slow_slope_pct,
+        &default_gate_behaviour_plan(),
+    )
+    .result
+}
+
+pub fn check_gates_with_behaviour_plan<S, C>(
+    snap: &S,
+    cfg: &C,
+    symbol: &str,
+    btc_bullish: Option<bool>,
+    ema_slow_slope_pct: f64,
+    behaviour_plan: &BehaviourGroupPlan,
+) -> GateEvaluationReport
+where
+    S: IndicatorSnapshotLike,
+    C: SignalConfigLike,
+{
     let snap = snap.snapshot_view();
     let flt = cfg.filters_view();
     let thr = cfg.thresholds_view();
@@ -81,6 +113,7 @@ where
     let thr_ranging = thr.ranging;
     let tp = thr.tp_and_momentum;
     let trade = cfg.trade_view();
+    let mut behaviour_trace = Vec::new();
 
     // -------------------------------------------------------------------
     // Gate 1: Ranging filter (vote system)
@@ -88,7 +121,7 @@ where
     // -------------------------------------------------------------------
     let bb_width_ratio = snap.bb_width_ratio;
     let mut is_ranging = false;
-    if flt.enable_ranging_filter {
+    if behaviour_plan.is_enabled("gate.ranging_vote") && flt.enable_ranging_filter {
         let min_signals = thr_ranging.min_signals.max(1);
         let mut votes: u32 = 0;
 
@@ -106,43 +139,90 @@ where
         }
 
         is_ranging = votes >= min_signals as u32;
+        behaviour_trace.push(trace(
+            "gates",
+            "gate.ranging_vote",
+            true,
+            "executed",
+            format!("votes={votes} min_signals={min_signals} ranging={is_ranging}"),
+        ));
+    } else {
+        behaviour_trace.push(trace(
+            "gates",
+            "gate.ranging_vote",
+            behaviour_plan.is_enabled("gate.ranging_vote"),
+            if flt.enable_ranging_filter {
+                "skipped"
+            } else {
+                "config_disabled"
+            },
+            "ranging vote inactive".to_string(),
+        ));
     }
 
     // -------------------------------------------------------------------
     // Gate 2: Anomaly filter
     //   Python lines 3365-3371
     // -------------------------------------------------------------------
-    let is_anomaly = if flt.enable_anomaly_filter {
-        let a = thr.anomaly;
-        let price_change_pct = if snap.prev_close > 0.0 {
-            (snap.close - snap.prev_close).abs() / snap.prev_close
+    let is_anomaly =
+        if behaviour_plan.is_enabled("gate.anomaly_filter") && flt.enable_anomaly_filter {
+            let a = thr.anomaly;
+            let price_change_pct = if snap.prev_close > 0.0 {
+                (snap.close - snap.prev_close).abs() / snap.prev_close
+            } else {
+                0.0
+            };
+            let ema_dev_pct = if snap.ema_fast > 0.0 {
+                (snap.close - snap.ema_fast).abs() / snap.ema_fast
+            } else {
+                0.0
+            };
+            price_change_pct > a.price_change_pct_gt || ema_dev_pct > a.ema_fast_dev_pct_gt
         } else {
-            0.0
+            false
         };
-        let ema_dev_pct = if snap.ema_fast > 0.0 {
-            (snap.close - snap.ema_fast).abs() / snap.ema_fast
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.anomaly_filter",
+        behaviour_plan.is_enabled("gate.anomaly_filter"),
+        if behaviour_plan.is_enabled("gate.anomaly_filter") && flt.enable_anomaly_filter {
+            "executed"
+        } else if flt.enable_anomaly_filter {
+            "skipped"
         } else {
-            0.0
-        };
-        price_change_pct > a.price_change_pct_gt || ema_dev_pct > a.ema_fast_dev_pct_gt
-    } else {
-        false
-    };
+            "config_disabled"
+        },
+        format!("anomaly={is_anomaly}"),
+    ));
 
     // -------------------------------------------------------------------
     // Gate 3: Extension filter (distance from EMA_fast)
     //   Python lines 3533-3537
     // -------------------------------------------------------------------
-    let is_extended = if flt.enable_extension_filter {
-        let dist = if snap.ema_fast > 0.0 {
-            (snap.close - snap.ema_fast).abs() / snap.ema_fast
+    let is_extended =
+        if behaviour_plan.is_enabled("gate.extension_filter") && flt.enable_extension_filter {
+            let dist = if snap.ema_fast > 0.0 {
+                (snap.close - snap.ema_fast).abs() / snap.ema_fast
+            } else {
+                0.0
+            };
+            dist > thr_entry.max_dist_ema_fast
         } else {
-            0.0
+            false
         };
-        dist > thr_entry.max_dist_ema_fast
-    } else {
-        false
-    };
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.extension_filter",
+        behaviour_plan.is_enabled("gate.extension_filter"),
+        if behaviour_plan.is_enabled("gate.extension_filter") && flt.enable_extension_filter {
+            "executed"
+        } else if flt.enable_extension_filter {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("extended={is_extended}"),
+    ));
 
     // -------------------------------------------------------------------
     // Gate 4: Volume confirmation (optional)
@@ -157,7 +237,9 @@ where
     //   volume"). When `vol_confirm_include_prev` is false we require both
     //   current vol > vol_sma AND vol_trend — the strict path.
     // -------------------------------------------------------------------
-    let vol_confirm = if flt.require_volume_confirmation {
+    let vol_confirm = if behaviour_plan.is_enabled("gate.volume_confirmation")
+        && flt.require_volume_confirmation
+    {
         if flt.vol_confirm_include_prev {
             // Relaxed: current bar volume above SMA, OR vol_trend already true
             // (vol_trend is a rolling N-bar metric, so it implicitly reflects
@@ -169,34 +251,72 @@ where
     } else {
         true // gate disabled -> passes
     };
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.volume_confirmation",
+        behaviour_plan.is_enabled("gate.volume_confirmation"),
+        if behaviour_plan.is_enabled("gate.volume_confirmation") && flt.require_volume_confirmation
+        {
+            "executed"
+        } else if flt.require_volume_confirmation {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("vol_confirm={vol_confirm}"),
+    ));
 
     // -------------------------------------------------------------------
     // Gate 5: ADX rising (or saturated)
     //   Python lines 3426-3430
     // -------------------------------------------------------------------
-    let is_trending_up = if flt.require_adx_rising {
+    let is_trending_up = if behaviour_plan.is_enabled("gate.adx_rising") && flt.require_adx_rising {
         let saturation = flt.adx_rising_saturation;
         // snap.adx_slope == adx - prev_adx, so adx_slope > 0 <=> ADX rising.
         (snap.adx_slope > 0.0) || (snap.adx > saturation)
     } else {
         true
     };
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.adx_rising",
+        behaviour_plan.is_enabled("gate.adx_rising"),
+        if behaviour_plan.is_enabled("gate.adx_rising") && flt.require_adx_rising {
+            "executed"
+        } else if flt.require_adx_rising {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("is_trending_up={is_trending_up}"),
+    ));
 
     // -------------------------------------------------------------------
     // Gate 6: ADX threshold (effective_min_adx with TMC + AVE)
     //   Python lines 3383-3424
     // -------------------------------------------------------------------
-    let mut effective_min_adx = thr_entry.min_adx;
+    let mut effective_min_adx = if behaviour_plan.is_enabled("gate.adx_floor") {
+        thr_entry.min_adx
+    } else {
+        0.0
+    };
 
     // TMC: Trend Momentum Confirmation (v4.6)
     //   If ADX slope > 0.5, cap effective_min_adx at 25.0.
-    if snap.adx_slope > 0.5 {
+    if behaviour_plan.is_enabled("gate.adx_floor")
+        && behaviour_plan.is_enabled("gate.adx_floor.tmc_cap")
+        && snap.adx_slope > 0.5
+    {
         effective_min_adx = effective_min_adx.min(25.0);
     }
 
     // AVE: Adaptive Volatility Entry (v4.7)
     //   If ATR / avg_ATR > threshold, multiply effective_min_adx by ave_adx_mult.
-    if thr_entry.ave_enabled && snap.avg_atr > 0.0 {
+    if behaviour_plan.is_enabled("gate.adx_floor")
+        && behaviour_plan.is_enabled("gate.adx_floor.ave_multiplier")
+        && thr_entry.ave_enabled
+        && snap.avg_atr > 0.0
+    {
         let atr_ratio = snap.atr / snap.avg_atr;
         if atr_ratio > thr_entry.ave_atr_ratio_gt {
             let mult = if thr_entry.ave_adx_mult > 0.0 {
@@ -209,6 +329,41 @@ where
     }
 
     let adx_above_min = snap.adx > effective_min_adx;
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.adx_floor",
+        behaviour_plan.is_enabled("gate.adx_floor"),
+        if behaviour_plan.is_enabled("gate.adx_floor") {
+            "executed"
+        } else {
+            "disabled"
+        },
+        format!("effective_min_adx={effective_min_adx:.4} adx_above_min={adx_above_min}"),
+    ));
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.adx_floor.tmc_cap",
+        behaviour_plan.is_enabled("gate.adx_floor.tmc_cap"),
+        if behaviour_plan.is_enabled("gate.adx_floor.tmc_cap") {
+            "executed"
+        } else {
+            "disabled"
+        },
+        format!("adx_slope={:.4}", snap.adx_slope),
+    ));
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.adx_floor.ave_multiplier",
+        behaviour_plan.is_enabled("gate.adx_floor.ave_multiplier"),
+        if behaviour_plan.is_enabled("gate.adx_floor.ave_multiplier") && thr_entry.ave_enabled {
+            "executed"
+        } else if thr_entry.ave_enabled {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("avg_atr={:.4}", snap.avg_atr),
+    ));
 
     // -------------------------------------------------------------------
     // Gate 7: Macro alignment (EMA cross + optional macro EMA)
@@ -217,10 +372,23 @@ where
     let mut bullish_alignment = snap.ema_fast > snap.ema_slow;
     let mut bearish_alignment = snap.ema_fast < snap.ema_slow;
 
-    if flt.require_macro_alignment {
+    if behaviour_plan.is_enabled("gate.alignment.macro") && flt.require_macro_alignment {
         bullish_alignment = bullish_alignment && (snap.ema_slow > snap.ema_macro);
         bearish_alignment = bearish_alignment && (snap.ema_slow < snap.ema_macro);
     }
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.alignment.macro",
+        behaviour_plan.is_enabled("gate.alignment.macro"),
+        if behaviour_plan.is_enabled("gate.alignment.macro") && flt.require_macro_alignment {
+            "executed"
+        } else if flt.require_macro_alignment {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("bullish_alignment={bullish_alignment} bearish_alignment={bearish_alignment}"),
+    ));
 
     // -------------------------------------------------------------------
     // Gate 8: BTC alignment (optional)
@@ -230,29 +398,61 @@ where
     let require_btc = flt.require_btc_alignment;
     let btc_adx_override = thr_entry.btc_adx_override;
 
-    let btc_ok_long = !require_btc
+    let btc_alignment_enabled = behaviour_plan.is_enabled("gate.alignment.btc");
+    let btc_ok_long = !btc_alignment_enabled
+        || !require_btc
         || sym_upper == "BTC"
         || btc_bullish.is_none()
         || btc_bullish == Some(true)
         || snap.adx > btc_adx_override;
 
-    let btc_ok_short = !require_btc
+    let btc_ok_short = !btc_alignment_enabled
+        || !require_btc
         || sym_upper == "BTC"
         || btc_bullish.is_none()
         || btc_bullish == Some(false)
         || snap.adx > btc_adx_override;
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.alignment.btc",
+        btc_alignment_enabled,
+        if btc_alignment_enabled && require_btc {
+            "executed"
+        } else if require_btc {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("btc_ok_long={btc_ok_long} btc_ok_short={btc_ok_short}"),
+    ));
 
     // -------------------------------------------------------------------
     // Slow-drift ranging override
     //   Python lines 3524-3526
     //   If slow drift enabled and EMA_slow slope exceeds threshold, clear ranging.
     // -------------------------------------------------------------------
-    if thr_entry.enable_slow_drift_entries
+    if behaviour_plan.is_enabled("gate.override.slow_drift_unrange")
+        && thr_entry.enable_slow_drift_entries
         && is_ranging
         && ema_slow_slope_pct.abs() >= thr_entry.slow_drift_min_slope_pct
     {
         is_ranging = false;
     }
+    behaviour_trace.push(trace(
+        "gates",
+        "gate.override.slow_drift_unrange",
+        behaviour_plan.is_enabled("gate.override.slow_drift_unrange"),
+        if behaviour_plan.is_enabled("gate.override.slow_drift_unrange")
+            && thr_entry.enable_slow_drift_entries
+        {
+            "executed"
+        } else if thr_entry.enable_slow_drift_entries {
+            "skipped"
+        } else {
+            "config_disabled"
+        },
+        format!("is_ranging={is_ranging} ema_slow_slope_pct={ema_slow_slope_pct:.6}"),
+    ));
 
     // -------------------------------------------------------------------
     // Dynamic TP multiplier
@@ -298,7 +498,7 @@ where
         && vol_confirm
         && is_trending_up;
 
-    GateResult {
+    let result = GateResult {
         is_ranging,
         is_anomaly,
         is_extended,
@@ -318,6 +518,32 @@ where
         stoch_d,
         stoch_rsi_active,
         all_gates_pass,
+    };
+
+    GateEvaluationReport {
+        result,
+        behaviour_trace,
+    }
+}
+
+fn default_gate_behaviour_plan() -> BehaviourGroupPlan {
+    resolve_group_plan(
+        "production.behaviours.gates",
+        &DEFAULT_GATE_BEHAVIOURS,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("default gate behaviour plan must resolve")
+}
+
+fn trace(group: &str, id: &str, enabled: bool, status: &str, detail: String) -> BehaviourTrace {
+    BehaviourTrace {
+        group: group.to_string(),
+        id: id.to_string(),
+        enabled,
+        status: status.to_string(),
+        detail,
     }
 }
 

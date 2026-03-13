@@ -4,6 +4,7 @@ use aiq_runtime_core::StageId;
 use anyhow::Result;
 use bt_core::config::Confidence;
 use bt_core::decision_kernel::{self, OrderIntentKind, StrategyState};
+use bt_core::signals::behaviour::BehaviourTrace;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -39,6 +40,7 @@ pub struct PaperCycleSymbolReport {
     pub intent_count: usize,
     pub fill_count: usize,
     pub action_codes: Vec<String>,
+    pub behaviour_trace: Vec<BehaviourTrace>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -227,15 +229,16 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             None => interval = Some(config.engine.interval.clone()),
             _ => {}
         }
-        let prepared = prepare_symbol_step(
-            &config,
-            initial_positions.get(symbol),
-            input.candles_db,
+        let prepared = prepare_symbol_step(crate::paper_run_once::PrepareSymbolStepInput {
+            config: &config,
+            profile_override: Some(input.runtime_bootstrap.pipeline.profile.as_str()),
+            prior_position: initial_positions.get(symbol),
+            candles_db: input.candles_db,
             symbol,
-            &input.btc_symbol.trim().to_ascii_uppercase(),
-            input.lookback_bars,
-            Some(input.step_close_ts_ms),
-        )?;
+            btc_symbol: &input.btc_symbol.trim().to_ascii_uppercase(),
+            lookback_bars: input.lookback_bars,
+            step_close_ts_ms: Some(input.step_close_ts_ms),
+        })?;
         let pre_state = current_state.clone();
         let (decision, execution_plan) = crate::paper_run_once::execute_prepared_symbol_step(
             &pre_state,
@@ -487,6 +490,14 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
                 &execution.decision.intents,
                 &execution.decision.fills,
             ),
+            behaviour_trace: execution
+                .prepared
+                .gate_behaviour_trace
+                .iter()
+                .chain(execution.prepared.signal_behaviour_trace.iter())
+                .cloned()
+                .chain(execution.decision.diagnostics.behaviour_trace.clone())
+                .collect(),
             warnings: execution
                 .warnings
                 .into_iter()
@@ -1263,29 +1274,31 @@ mod tests {
         seed_candles_db(&candles_db);
 
         let btc = EntryCandidate {
-            prepared: prepare_symbol_step(
-                &load_cfg(Some("BTC")),
-                None,
-                &candles_db,
-                "BTC",
-                "BTC",
-                400,
-                Some(FIXED_STEP_CLOSE_TS_MS),
-            )
+            prepared: prepare_symbol_step(crate::paper_run_once::PrepareSymbolStepInput {
+                config: &load_cfg(Some("BTC")),
+                profile_override: None,
+                prior_position: None,
+                candles_db: &candles_db,
+                symbol: "BTC",
+                btc_symbol: "BTC",
+                lookback_bars: 400,
+                step_close_ts_ms: Some(FIXED_STEP_CLOSE_TS_MS),
+            })
             .unwrap(),
             score: 10.0,
             requested_notional_usd: 50.0,
         };
         let eth = EntryCandidate {
-            prepared: prepare_symbol_step(
-                &load_cfg(Some("ETH")),
-                None,
-                &candles_db,
-                "ETH",
-                "BTC",
-                400,
-                Some(FIXED_STEP_CLOSE_TS_MS),
-            )
+            prepared: prepare_symbol_step(crate::paper_run_once::PrepareSymbolStepInput {
+                config: &load_cfg(Some("ETH")),
+                profile_override: None,
+                prior_position: None,
+                candles_db: &candles_db,
+                symbol: "ETH",
+                btc_symbol: "BTC",
+                lookback_bars: 400,
+                step_close_ts_ms: Some(FIXED_STEP_CLOSE_TS_MS),
+            })
             .unwrap(),
             score: 20.0,
             requested_notional_usd: 25.0,

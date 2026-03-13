@@ -6,6 +6,7 @@
 
 use crate::indicators::IndicatorSnapshot;
 use crate::signals::gates::GateResult;
+use bt_signals::behaviour::{BehaviourGroupPlan, BehaviourTrace};
 use bt_signals::{
     Confidence, EntryThresholdsView, FiltersView, MacdMode, Signal, SignalConfigView,
     StochRsiThresholdsView, ThresholdsView, TradeView,
@@ -132,6 +133,7 @@ pub struct KernelEntryResult {
     /// 0=Low, 1=Medium, 2=High
     pub confidence: u8,
     pub entry_adx_threshold: f64,
+    pub behaviour_trace: Vec<BehaviourTrace>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -144,15 +146,54 @@ pub fn evaluate_entry(
     params: &EntryParams,
     ema_slow_slope_pct: f64,
 ) -> KernelEntryResult {
+    evaluate_entry_with_behaviour_plan(
+        snap,
+        gate_result,
+        params,
+        ema_slow_slope_pct,
+        &bt_signals::behaviour::resolve_group_plan(
+            "production.behaviours.signal_modes",
+            &bt_signals::behaviour::DEFAULT_SIGNAL_MODE_BEHAVIOURS,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("default signal mode plan must resolve"),
+        &bt_signals::behaviour::resolve_group_plan(
+            "production.behaviours.signal_confidence",
+            &bt_signals::behaviour::DEFAULT_SIGNAL_CONFIDENCE_BEHAVIOURS,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("default signal confidence plan must resolve"),
+    )
+}
+
+pub fn evaluate_entry_with_behaviour_plan(
+    snap: &IndicatorSnapshot,
+    gate_result: &GateResult,
+    params: &EntryParams,
+    ema_slow_slope_pct: f64,
+    signal_modes: &BehaviourGroupPlan,
+    signal_confidence: &BehaviourGroupPlan,
+) -> KernelEntryResult {
     use crate::signals::entry;
 
     let cfg = params.to_signal_config_view();
-    let (signal, confidence, entry_adx_threshold) =
-        entry::generate_signal(snap, gate_result, &cfg, ema_slow_slope_pct);
+    let report = entry::generate_signal_with_behaviour_plan(
+        snap,
+        gate_result,
+        &cfg,
+        ema_slow_slope_pct,
+        signal_modes,
+        signal_confidence,
+    );
     KernelEntryResult {
-        signal,
-        confidence: confidence as u8,
-        entry_adx_threshold,
+        signal: report.signal,
+        confidence: report.confidence as u8,
+        entry_adx_threshold: report.entry_adx_threshold,
+        behaviour_trace: report.behaviour_trace,
     }
 }
 

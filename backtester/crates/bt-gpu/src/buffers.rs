@@ -515,7 +515,7 @@ const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 40);
 /// + 5*52*4 (PESC + entry/exit cooldown maps)
 /// + 16 + 1024*40 (trace control + ring)
 /// + 56 (accumulators) + 8 (pad)
-/// = 47,088 bytes
+///   = 47,088 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
@@ -579,7 +579,7 @@ const _: () =
     assert!(std::mem::size_of::<GpuComboState>() == GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() == 47088);
 const _: () = assert!(std::mem::align_of::<GpuComboState>() == 8);
-const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
+const _: () = assert!(std::mem::size_of::<GpuComboState>().is_multiple_of(16));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuResult — readback result per combo

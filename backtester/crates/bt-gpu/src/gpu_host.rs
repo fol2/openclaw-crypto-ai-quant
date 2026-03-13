@@ -247,7 +247,7 @@ pub fn dispatch_indicator_kernels(
 
     // ── Indicator kernel: K × S threads ─────────────────────────────────
     let ind_threads = buffers.num_ind_combos * buffers.num_symbols;
-    let ind_grid = (ind_threads + block_size - 1) / block_size;
+    let ind_grid = ind_threads.div_ceil(block_size);
 
     let ind_func: CudaFunction = ds
         .dev
@@ -275,7 +275,7 @@ pub fn dispatch_indicator_kernels(
 
     // ── Breadth kernel: K × B threads ───────────────────────────────────
     let br_threads = buffers.num_ind_combos * buffers.num_bars;
-    let br_grid = (br_threads + block_size - 1) / block_size;
+    let br_grid = br_threads.div_ceil(block_size);
 
     let br_func: CudaFunction = ds
         .dev
@@ -426,6 +426,7 @@ impl BatchBuffers {
 
     /// Create GPU buffers from pre-concatenated multi-indicator data (CPU-precomputed path).
     /// Kept for backwards compatibility.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_multi(
         ds: &GpuDeviceState,
         all_snapshots: &[GpuSnapshot],
@@ -546,7 +547,7 @@ pub fn dispatch_and_readback(
     trade_end: u32,
 ) -> Result<Vec<GpuResult>, String> {
     let block_size = 64u32;
-    let grid_size = (buffers.num_combos + block_size - 1) / block_size;
+    let grid_size = buffers.num_combos.div_ceil(block_size);
 
     let trade_range = trade_end - trade_start;
     eprintln!(
@@ -560,7 +561,7 @@ pub fn dispatch_and_readback(
     } else {
         chunk_size
     };
-    let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
+    let num_chunks = trade_range.div_ceil(effective_chunk);
 
     // Create sentinel buffers when candle pointers are absent (cudarc requires valid pointers).
     let sentinel_main_candle: CudaSlice<GpuRawCandle>;

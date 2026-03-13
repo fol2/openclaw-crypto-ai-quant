@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 pub mod accounting;
+pub mod behaviour;
 pub mod candle;
 pub mod config;
 pub mod decision_kernel;
