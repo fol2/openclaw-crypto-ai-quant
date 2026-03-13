@@ -2903,6 +2903,43 @@ mod tests {
         params
     }
 
+    fn exit_params_from_profile(profile: &str) -> KernelParams {
+        let mut params = exit_params_for_test();
+        let mut cfg = crate::config::StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        params.behaviour_plan = cfg.resolve_behaviour_plan(None).unwrap();
+        params
+    }
+
+    fn exit_params_from_profile_config(
+        profile: &str,
+        exits: crate::config::BehaviourGroupConfig,
+    ) -> KernelParams {
+        let mut params = exit_params_for_test();
+        let config = crate::config::StrategyConfig {
+            runtime: crate::config::RuntimeConfig {
+                profile: profile.to_string(),
+                ..crate::config::RuntimeConfig::default()
+            },
+            pipeline: crate::config::PipelineConfig {
+                default_profile: "production".to_string(),
+                profiles: std::collections::BTreeMap::from([(
+                    profile.to_string(),
+                    crate::config::PipelineProfileConfig {
+                        behaviours: crate::config::BehaviourProfileConfig {
+                            exits,
+                            ..crate::config::BehaviourProfileConfig::default()
+                        },
+                        ..crate::config::PipelineProfileConfig::default()
+                    },
+                )]),
+            },
+            ..crate::config::StrategyConfig::default()
+        };
+        params.behaviour_plan = config.resolve_behaviour_plan(None).unwrap();
+        params
+    }
+
     fn price_update_event(symbol: &str, price: f64, snap: IndicatorSnapshot) -> MarketEvent {
         MarketEvent {
             schema_version: KERNEL_SCHEMA_VERSION,
@@ -2988,6 +3025,37 @@ mod tests {
     }
 
     #[test]
+    fn price_update_profile_driven_exit_isolation_disables_smart_exits() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_from_profile("parity_exit_isolation");
+        let mut snap = test_snap(10_100.0);
+        snap.ema_fast = 9_950.0;
+        snap.ema_slow = 10_200.0;
+        let event = price_update_event("BTC", 10_100.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(
+            result.intents.is_empty(),
+            "disabling smart exits should keep the position open when no base exit fires"
+        );
+        assert!(result
+            .diagnostics
+            .behaviour_trace
+            .iter()
+            .any(|item| item.id == "exit.smart.trend_breakdown" && item.status == "disabled"));
+        assert!(result
+            .diagnostics
+            .behaviour_trace
+            .iter()
+            .any(|item| item.id == "exit.take_profit.partial" && item.status == "disabled"));
+    }
+
+    #[test]
     fn price_update_partial_tp_emits_partial_close() {
         let state = open_long_btc(10_000.0, 10_000.0);
         let mut state_with_atr = state.clone();
@@ -3006,6 +3074,41 @@ mod tests {
         assert!(pos.is_some(), "position should remain after partial TP");
         let pos = pos.unwrap();
         assert!(pos.tp1_taken, "tp1_taken should be set after partial TP");
+    }
+
+    #[test]
+    fn price_update_profile_driven_exit_isolation_disables_partial_tp() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_from_profile_config(
+            "parity_exit_isolation",
+            crate::config::BehaviourGroupConfig {
+                order: vec![
+                    "exit.take_profit.full".to_string(),
+                    "exit.take_profit.partial".to_string(),
+                ],
+                enabled: vec![],
+                disabled: vec!["exit.take_profit.partial".to_string()],
+            },
+        );
+        let snap = test_snap(10_100.0);
+        let event = price_update_event("BTC", 10_100.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(
+            result.intents.is_empty(),
+            "disabling partial TP should prevent the 1 ATR partial close path",
+        );
+        assert!(result.state.positions.contains_key("BTC"));
+        assert!(result
+            .diagnostics
+            .behaviour_trace
+            .iter()
+            .any(|item| item.id == "exit.take_profit.partial" && item.status == "disabled"));
     }
 
     #[test]

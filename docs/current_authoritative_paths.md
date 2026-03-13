@@ -40,3 +40,8 @@ owned by the Rust config/runtime contract.
 That includes real exit orchestration: stop-loss, trailing, take-profit, and
 smart-exit ordering is now resolved from Rust behaviour plans and surfaced in
 runtime diagnostics/behaviour traces.
+
+The canonical example config ships two opt-in parity/debug profiles:
+
+- `parity_baseline` for production-like ordering with execution stages disabled
+- `parity_exit_isolation` for base stop-loss/trailing/full-TP inspection

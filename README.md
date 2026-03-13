@@ -75,6 +75,18 @@ behaviours without editing Rust code. Exit behaviour plans now control the
 actual stop-loss, trailing, take-profit, and smart-exit sequence rather than
 stopping at stage-level ownership.
 
+Shipped example configs include two opt-in parity lanes:
+
+- `parity_baseline`: explicit production-like behaviour ordering with broker/fill stages disabled
+- `parity_exit_isolation`: parity baseline plus disabled exit modifiers for stop-loss/trailing/full-TP debugging
+
+Inspect them with:
+
+```bash
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_baseline --json
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_exit_isolation --json
+```
+
 ## Operations
 
 Shell wrappers and systemd examples are provided for the Rust-owned runtime:

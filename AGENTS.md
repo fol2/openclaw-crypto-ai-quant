@@ -24,42 +24,31 @@ Do not change this section unless the user explicitly asks to update `AGENTS.md`
 
 ## Project Overview
 
-This is a crypto perpetual futures trading engine for Hyperliquid DEX. The system features:
+This is a Rust-native crypto perpetual futures trading stack for Hyperliquid DEX.
 
-- Python-based strategy logic and execution engine
-- Rust decision kernel (`bt-signals`) shared across backtester, GPU sweep, and live trading (via PyO3 `bt-runtime` bridge)
-- Rust backtester with optional CUDA GPU acceleration
-- Unified daemon supporting paper, dry_live, and live trading modes
-- Kernel orchestrator for gradual Python → Rust signal cutover with shadow mode tracking
-- Risk manager with daily loss limits, drawdown kill-switches, rate limiting, and exposure caps
-- Real-time market data via Rust WS sidecar (Unix socket)
-- Hot-reloadable YAML configuration system with merge chain
-- Strategy factory pipeline: nightly sweep → validate → deploy → paper → promote → live ramp
-- Ensemble runner for parallel multi-strategy daemons
+Active execution ownership now lives in:
+
+- `runtime/aiq-runtime` for paper/live daemon control, manifests, snapshots, and pipeline inspection
+- `backtester/` for replay, sweeps, GPU acceleration, and indicator validation
+- `ws_sidecar/` for market-data ingestion and candle persistence
+- `hub/` for operator-facing dashboard, service inspection, and backtest controls
+
+The repository is zero-Python. Historical alternate-language runtime and tool
+surfaces are no longer part of the active trust chain.
 
 ## Architecture
 
 ### Core Components
 
-- **Strategy configuration**: `config/strategy_overrides.yaml` (hot-reloads via mtime polling)
-- **Strategy defaults**: `strategy/mei_alpha_v1.py` → `_DEFAULT_STRATEGY_CONFIG` dict
-- **Unified engine**: `engine/core.py` → `UnifiedEngine`
-- **Daemon entrypoint**: `engine/daemon.py` — paper / dry_live / live mode selection
-- **Paper trader**: `strategy/mei_alpha_v1.py` → `PaperTrader` class
-- **Live trader**: `live/trader.py` → `LiveTrader` class
-- **Kernel orchestrator**: `strategy/kernel_orchestrator.py` → feeds data to Rust decision kernel, routes `OrderIntent` to broker
-- **Broker adapter**: `strategy/broker_adapter.py` → translates kernel `OrderIntent` to Hyperliquid orders
-- **Shadow mode**: `strategy/shadow_mode.py` → parallel Python + kernel decision tracking with agreement alerting
-- **Risk manager**: `engine/risk.py` → `RiskManager` — rate limits, drawdown kill, exposure caps, slippage guard
-- **Order Management System**: `engine/oms.py` → `LiveOms` — durable intent/order/fill ledger for live trading
-- **OMS reconciler**: `engine/oms_reconciler.py` → position/fill reconciliation
-- **Alerting**: `engine/alerting.py` → Discord/Telegram via `openclaw message send`
-- **Market data hub**: `engine/market_data.py` → candle + mid data from WS sidecar / SQLite / REST fallback
-- **Strategy manager**: `engine/strategy_manager.py` → YAML hot-reload via mtime polling
-- **Promoted config**: `engine/promoted_config.py` → loading promoted strategy configs
-- **Event logger**: `engine/event_logger.py` → decision + trade event logging
-- **SQLite logger**: `engine/sqlite_logger.py` → trade/candle persistence
-- **Systemd watchdog**: `engine/systemd_watchdog.py` → sd_notify integration
+- **Runtime CLI**: `runtime/aiq-runtime` — paper/live daemon entrypoints, manifests, effective-config, snapshots
+- **Runtime core**: `runtime/aiq-runtime-core` — stage plan, behaviour plan, bootstrap contracts
+- **Decision kernel**: `backtester/crates/bt-core/src/decision_kernel.rs` — deterministic transition logic
+- **Behaviour registry**: `backtester/crates/bt-core/src/behaviour.rs` and `backtester/crates/bt-signals/src/behaviour.rs`
+- **Backtester CLI**: `backtester/crates/bt-cli` — replay, sweep, indicator dump
+- **GPU sweep**: `backtester/crates/bt-gpu` — CUDA sweep acceleration and parity fixture tooling
+- **Risk primitives**: `backtester/crates/risk-core`
+- **Market-data sidecar**: `ws_sidecar/`
+- **Operator dashboard**: `hub/`
 
 ### Databases
 
@@ -71,6 +60,7 @@ This is a crypto perpetual futures trading engine for Hyperliquid DEX. The syste
 - **BBO snapshots DB**: `candles_dbs/bbo_snapshots.db` (optional)
 - **Universe history DB**: `candles_dbs/universe_history.db`
 - **Market data DB**: `market_data.db`
+- **Runtime snapshots**: JSON exports produced by `aiq-runtime snapshot ...`
 
 ### Candle Database Coverage
 
@@ -94,7 +84,7 @@ When running backtests across multiple intervals, ALWAYS restrict all runs to th
 Configuration values are merged in this order (later values override earlier):
 
 ```
-_DEFAULT_STRATEGY_CONFIG ← global YAML ← symbols.<SYM> YAML ← live YAML (if live mode)
+Rust defaults ← global YAML ← symbols.<SYM> YAML ← live YAML (if live mode)
 ```
 
 ### Key Configuration Sections
@@ -141,6 +131,46 @@ Window sizes for technical indicators:
 
 **IMPORTANT**: The `engine.interval` parameter is NOT hot-reloadable. Changing it requires a service restart.
 
+#### `runtime`
+- `profile`: Active runtime profile. Empty means follow `pipeline.default_profile`.
+- `state_backend`: Persistence backend identifier
+- `audit_sink`: Audit sink identifier
+
+#### `pipeline`
+- `default_profile`: Fallback profile when `runtime.profile` is empty
+- `profiles.<name>.ranker`: Stage-level ranking contract
+- `profiles.<name>.stage_order`: Full stage permutation override
+- `profiles.<name>.enabled_stages` / `disabled_stages`: Stage allow/block lists
+- `profiles.<name>.behaviours.*`: Behaviour-level order/allow/block controls
+
+#### `pipeline.profiles.<name>.behaviours`
+
+Current first-class behaviour groups are:
+
+- `gates`
+- `signal_modes`
+- `signal_confidence`
+- `exits`
+- `engine`
+- `entry_sizing`
+- `entry_progression`
+- `risk`
+
+Each group supports:
+
+- `order`
+- `enabled`
+- `disabled`
+
+### Parity Profiles
+
+Shipped example configs now include two opt-in parity lanes:
+
+- `parity_baseline`: explicit production-like behaviour ordering with broker/fill stages disabled
+- `parity_exit_isolation`: parity baseline plus disabled exit modifiers to isolate base stop-loss, trailing, and full take-profit paths
+
+Keep production on `production` unless you are intentionally running a debug or parity lane.
+
 ### Configuration Defaults
 
 The code-level default for `entry_min_confidence` is `"high"`, which blocks 70-90% of entry signals. To allow all confidence levels (low/medium/high), explicitly set `entry_min_confidence: low` in your YAML configuration.
@@ -160,15 +190,12 @@ Mode overlays are defined under `modes:` in `config/strategy_overrides.yaml`. Wi
 
 ### Signal Generation and Processing
 
-1. **Strategy analysis**: `mei_alpha_v1.analyze(df, sym, btc_bullish)` → `(signal, confidence, now_series)`
-2. **Kernel orchestrator** (when enabled): feeds data to Rust decision kernel via `bt-runtime` PyO3 bridge
-3. **Shadow mode** (optional): parallel Python + kernel comparison with agreement tracking
-4. **Signal reversal** (optional): manual or auto-reverse based on market breadth
-5. **Regime filter**: Block trades against market tide
-6. **ATR floor enforcement**: Skip if `ATR% < min_atr_pct`
-7. **Risk manager gates**: rate limits, exposure caps, drawdown checks
-8. **Phase 1**: Collect entry candidates (exits run immediately per-symbol, not ranked)
-9. **Phase 2**: Rank entries by score, execute in order
+1. `aiq-runtime` loads the merged strategy config and resolves the active stage + behaviour plan.
+2. `ws_sidecar` and SQLite sources provide candle, funding, and optional market-data context.
+3. Gate evaluation and signal generation run through the shared Rust signal path.
+4. Entry sizing, progression, and risk checks honour the resolved behaviour plan.
+5. Exit evaluation runs immediately per symbol, including configured stop-loss, trailing, take-profit, and smart-exit ordering.
+6. Ranking, OMS transitions, and broker execution only run when their stages are enabled for the active profile.
 
 ### Signal Ranking Algorithm
 
@@ -189,12 +216,12 @@ Tiebreaker: Symbol name alphabetical order (ascending)
 
 ### Audit Trail
 
-The `now_series` dictionary carries audit flags for debugging:
+Paper/live runtime outputs and decision diagnostics carry behaviour traces for debugging. Use them to confirm:
 
-- `_reversed_entry`: Signal was reversed (manual or auto)
-- `_regime_blocked`: Entry blocked by regime filter
-- `_atr_floored`: Entry skipped due to ATR floor
-- `_market_breadth_pct`: Current market breadth percentage
+- which gate behaviours ran or were disabled
+- which signal mode produced the entry
+- which exit behaviour triggered, skipped, or was disabled
+- whether risk cooldowns or exposure guards blocked the action
 
 ## Rust Backtester
 
@@ -207,22 +234,15 @@ The `now_series` dictionary carries audit flags for debugging:
   - `bt-data`: SQLite candle loader (supports multi-DB and partition directories)
   - `bt-cli`: CLI entry point (replay, sweep, dump-indicators)
   - `bt-gpu`: CUDA GPU sweep + TPE Bayesian optimisation
-  - `bt-runtime`: PyO3 bridge — exposes decision kernel to Python via JSON envelope API
   - `risk-core`: Shared, pure risk primitives (entry sizing, confidence tiers)
 
 ### Building
 
 ```bash
-# Recommended build script (version-stamped)
-python3 tools/build_mei_backtester.py
-
-# GPU build (requires CUDA toolkit)
-python3 tools/build_mei_backtester.py --gpu
-
-# Manual cargo build (CPU-only)
+# CPU-only
 cd backtester && cargo build --release -p bt-cli
 
-# Manual GPU build
+# GPU build
 cd backtester && cargo build --release -p bt-cli --features gpu
 ```
 
@@ -241,7 +261,8 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
 
 ### Indicator Parity Requirements
 
-All indicators in the Rust backtester MUST match the Python `ta` library within **0.00005 absolute error**.
+All indicators in the Rust backtester MUST match the external Python `ta`
+reference implementation within **0.00005 absolute error**.
 
 #### Critical Implementation Details
 
@@ -288,64 +309,31 @@ Kill-switch modes: `close_only` (no new entries, exits allowed) or `halt_all` (n
 - **Live trader**: `systemctl --user restart openclaw-ai-quant-live-v8`
 - **WebSocket sidecar**: `systemctl --user restart openclaw-ai-quant-ws-sidecar`
 - **Monitor**: `systemctl --user restart openclaw-ai-quant-monitor`
-- **Factory timer**: `systemctl --user restart openclaw-ai-quant-factory-v8.timer`
 - **Log pruning timer**: `systemctl --user restart openclaw-ai-quant-prune-runtime-logs-v8.timer`
 - **Replay gate timer**: `systemctl --user restart openclaw-ai-quant-replay-alignment-gate.timer`
 
 ### Hot-reload Behaviour
 
 - **YAML configuration changes**: Hot-reload automatically (no restart required)
-- **Python code changes**: Require service restart
 - **Engine interval changes**: Require service restart (not hot-reloadable)
 - **Strategy mode changes** that affect `engine.interval`: Require service restart
 
 ## Development
 
-### Python Environment
-
-- **Python version**: >=3.12
-- **Package manager**: `uv`
-
-### Setup
-
-```bash
-uv sync --dev
-```
-
-### Testing
-
-```bash
-uv run pytest
-```
-
-Coverage is tracked for `sqlite_logger`, `heartbeat`, `risk`, and `executor` modules (see `pyproject.toml` for current thresholds).
-
-### Linting and Formatting
-
-```bash
-# Lint
-uv run ruff check engine strategy exchange live tools tests monitor
-
-# Format
-uv run ruff format engine strategy exchange live tools tests monitor
-```
-
 ### Rust Development
 
 ```bash
-# Build all Rust projects
-cd backtester && cargo build --release
-cd ws_sidecar && cargo build --release
-cd hub && cargo build --release
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
-# Run tests
-cargo test
+Backtester-specific validation:
 
-# Format
-cargo fmt
-
-# Lint
-cargo clippy -- -D warnings
+```bash
+cargo test --manifest-path backtester/Cargo.toml -p bt-core
+cargo test --manifest-path backtester/Cargo.toml -p bt-gpu --features codegen --test gpu_decision_parity -- --nocapture
 ```
 
 ## Critical Rules for AI Assistants
@@ -362,66 +350,46 @@ cargo clippy -- -D warnings
 
 4. **Code defaults vs YAML overrides**: The code-level default for `entry_min_confidence` is `"high"`, which blocks most entries. Remember to set `entry_min_confidence: low` in YAML to allow all confidence levels.
 
+5. **Production defaults stay on `production`**. Parity profiles are opt-in and must never become the implicit live profile.
+
 ### Backtesting
 
-5. **Date range consistency**: When comparing backtest results across different intervals, ALWAYS restrict all runs to the same date range. Different candle databases have different coverage spans.
+6. **Date range consistency**: When comparing backtest results across different intervals, ALWAYS restrict all runs to the same date range. Different candle databases have different coverage spans.
 
-6. **Indicator parity**: Backtester indicator calculations MUST match Python `ta` library within 0.00005 absolute error. Validate using `dump-indicators` after any indicator changes.
+7. **Indicator parity**: Backtester indicator calculations MUST match the Python `ta` reference implementation within 0.00005 absolute error. Validate using `dump-indicators` after any indicator changes.
 
 ### Debugging
 
-7. **Audit flags**: The `now_series` dictionary carries debugging flags (`_reversed_entry`, `_regime_blocked`, `_atr_floored`, `_market_breadth_pct`). Check these when investigating unexpected behaviour.
+8. **Behaviour traces are first-class diagnostics**. When parity or runtime behaviour looks wrong, inspect the resolved pipeline profile and the emitted `behaviour_trace` before changing code.
 
-8. **When validating Rust indicators**: Always use `dump-indicators` and compare against Python `ta` output. Document the validation process.
+9. **Use parity profiles for isolation before patching logic**. `parity_baseline` confirms stage/behaviour resolution; `parity_exit_isolation` strips exit modifiers so you can focus on base stop-loss/trailing/full TP behaviour.
 
-9. **Shadow mode**: When the kernel orchestrator is running in shadow mode, check `decision_events` table and `ShadowDecisionTracker` agreement rates to diagnose discrepancies between Python and Rust signal paths.
+10. **When validating Rust indicators**: Always use `dump-indicators` and compare against Python `ta` output. Document the validation process.
 
 ### Deployment
 
-10. **Replay alignment gate**: Deployment tooling (`paper_deploy.py`, `deploy_sweep.py`, `promote_to_live.py`) is fail-closed against the replay alignment blocker by default. Only override with `--ignore-replay-gate` for emergency workflows.
+11. **Replay alignment gate**: Treat replay-alignment blockers as fail-closed. Only bypass them in explicitly approved emergency workflows.
 
 ## Key Files Quick Reference
 
 | File | Purpose |
 |------|---------|
-| `strategy/mei_alpha_v1.py` | Strategy signals + PaperTrader |
-| `strategy/kernel_orchestrator.py` | Rust kernel orchestrator (PyO3 bridge) |
-| `strategy/broker_adapter.py` | Kernel OrderIntent → Hyperliquid orders |
-| `strategy/shadow_mode.py` | Shadow mode decision tracking |
-| `strategy/reconciler.py` | Position reconciliation |
-| `live/trader.py` | Live order execution wrapper |
-| `exchange/executor.py` | HyperliquidLiveExecutor (SDK interface) |
-| `engine/core.py` | Main trading loop (UnifiedEngine) |
-| `engine/daemon.py` | Daemon entrypoint (paper / dry_live / live) |
-| `engine/strategy_manager.py` | YAML hot-reload |
-| `engine/market_data.py` | Candle/mid data hub |
-| `engine/oms.py` | Order Management System |
-| `engine/oms_reconciler.py` | OMS reconciliation |
-| `engine/risk.py` | RiskManager — rate limits, drawdown, kill-switch |
-| `engine/alerting.py` | Discord / Telegram notifications |
-| `engine/promoted_config.py` | Promoted config loading |
-| `config/strategy_overrides.yaml` | Live strategy config (hot-reloads) |
+| `config/strategy_overrides.yaml.example` | Canonical runtime/backtester config example, including parity profiles |
+| `runtime/aiq-runtime-core/src/pipeline.rs` | Stage profile resolution and built-in stage-debug/parity contracts |
+| `runtime/aiq-runtime/src/main.rs` | Runtime CLI entrypoint |
 | `backtester/crates/bt-core/src/engine.rs` | Backtester simulation engine |
 | `backtester/crates/bt-core/src/decision_kernel.rs` | Shared decision kernel |
-| `backtester/crates/bt-signals/` | Signal generation (entry/gates/confidence) |
+| `backtester/crates/bt-core/src/behaviour.rs` | Behaviour groups resolved below the stage plan |
+| `backtester/crates/bt-signals/` | Signal generation and behaviour traces |
 | `backtester/crates/bt-gpu/src/gpu_host.rs` | CUDA GPU dispatch |
-| `backtester/crates/bt-runtime/src/lib.rs` | PyO3 bridge to Python |
 | `backtester/crates/risk-core/` | Rust risk primitives |
-| `tools/deploy_sweep.py` | Deploy sweep results to YAML |
-| `tools/export_state.py` | Export trader state to JSON |
-| `tools/factory_cycle.py` | Strategy factory automation |
-| `tools/promote_to_live.py` | Paper → live promotion |
-| `tools/flat_now.py` | Emergency flatten + pause |
-| `tools/validate_config.py` | Config parity validation |
-| `tools/rollback_to_last_good.py` | Config rollback |
-| `factory_run.py` | Strategy factory entrypoint |
+| `ws_sidecar/` | Market-data ingestion and persistence |
+| `hub/` | Dashboard, system status, and operator controls |
+| `systemd/` | Service and timer examples for the Rust-owned surfaces |
 
 ## Additional Resources
 
-- **Strategy version history**: `strategy_changelog.json` (runtime-generated, gitignored)
-- **Project management**: `pyproject.toml`
-- **Version**: `VERSION` (single source of truth; all Cargo.toml and pyproject.toml must match)
-- **Dependencies**: Python managed via `uv` (see `pyproject.toml`); Rust via Cargo
+- **Version**: `VERSION` (single source of truth; all Cargo manifests and release checks must match)
 - **Operations runbook**: `docs/runbook.md`
 - **Strategy lifecycle**: `docs/strategy_lifecycle.md`
 - **Success metrics**: `docs/success_metrics.md`
@@ -431,34 +399,31 @@ cargo clippy -- -D warnings
 
 ### Reading Strategy Config
 
-```python
-from engine.strategy_manager import StrategyManager
-
-strategy = StrategyManager(yaml_path="config/strategy_overrides.yaml")
-config = strategy.get_config(symbol="BTC")
+```bash
+cargo run -p aiq-runtime -- paper effective-config --lane paper1 --project-dir "$PWD" --json
+cargo run -p aiq-runtime -- live effective-config --project-dir "$PWD" --json
 ```
 
-### Accessing Market Data
+### Inspecting the Active Pipeline
 
-```python
-from engine.market_data import MarketDataHub
-
-market = MarketDataHub()
-df = market.get_candles(symbol="BTC", interval="1h", lookback_bars=200)
+```bash
+cargo run -p aiq-runtime -- pipeline --mode paper --json
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_baseline --json
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_exit_isolation --json
 ```
 
 ### Running Backtests
 
 ```bash
 # Single run
-mei-backtester replay --candles-db candles_dbs/candles_1h.db
+cargo run --manifest-path backtester/Cargo.toml -p bt-cli -- replay --candles-db candles_dbs/candles_1h.db
 
 # Parameter sweep
-mei-backtester sweep --sweep-config sweeps/smoke.yaml
+cargo run --manifest-path backtester/Cargo.toml -p bt-cli -- sweep --sweep-config backtester/sweeps/smoke.yaml
 
 # Replay with exported state
-python tools/export_state.py --source paper --output /tmp/state.json
-mei-backtester replay --init-state /tmp/state.json --trades
+cargo run -p aiq-runtime -- snapshot export-paper --db trading_engine.db --output /tmp/state.json
+cargo run --manifest-path backtester/Cargo.toml -p bt-cli -- replay --init-state /tmp/state.json --trades
 ```
 
 ### Emergency Stop
@@ -467,8 +432,8 @@ mei-backtester replay --init-state /tmp/state.json --trades
 # File-based kill-switch (no restart needed)
 echo "close_only" > /tmp/ai-quant-kill
 
-# Emergency flatten
-python tools/flat_now.py --kill-file /tmp/ai-quant-kill --pause-mode close_only --paper --yes
+# Inspect live service state
+cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
 ```
 
 ## Troubleshooting
@@ -479,15 +444,15 @@ python tools/flat_now.py --kill-file /tmp/ai-quant-kill --pause-mode close_only 
 
 2. **YAML changes not taking effect**: Verify mtime polling is working. Check engine logs for "Config reloaded" messages.
 
-3. **Indicator mismatch in backtester**: Run `dump-indicators` and compare against Python `ta` output. Check EMA seeding, `vol_trend`, and `bb_width` implementations.
+3. **Profile does not behave as expected**: Run `cargo run -p aiq-runtime -- pipeline --mode paper --profile <name> --json` and inspect `behaviours.*` before changing code.
 
 4. **GPU build fails**: Ensure CUDA toolkit is installed. On WSL2, set `LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH`.
 
 5. **Unexpected entry filtering**: Check `entry_min_confidence` setting. Code default is `"high"`, which blocks most entries. Set to `"low"` in YAML to allow all confidence levels.
 
-6. **Kernel/Python signal divergence**: Check shadow mode agreement rates in `decision_events` table. Use `ShadowDecisionReport` to diagnose which signals diverge.
+6. **Unexpected exit reason**: Inspect the emitted `behaviour_trace` from paper/live output to confirm which exit behaviour triggered or was disabled.
 
-7. **OMS intent failures**: If live entries fail, check `AI_QUANT_OMS_REQUIRE_INTENT_FOR_ENTRY` (default: enabled, fail-closed). Review OMS tables for duplicate detection.
+7. **OMS intent failures**: If live entries fail, inspect the live manifest/effective-config output and review runtime diagnostics for duplicate or blocked intents.
 
 8. **Deployment blocked by replay gate**: Check `/tmp/openclaw-ai-quant/replay_gate/release_blocker.json`. Use `--ignore-replay-gate` only for emergency workflows.
 
@@ -499,11 +464,11 @@ python tools/flat_now.py --kill-file /tmp/ai-quant-kill --pause-mode close_only 
 
 3. **Validate backtester changes** using `dump-indicators` and comparison against Python `ta` library.
 
-4. **Document significant changes** in commit messages and consider updating `strategy_changelog.json`.
+4. **Use parity profiles before forking logic**. Prefer `parity_baseline` or `parity_exit_isolation` over ad hoc debug edits.
 
-5. **Preserve test coverage**. Check `pyproject.toml` for current coverage requirements.
+5. **Preserve test coverage**. Add or extend Rust tests when changing config resolution, behaviour ordering, or diagnostics.
 
-6. **Use YAML for strategy tuning**, not Python code edits. YAML changes hot-reload; code changes require restart.
+6. **Use YAML for strategy tuning**, not code edits, whenever the existing behaviour/config contract already supports the change.
 
 7. **When in doubt, ask the user** before making risky changes (especially for live trading or automated parameter tuning).
 

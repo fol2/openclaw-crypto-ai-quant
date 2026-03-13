@@ -391,6 +391,13 @@ fn builtin_profile(profile: &str) -> Option<PipelineProfileConfig> {
             ];
             Some(cfg)
         }
+        "parity_exit_isolation" => {
+            cfg.disabled_stages = vec![
+                StageId::BrokerExecution.as_str().to_string(),
+                StageId::FillReconciliation.as_str().to_string(),
+            ];
+            Some(cfg)
+        }
         "stage_debug" => {
             cfg.disabled_stages = vec![
                 StageId::Ranking.as_str().to_string(),
@@ -581,6 +588,27 @@ mod tests {
     }
 
     #[test]
+    fn resolves_builtin_parity_exit_isolation_profile() {
+        let registry = StageRegistry::default();
+        let mut config = config_with_runtime();
+        config.runtime.profile = "parity_exit_isolation".to_string();
+
+        let plan = resolve_pipeline(&config, None, &registry).unwrap();
+
+        assert_eq!(plan.profile, "parity_exit_isolation");
+        assert!(!plan.behaviours.exits.is_enabled("exit.stop_loss.breakeven"));
+        assert!(!plan.behaviours.exits.is_enabled("exit.take_profit.partial"));
+        assert!(
+            !plan
+                .stages
+                .iter()
+                .find(|stage| stage.id == StageId::BrokerExecution)
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
     fn rejects_incomplete_stage_order() {
         let registry = StageRegistry::default();
         let mut config = config_with_runtime();
@@ -640,5 +668,54 @@ mod tests {
         assert!(!plan.is_enabled(StageId::BrokerExecution));
         assert!(plan.enabled_stage_ids().contains(&StageId::Ranking));
         assert!(!plan.enabled_stage_ids().contains(&StageId::BrokerExecution));
+    }
+
+    #[test]
+    fn parity_exit_isolation_keeps_builtin_stage_gating() {
+        let registry = StageRegistry::default();
+        let mut config = config_with_runtime();
+        config.runtime.profile = "parity_exit_isolation".to_string();
+
+        let plan = resolve_pipeline(&config, None, &registry).unwrap();
+
+        assert_eq!(plan.profile, "parity_exit_isolation");
+        assert!(!plan.is_enabled(StageId::BrokerExecution));
+        assert!(!plan.is_enabled(StageId::FillReconciliation));
+    }
+
+    #[test]
+    fn resolves_profile_driven_exit_reordering_and_disables() {
+        let registry = StageRegistry::default();
+        let mut config = config_with_runtime();
+        config.runtime.profile = "parity_exit_isolation".to_string();
+        config.pipeline.profiles = BTreeMap::from([(
+            "parity_exit_isolation".to_string(),
+            PipelineProfileConfig {
+                behaviours: bt_core::config::BehaviourProfileConfig {
+                    exits: bt_core::config::BehaviourGroupConfig {
+                        order: vec![
+                            "exit.take_profit.full".to_string(),
+                            "exit.take_profit.partial".to_string(),
+                        ],
+                        enabled: vec![],
+                        disabled: vec![
+                            "exit.take_profit.partial".to_string(),
+                            "exit.smart.trend_breakdown".to_string(),
+                        ],
+                    },
+                    ..bt_core::config::BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        )]);
+
+        let plan = resolve_pipeline(&config, None, &registry).unwrap();
+
+        assert_eq!(plan.behaviours.exits.items[0].id, "exit.take_profit.full");
+        assert!(!plan.behaviours.exits.is_enabled("exit.take_profit.partial"));
+        assert!(!plan
+            .behaviours
+            .exits
+            .is_enabled("exit.smart.trend_breakdown"));
     }
 }

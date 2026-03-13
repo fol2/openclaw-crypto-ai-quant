@@ -75,6 +75,12 @@ Each group supports:
 - `enabled`: explicit allow-list
 - `disabled`: explicit block-list
 
+The shipped example config keeps `production` as the default profile and adds
+two opt-in parity lanes:
+
+- `parity_baseline`: explicit behaviour ordering for reproducible parity/debug inspection
+- `parity_exit_isolation`: parity baseline with exit modifiers and smart exits disabled
+
 ## Persistent State
 
 - trading SQLite DBs for paper/live runtime state

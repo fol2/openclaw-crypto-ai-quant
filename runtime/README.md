@@ -66,6 +66,18 @@ logic, take-profit ordering, and smart exits while keeping the same Rust binary.
 Use `cargo run -p aiq-runtime -- pipeline --json` to inspect the resolved stage
 and behaviour plan for the active profile.
 
+The shipped example config documents two parity-focused profiles:
+
+- `parity_baseline`: explicit production-like behaviour ordering with broker/fill stages disabled
+- `parity_exit_isolation`: parity baseline plus disabled exit modifiers to isolate base stop-loss, trailing, and full take-profit logic
+
+Typical parity inspection commands:
+
+```bash
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_baseline --json
+cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_exit_isolation --json
+```
+
 Paper and live reports also surface behaviour traces so parity lanes can verify
 which exit behaviour actually fired on a bar.
 
