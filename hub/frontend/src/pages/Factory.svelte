@@ -1,47 +1,58 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
+    factoryTimerAction,
     getFactoryCapability,
-    getFactoryRuns,
-    getFactoryRun,
-    getFactoryReport,
     getFactoryCandidates,
+    getFactoryReport,
+    getFactoryRun,
+    getFactoryRuns,
     getFactorySettings,
     getFactoryTimer,
+    putFactorySettings,
+    runFactory,
   } from '../lib/api';
 
-  let loading = $state(true);
-  let error = $state('');
-  let capability: any = $state(null);
+  let capability = $state<any | null>(null);
   let runs: any[] = $state([]);
-  let settings: any = $state(null);
-  let timerInfo: any = $state(null);
   let selectedRun: any = $state(null);
   let selectedReport: any = $state(null);
   let selectedCandidates: any[] = $state([]);
-  let selecting = $state(false);
+  let settingsText = $state('{}');
+  let timers: any[] = $state([]);
+  let loading = $state(true);
+  let loadingRun = $state(false);
+  let saving = $state(false);
+  let actionError = $state('');
+  let actionSuccess = $state('');
 
-  async function refresh() {
+  async function refreshOverview() {
     loading = true;
-    error = '';
+    actionError = '';
     try {
-      const [cap, runRows, savedSettings, timers] = await Promise.all([
+      const [cap, runList, settings, timerState] = await Promise.all([
         getFactoryCapability(),
-        getFactoryRuns(),
+        getFactoryRuns().catch(() => []),
         getFactorySettings().catch(() => ({})),
         getFactoryTimer().catch(() => ({ timers: [] })),
       ]);
       capability = cap;
-      runs = Array.isArray(runRows) ? runRows : [];
-      settings = savedSettings;
-      timerInfo = timers;
+      runs = runList;
+      settingsText = JSON.stringify(settings, null, 2);
+      timers = timerState.timers ?? [];
+
+      if (!selectedRun && runs.length > 0) {
+        await selectRun(runs[0].date, runs[0].run_id);
+      }
     } catch (e: any) {
-      error = e.message || 'Failed to load factory state';
+      actionError = e.message || 'Failed to load factory state';
     }
     loading = false;
   }
 
-  async function openRun(date: string, runId: string) {
-    selecting = true;
+  async function selectRun(date: string, runId: string) {
+    loadingRun = true;
+    actionError = '';
     try {
       const [detail, report, candidates] = await Promise.all([
         getFactoryRun(date, runId),
@@ -50,142 +61,212 @@
       ]);
       selectedRun = detail;
       selectedReport = report;
-      selectedCandidates = Array.isArray(candidates) ? candidates : [];
+      selectedCandidates = candidates;
     } catch (e: any) {
-      error = e.message || 'Failed to load factory artefacts';
+      actionError = e.message || 'Failed to load run';
     }
-    selecting = false;
+    loadingRun = false;
   }
 
-  function fmtJson(value: any): string {
-    return JSON.stringify(value ?? {}, null, 2);
+  async function launchFactory() {
+    if (!capability?.execution_enabled) return;
+    actionError = '';
+    actionSuccess = '';
+    try {
+      const result = await runFactory({});
+      actionSuccess = `Factory job started: ${result.job_id ?? 'submitted'}`;
+      await refreshOverview();
+    } catch (e: any) {
+      actionError = e.message || 'Factory launch failed';
+    }
   }
 
-  $effect(() => {
-    refresh();
+  async function saveSettings() {
+    if (!capability?.execution_enabled) return;
+    saving = true;
+    actionError = '';
+    actionSuccess = '';
+    try {
+      await putFactorySettings(JSON.parse(settingsText));
+      actionSuccess = 'Factory settings saved';
+      await refreshOverview();
+    } catch (e: any) {
+      actionError = e.message || 'Invalid settings JSON';
+    }
+    saving = false;
+  }
+
+  async function applyTimer(action: 'enable' | 'disable') {
+    if (!capability?.execution_enabled) return;
+    actionError = '';
+    actionSuccess = '';
+    try {
+      await factoryTimerAction(action);
+      actionSuccess = `Factory timers ${action}d`;
+      await refreshOverview();
+    } catch (e: any) {
+      actionError = e.message || `Timer ${action} failed`;
+    }
+  }
+
+  onMount(async () => {
+    await refreshOverview();
   });
 </script>
 
 <div class="factory-page">
-  <div class="header">
+  <div class="page-header">
     <div>
       <h1>Factory</h1>
-      <p class="subhead">Dormant contract preserved for future reactivation, with read-only artefact access available now.</p>
+      <p class="subtitle">Dormant contract for future factory reactivation. Historical artefacts stay readable even when execution is disabled.</p>
     </div>
-    {#if capability}
-      <span class="mode-pill" class:enabled={capability.execution_enabled}>
-        {capability.mode}
-      </span>
-    {/if}
+    <div class="header-actions">
+      <button class="btn btn-primary" onclick={launchFactory} disabled={!capability?.execution_enabled}>
+        Run Factory
+      </button>
+      <button class="btn btn-secondary" onclick={() => applyTimer('enable')} disabled={!capability?.execution_enabled}>
+        Enable Timers
+      </button>
+      <button class="btn btn-secondary" onclick={() => applyTimer('disable')} disabled={!capability?.execution_enabled}>
+        Disable Timers
+      </button>
+    </div>
   </div>
 
-  {#if error}
-    <div class="alert alert-error">{error}</div>
+  {#if actionError}
+    <div class="alert alert-error">{actionError}</div>
+  {/if}
+  {#if actionSuccess}
+    <div class="alert alert-success">{actionSuccess}</div>
   {/if}
 
   {#if loading}
-    <div class="empty">Loading factory state…</div>
+    <div class="empty">Loading factory capability…</div>
   {:else}
-    <div class="hero-grid">
-      <section class="card">
-        <h2>Capability</h2>
-        {#if capability}
-          <dl class="keyvals">
-            <div><dt>Compiled</dt><dd>{capability.compiled ? 'yes' : 'no'}</dd></div>
-            <div><dt>Policy gate</dt><dd>{capability.policy_enabled ? 'enabled' : 'disabled'}</dd></div>
-            <div><dt>Execution</dt><dd>{capability.execution_enabled ? 'enabled' : 'dormant'}</dd></div>
-            <div><dt>Enable switch</dt><dd class="mono">{capability.enable_env}=1</dd></div>
-          </dl>
-          <p class="reason">{capability.reason}</p>
-        {/if}
-      </section>
-
-      <section class="card">
-        <h2>Timer Contract</h2>
-        {#if timerInfo?.timers?.length}
-          <div class="timer-list">
-            {#each timerInfo.timers as timer}
-              <div class="timer-row">
-                <span class="mono">{timer.timer}</span>
-                <span class="timer-state">{timer.active || timer.load || 'unknown'}</span>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="empty-inline">No factory timers are active in this Hub context.</div>
-        {/if}
-      </section>
-
-      <section class="card">
-        <h2>Settings Contract</h2>
-        <pre class="code-block">{fmtJson(settings)}</pre>
-      </section>
+    <div class="capability-card">
+      <div class="capability-meta">
+        <span class="status-chip" class:enabled={capability?.execution_enabled} class:dormant={!capability?.execution_enabled}>
+          {capability?.mode ?? 'unknown'}
+        </span>
+        <span class="mono">feature: {capability?.compiled ? 'factory' : 'not compiled'}</span>
+        <span class="mono">policy: {capability?.policy_enabled ? 'enabled' : 'disabled'}</span>
+      </div>
+      <p>{capability?.reason}</p>
+      <div class="capability-grid">
+        <div>
+          <label>Enable gate</label>
+          <code>{capability?.enable_env ?? 'AI_QUANT_FACTORY_ENABLE'}</code>
+        </div>
+        <div>
+          <label>Settings path</label>
+          <code>{capability?.settings_path ?? 'config/factory_defaults.yaml'}</code>
+        </div>
+        <div>
+          <label>Service units</label>
+          <code>{(capability?.service_units ?? []).join(', ') || 'none'}</code>
+        </div>
+      </div>
     </div>
 
-    <section class="card action-card">
-      <div>
-        <h2>Execution Surface</h2>
-        <p>Run, cancel, save settings, and timer actions stay fail-closed until a `factory` build is deployed and policy explicitly enables it.</p>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" disabled={!capability || !capability.execution_enabled}>Run Factory</button>
-        <button class="btn" disabled={!capability || !capability.execution_enabled}>Save Settings</button>
-        <button class="btn" disabled={!capability || !capability.execution_enabled}>Enable Timer</button>
-      </div>
-    </section>
-
     <div class="content-grid">
-      <section class="card">
-        <div class="section-head">
-          <h2>Run Archive</h2>
-          <button class="btn" onclick={refresh}>Refresh</button>
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Historical Runs</h2>
+          <span class="count">{runs.length}</span>
         </div>
         {#if runs.length === 0}
-          <div class="empty-inline">No factory artefacts found.</div>
+          <div class="empty">No factory artefacts found under `artifacts/`.</div>
         {:else}
-          <div class="run-list">
-            {#each runs as run}
-              <button class="run-row" onclick={() => openRun(run.date, run.run_id)}>
-                <div>
-                  <div class="run-id mono">{run.run_id}</div>
-                  <div class="run-meta">{run.date} · profile {run.profile || 'unknown'}</div>
+          <div class="runs-list">
+            {#each runs as run (run.date + run.run_id)}
+              <button
+                class="run-card"
+                class:selected={selectedRun?.run_id === run.run_id && selectedRun?.date === run.date}
+                onclick={() => selectRun(run.date, run.run_id)}
+              >
+                <div class="run-id">{run.run_id}</div>
+                <div class="run-meta">
+                  <span>{run.date}</span>
+                  <span>{run.profile ?? 'unknown'}</span>
                 </div>
-                <span class="candidate-count">{run.num_candidates ?? 0} candidates</span>
               </button>
             {/each}
           </div>
         {/if}
       </section>
 
-      <section class="card detail-card">
-        <h2>Selected Run</h2>
-        {#if selecting}
-          <div class="empty-inline">Loading artefacts…</div>
-        {:else if selectedRun}
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Run Detail</h2>
+          {#if loadingRun}<span class="count">Loading…</span>{/if}
+        </div>
+        {#if selectedRun}
           <div class="detail-grid">
             <div>
-              <h3>Metadata</h3>
-              <pre class="code-block">{fmtJson(selectedRun.metadata)}</pre>
+              <label>Run</label>
+              <div class="mono">{selectedRun.date}/{selectedRun.run_id}</div>
             </div>
             <div>
-              <h3>Candidates</h3>
-              {#if selectedCandidates.length === 0}
-                <div class="empty-inline">No candidate files recorded.</div>
-              {:else}
-                <ul class="candidate-list">
-                  {#each selectedCandidates as candidate}
-                    <li class="mono">{candidate.filename}</li>
-                  {/each}
-                </ul>
-              {/if}
+              <label>Subdirectories</label>
+              <div class="mono">{(selectedRun.subdirs ?? []).join(', ') || '—'}</div>
             </div>
           </div>
-          {#if selectedReport}
-            <h3>Report</h3>
-            <pre class="code-block">{fmtJson(selectedReport)}</pre>
-          {/if}
+
+          <div class="stack">
+            <div>
+              <label>Metadata</label>
+              <pre>{JSON.stringify(selectedRun.metadata ?? {}, null, 2)}</pre>
+            </div>
+            <div>
+              <label>Report</label>
+              <pre>{JSON.stringify(selectedReport ?? {}, null, 2)}</pre>
+            </div>
+            <div>
+              <label>Candidates</label>
+              <pre>{JSON.stringify(selectedCandidates ?? [], null, 2)}</pre>
+            </div>
+          </div>
         {:else}
-          <div class="empty-inline">Select a run to inspect stored artefacts.</div>
+          <div class="empty">Select a historical run to inspect its metadata, report, and candidates.</div>
+        {/if}
+      </section>
+    </div>
+
+    <div class="content-grid secondary">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Settings</h2>
+          <button class="btn btn-secondary" onclick={saveSettings} disabled={!capability?.execution_enabled || saving}>
+            {saving ? 'Saving…' : 'Save Defaults'}
+          </button>
+        </div>
+        <textarea bind:value={settingsText} rows="18" disabled={!capability?.execution_enabled}></textarea>
+        {#if !capability?.execution_enabled}
+          <p class="hint">Settings stay visible while the factory contract is dormant. Mutations are blocked until a `factory` build is deployed with `AI_QUANT_FACTORY_ENABLE=1`.</p>
+        {/if}
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Timer State</h2>
+          <span class="count">{timers.length}</span>
+        </div>
+        {#if timers.length === 0}
+          <div class="empty">No factory timers reported.</div>
+        {:else}
+          <div class="timer-list">
+            {#each timers as timer}
+              <div class="timer-card">
+                <div class="timer-name mono">{timer.name}</div>
+                <div class="timer-meta">
+                  <span>active: <strong>{timer.active || 'unknown'}</strong></span>
+                  <span>enabled: <strong>{timer.enabled ? 'yes' : 'no'}</strong></span>
+                  <span>mode: <strong>{timer.mode || capability?.mode || 'unknown'}</strong></span>
+                </div>
+                <div class="timer-next mono">{timer.next_trigger || 'No scheduled trigger recorded'}</div>
+              </div>
+            {/each}
+          </div>
         {/if}
       </section>
     </div>
@@ -194,114 +275,42 @@
 
 <style>
   .factory-page {
-    max-width: 1360px;
+    max-width: 1440px;
     animation: slideUp 0.3s ease;
   }
 
-  .header {
+  .page-header {
     display: flex;
-    align-items: flex-start;
     justify-content: space-between;
-    gap: var(--sp-md);
-    margin-bottom: var(--sp-md);
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 16px;
   }
 
   h1 {
     font-size: 20px;
     font-weight: 700;
-    margin-bottom: 6px;
     letter-spacing: -0.02em;
+    margin-bottom: 4px;
   }
 
   h2 {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
-    margin-bottom: 10px;
   }
 
-  h3 {
-    font-size: 12px;
-    font-weight: 600;
-    margin: 0 0 8px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-
-  .subhead {
-    max-width: 720px;
-    color: var(--text-muted);
+  .subtitle {
     font-size: 13px;
+    color: var(--text-muted);
+    max-width: 760px;
+    line-height: 1.5;
   }
 
-  .mode-pill {
-    border-radius: 999px;
-    padding: 8px 12px;
-    background: var(--amber-bg);
-    color: var(--yellow);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  .mode-pill.enabled {
-    background: var(--green-bg);
-    color: var(--green);
-  }
-
-  .hero-grid,
-  .content-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-
-  .content-grid {
-    grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
-  }
-
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 16px;
-  }
-
-  .action-card {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 12px;
-  }
-
-  .actions {
+  .header-actions {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
-  }
-
-  .btn {
-    padding: 8px 12px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border);
-    background: var(--bg-secondary);
-    color: var(--text);
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  .btn-primary {
-    background: var(--accent-bg);
-    color: var(--accent);
-    border-color: transparent;
-  }
-
-  .btn:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
+    justify-content: flex-end;
   }
 
   .alert {
@@ -317,117 +326,200 @@
     border: 1px solid rgba(255, 107, 107, 0.2);
   }
 
-  .keyvals {
-    display: grid;
-    gap: 8px;
-    margin-bottom: 10px;
+  .alert-success {
+    background: var(--green-bg);
+    color: var(--green);
+    border: 1px solid rgba(81, 207, 102, 0.2);
   }
 
-  .keyvals div {
+  .capability-card,
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+  }
+
+  .capability-card {
+    margin-bottom: 16px;
+  }
+
+  .capability-meta,
+  .panel-header,
+  .timer-meta,
+  .run-meta {
     display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    font-size: 12px;
-  }
-
-  dt {
-    color: var(--text-muted);
-  }
-
-  dd {
-    margin: 0;
-    color: var(--text);
-    font-weight: 500;
-  }
-
-  .reason,
-  .empty-inline,
-  .empty {
-    color: var(--text-muted);
-    font-size: 12px;
-  }
-
-  .section-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .capability-meta {
     margin-bottom: 10px;
   }
 
-  .run-list,
-  .timer-list {
+  .status-chip {
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .status-chip.enabled {
+    background: var(--green-bg);
+    color: var(--green);
+  }
+
+  .status-chip.dormant {
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+
+  .capability-grid,
+  .detail-grid,
+  .content-grid {
+    display: grid;
+    gap: 12px;
+  }
+
+  .capability-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    margin-top: 12px;
+  }
+
+  .content-grid {
+    grid-template-columns: minmax(280px, 360px) 1fr;
+    margin-bottom: 16px;
+  }
+
+  .content-grid.secondary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .runs-list,
+  .timer-list,
+  .stack {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
   }
 
-  .run-row,
-  .timer-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: center;
-    padding: 10px 12px;
-    border-radius: var(--radius-md);
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-subtle);
-  }
-
-  .run-row {
+  .run-card,
+  .timer-card {
     width: 100%;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px;
     text-align: left;
-    color: inherit;
+    transition: border-color var(--t-fast), background var(--t-fast);
+  }
+
+  .run-card.selected {
+    border-color: rgba(58, 134, 255, 0.25);
+    background: var(--accent-bg);
   }
 
   .run-id,
-  .candidate-list,
-  .code-block,
-  .mono {
+  .mono,
+  code {
     font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+  }
+
+  .run-id {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    word-break: break-all;
   }
 
   .run-meta,
-  .candidate-count,
-  .timer-state {
+  .timer-meta,
+  .hint,
+  label {
+    font-size: 12px;
     color: var(--text-muted);
-    font-size: 11px;
   }
 
-  .detail-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
-    gap: 12px;
-    margin-bottom: 12px;
+  label {
+    display: block;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
-  .code-block {
-    white-space: pre-wrap;
-    word-break: break-word;
+  pre,
+  textarea {
+    width: 100%;
     background: var(--bg-secondary);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: 12px;
-    font-size: 11px;
+    color: var(--text);
+    font-size: 12px;
     line-height: 1.5;
-    max-height: 320px;
+    font-family: 'IBM Plex Mono', monospace;
     overflow: auto;
   }
 
-  .candidate-list {
-    display: grid;
-    gap: 6px;
-    padding-left: 18px;
-    font-size: 11px;
+  textarea {
+    resize: vertical;
+    min-height: 280px;
   }
 
-  @media (max-width: 980px) {
-    .hero-grid,
+  .empty {
+    padding: 18px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .count {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  .btn {
+    padding: 8px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    transition: all var(--t-fast);
+  }
+
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+    border-color: transparent;
+  }
+
+  .btn-secondary {
+    background: var(--bg-secondary);
+    color: var(--text);
+  }
+
+  @media (max-width: 960px) {
+    .page-header,
     .content-grid,
-    .detail-grid,
-    .action-card {
+    .content-grid.secondary {
       grid-template-columns: 1fr;
-      display: grid;
+    }
+
+    .header-actions {
+      width: 100%;
+      justify-content: flex-start;
     }
   }
 </style>
