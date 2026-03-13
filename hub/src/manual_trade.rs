@@ -9,6 +9,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha3::Digest;
 use std::path::Path;
+use std::process;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SLIPPAGE_PCT: f64 = 0.01;
@@ -18,6 +19,8 @@ const MIN_NOTIONAL_USD: f64 = 10.0;
 const FILL_POLL_TIMEOUT: Duration = Duration::from_secs(8);
 const FILL_POLL_INTERVAL: Duration = Duration::from_millis(800);
 const MANUAL_CLOID_PREFIX: &[u8] = b"man_";
+const MANUAL_RUNTIME_STREAM: &str = "manual_trade";
+const MANUAL_RUNTIME_MODE: &str = "live";
 
 #[derive(Debug, Clone)]
 pub struct ManualTradeOpenRequest {
@@ -82,6 +85,44 @@ struct PreparedClose {
     limit_price: Option<f64>,
 }
 
+struct ManualIntentRecord<'a> {
+    intent_id: &'a str,
+    created_ts_ms: i64,
+    symbol: &'a str,
+    action: &'a str,
+    side: &'a str,
+    requested_size: f64,
+    requested_notional: f64,
+    leverage: Option<f64>,
+    status: &'a str,
+    client_order_id: &'a str,
+    reason: &'a str,
+    confidence: &'a str,
+    meta_json: String,
+}
+
+struct ManualOrderSubmission<'a> {
+    intent_id: &'a str,
+    sent_ts_ms: i64,
+    symbol: &'a str,
+    side: &'a str,
+    order_type: &'a str,
+    requested_size: f64,
+    reduce_only: bool,
+    client_order_id: &'a str,
+    exchange_order_id: Option<&'a str>,
+    status: &'a str,
+    last_error: &'a str,
+    raw_json: String,
+}
+
+struct FillWriteSummary {
+    observed_fills: usize,
+    parsed_trade_rows: usize,
+    parse_failures: usize,
+    filled_size: f64,
+}
+
 pub fn preview_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, false)?;
     let client = build_client(cfg)?;
@@ -113,29 +154,202 @@ pub fn execute_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result
     let intent_id = format!("manual_{}", uuid::Uuid::new_v4().simple());
     let cloid = manual_cloid_from_intent_id(&intent_id);
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
+    let created_ts_ms = chrono::Utc::now().timestamp_millis();
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
 
-    let response = submit_open_order(&client, &prepared, &cloid)?;
+    insert_manual_intent(
+        &conn,
+        ManualIntentRecord {
+            intent_id: &intent_id,
+            created_ts_ms,
+            symbol: &prepared.symbol,
+            action: "OPEN",
+            side: &prepared.side,
+            requested_size: prepared.est_size,
+            requested_notional: prepared.est_notional_usd,
+            leverage: Some(f64::from(prepared.leverage)),
+            status: "NEW",
+            client_order_id: &cloid,
+            reason: "manual_trade",
+            confidence: "MANUAL",
+            meta_json: json!({
+                "source": "manual_trade",
+                "request": {
+                    "order_type": request.order_type,
+                    "side": request.side,
+                    "notional_usd": request.notional_usd,
+                    "leverage": request.leverage,
+                    "limit_price": request.limit_price,
+                },
+                "prepared": {
+                    "est_size": prepared.est_size,
+                    "est_notional_usd": prepared.est_notional_usd,
+                    "mid_price": prepared.mid_price,
+                    "direction": prepared.direction,
+                }
+            })
+            .to_string(),
+        },
+    )?;
+    write_manual_runtime_log(
+        &conn,
+        "INFO",
+        &format!(
+            "manual_trade intent_created intent_id={} symbol={} action=OPEN side={} order_type={} requested_size={} requested_notional={}",
+            intent_id,
+            prepared.symbol,
+            prepared.side,
+            request.order_type,
+            prepared.est_size,
+            prepared.est_notional_usd
+        ),
+    )?;
+
+    let response = match submit_open_order(&client, &prepared, &cloid) {
+        Ok(response) => response,
+        Err(error) => {
+            let error_text = error.to_string();
+            update_manual_intent_status(
+                &conn,
+                &intent_id,
+                failure_status_for_error(&error_text),
+                &error_text,
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "ERROR",
+                &format!(
+                    "manual_trade submit_failed intent_id={} symbol={} action=OPEN error={}",
+                    intent_id, prepared.symbol, error_text
+                ),
+            )?;
+            return Err(error);
+        }
+    };
     let exchange_order_id = extract_exchange_order_id(&response);
+    record_manual_order_submission(
+        &conn,
+        ManualOrderSubmission {
+            intent_id: &intent_id,
+            sent_ts_ms: chrono::Utc::now().timestamp_millis(),
+            symbol: &prepared.symbol,
+            side: &prepared.side,
+            order_type: submission_order_type(prepared.order_type, false),
+            requested_size: prepared.est_size,
+            reduce_only: false,
+            client_order_id: &cloid,
+            exchange_order_id: exchange_order_id.as_deref(),
+            status: "SENT",
+            last_error: "",
+            raw_json: response.to_string(),
+        },
+    )?;
+    write_manual_runtime_log(
+        &conn,
+        "INFO",
+        &format!(
+            "manual_trade submitted intent_id={} symbol={} action=OPEN exchange_order_id={}",
+            intent_id,
+            prepared.symbol,
+            exchange_order_id.as_deref().unwrap_or("unknown")
+        ),
+    )?;
     let fills = if prepared.order_type == ParsedOrderType::LimitGtc {
         Vec::new()
     } else {
-        poll_fill(
+        match poll_fill(
             &client,
             &prepared.symbol,
             start_ms,
             &cloid,
             exchange_order_id.as_deref(),
-        )?
+        ) {
+            Ok(fills) => fills,
+            Err(error) => {
+                let error_text = format!("submitted_but_fill_poll_failed: {error}");
+                update_manual_intent_status(&conn, &intent_id, "UNKNOWN", &error_text)?;
+                write_manual_runtime_log(
+                    &conn,
+                    "ERROR",
+                    &format!(
+                        "manual_trade fill_poll_failed intent_id={} symbol={} action=OPEN error={}",
+                        intent_id, prepared.symbol, error_text
+                    ),
+                )?;
+                return Err(error);
+            }
+        }
     };
 
-    for fill in &fills {
-        record_fill_trade(
-            &cfg.live_db,
-            fill,
-            &intent_id,
-            &cloid,
-            prepared.account_value_usd,
-            f64::from(prepared.leverage),
+    let fill_summary = record_manual_fill_batch(
+        &mut conn,
+        &fills,
+        &prepared.symbol,
+        &intent_id,
+        &cloid,
+        prepared.account_value_usd,
+        f64::from(prepared.leverage),
+    )?;
+    if fills.is_empty() {
+        if prepared.order_type == ParsedOrderType::LimitGtc {
+            write_manual_runtime_log(
+                &conn,
+                "INFO",
+                &format!(
+                    "manual_trade resting intent_id={} symbol={} action=OPEN exchange_order_id={}",
+                    intent_id,
+                    prepared.symbol,
+                    exchange_order_id.as_deref().unwrap_or("unknown")
+                ),
+            )?;
+        } else {
+            update_manual_intent_status(
+                &conn,
+                &intent_id,
+                "UNKNOWN",
+                "submitted_but_no_fills_observed_during_poll",
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "WARN",
+                &format!(
+                    "manual_trade no_fills_observed intent_id={} symbol={} action=OPEN exchange_order_id={}",
+                    intent_id,
+                    prepared.symbol,
+                    exchange_order_id.as_deref().unwrap_or("unknown")
+                ),
+            )?;
+        }
+    } else {
+        let status = if fill_summary.parse_failures > 0 {
+            "UNKNOWN"
+        } else if fill_summary.filled_size + 1e-9 >= prepared.est_size {
+            "FILLED"
+        } else {
+            "PARTIAL"
+        };
+        let last_error = if fill_summary.parse_failures > 0 {
+            "one_or_more_fills_failed_to_parse_into_trades"
+        } else {
+            ""
+        };
+        update_manual_intent_status(&conn, &intent_id, status, last_error)?;
+        write_manual_runtime_log(
+            &conn,
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            &format!(
+                "manual_trade fills_recorded intent_id={} symbol={} action=OPEN observed_fills={} parsed_trade_rows={} filled_size={} status={}",
+                intent_id,
+                prepared.symbol,
+                fill_summary.observed_fills,
+                fill_summary.parsed_trade_rows,
+                fill_summary.filled_size,
+                status
+            ),
         )?;
     }
 
@@ -182,29 +396,211 @@ pub fn execute_close(
     let intent_id = format!("manual_{}", uuid::Uuid::new_v4().simple());
     let cloid = manual_cloid_from_intent_id(&intent_id);
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
+    let created_ts_ms = chrono::Utc::now().timestamp_millis();
+    let side = if prepared.is_buy { "BUY" } else { "SELL" };
+    let close_action = if prepared.close_size + 1e-9 >= prepared.current_size {
+        "CLOSE"
+    } else {
+        "REDUCE"
+    };
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
 
-    let response = submit_close_order(&client, &prepared, &cloid)?;
+    insert_manual_intent(
+        &conn,
+        ManualIntentRecord {
+            intent_id: &intent_id,
+            created_ts_ms,
+            symbol: &prepared.symbol,
+            action: close_action,
+            side,
+            requested_size: prepared.close_size,
+            requested_notional: prepared.close_size * prepared.mid_price,
+            leverage: Some(prepared.leverage),
+            status: "NEW",
+            client_order_id: &cloid,
+            reason: "manual_trade",
+            confidence: "MANUAL",
+            meta_json: json!({
+                "source": "manual_trade",
+                "request": {
+                    "order_type": request.order_type,
+                    "close_pct": request.close_pct,
+                    "limit_price": request.limit_price,
+                },
+                "prepared": {
+                    "close_size": prepared.close_size,
+                    "current_size": prepared.current_size,
+                    "mid_price": prepared.mid_price,
+                    "pos_type": prepared.pos_type,
+                }
+            })
+            .to_string(),
+        },
+    )?;
+    write_manual_runtime_log(
+        &conn,
+        "INFO",
+        &format!(
+            "manual_trade intent_created intent_id={} symbol={} action={} side={} order_type={} requested_size={} current_size={}",
+            intent_id,
+            prepared.symbol,
+            close_action,
+            side,
+            request.order_type,
+            prepared.close_size,
+            prepared.current_size
+        ),
+    )?;
+
+    let response = match submit_close_order(&client, &prepared, &cloid) {
+        Ok(response) => response,
+        Err(error) => {
+            let error_text = error.to_string();
+            update_manual_intent_status(
+                &conn,
+                &intent_id,
+                failure_status_for_error(&error_text),
+                &error_text,
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "ERROR",
+                &format!(
+                    "manual_trade submit_failed intent_id={} symbol={} action={} error={}",
+                    intent_id, prepared.symbol, close_action, error_text
+                ),
+            )?;
+            return Err(error);
+        }
+    };
     let exchange_order_id = extract_exchange_order_id(&response);
+    record_manual_order_submission(
+        &conn,
+        ManualOrderSubmission {
+            intent_id: &intent_id,
+            sent_ts_ms: chrono::Utc::now().timestamp_millis(),
+            symbol: &prepared.symbol,
+            side,
+            order_type: submission_order_type(prepared.order_type, true),
+            requested_size: prepared.close_size,
+            reduce_only: true,
+            client_order_id: &cloid,
+            exchange_order_id: exchange_order_id.as_deref(),
+            status: "SENT",
+            last_error: "",
+            raw_json: response.to_string(),
+        },
+    )?;
+    write_manual_runtime_log(
+        &conn,
+        "INFO",
+        &format!(
+            "manual_trade submitted intent_id={} symbol={} action={} exchange_order_id={}",
+            intent_id,
+            prepared.symbol,
+            close_action,
+            exchange_order_id.as_deref().unwrap_or("unknown")
+        ),
+    )?;
     let fills = if prepared.order_type == ParsedOrderType::LimitGtc {
         Vec::new()
     } else {
-        poll_fill(
+        match poll_fill(
             &client,
             &prepared.symbol,
             start_ms,
             &cloid,
             exchange_order_id.as_deref(),
-        )?
+        ) {
+            Ok(fills) => fills,
+            Err(error) => {
+                let error_text = format!("submitted_but_fill_poll_failed: {error}");
+                update_manual_intent_status(&conn, &intent_id, "UNKNOWN", &error_text)?;
+                write_manual_runtime_log(
+                    &conn,
+                    "ERROR",
+                    &format!(
+                        "manual_trade fill_poll_failed intent_id={} symbol={} action={} error={}",
+                        intent_id, prepared.symbol, close_action, error_text
+                    ),
+                )?;
+                return Err(error);
+            }
+        }
     };
 
-    for fill in &fills {
-        record_fill_trade(
-            &cfg.live_db,
-            fill,
-            &intent_id,
-            &cloid,
-            prepared.account_value_usd,
-            prepared.leverage.max(1.0),
+    let fill_summary = record_manual_fill_batch(
+        &mut conn,
+        &fills,
+        &prepared.symbol,
+        &intent_id,
+        &cloid,
+        prepared.account_value_usd,
+        prepared.leverage.max(1.0),
+    )?;
+    if fills.is_empty() {
+        if prepared.order_type == ParsedOrderType::LimitGtc {
+            write_manual_runtime_log(
+                &conn,
+                "INFO",
+                &format!(
+                    "manual_trade resting intent_id={} symbol={} action={} exchange_order_id={}",
+                    intent_id,
+                    prepared.symbol,
+                    close_action,
+                    exchange_order_id.as_deref().unwrap_or("unknown")
+                ),
+            )?;
+        } else {
+            update_manual_intent_status(
+                &conn,
+                &intent_id,
+                "UNKNOWN",
+                "submitted_but_no_fills_observed_during_poll",
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "WARN",
+                &format!(
+                    "manual_trade no_fills_observed intent_id={} symbol={} action={} exchange_order_id={}",
+                    intent_id,
+                    prepared.symbol,
+                    close_action,
+                    exchange_order_id.as_deref().unwrap_or("unknown")
+                ),
+            )?;
+        }
+    } else {
+        let status = if fill_summary.parse_failures > 0 {
+            "UNKNOWN"
+        } else if fill_summary.filled_size + 1e-9 >= prepared.close_size {
+            "FILLED"
+        } else {
+            "PARTIAL"
+        };
+        let last_error = if fill_summary.parse_failures > 0 {
+            "one_or_more_fills_failed_to_parse_into_trades"
+        } else {
+            ""
+        };
+        update_manual_intent_status(&conn, &intent_id, status, last_error)?;
+        write_manual_runtime_log(
+            &conn,
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            &format!(
+                "manual_trade fills_recorded intent_id={} symbol={} action={} observed_fills={} parsed_trade_rows={} filled_size={} status={}",
+                intent_id,
+                prepared.symbol,
+                close_action,
+                fill_summary.observed_fills,
+                fill_summary.parsed_trade_rows,
+                fill_summary.filled_size,
+                status
+            ),
         )?;
     }
 
@@ -355,6 +751,390 @@ fn enforce_manual_trade_ready(cfg: &HubConfig, is_write: bool) -> Result<(), Hub
             ));
         }
     }
+    Ok(())
+}
+
+fn open_manual_trade_db(path: &Path) -> Result<Connection, HubError> {
+    let mut conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    ensure_manual_trade_tables(&mut conn)?;
+    Ok(conn)
+}
+
+fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS oms_intents (
+            intent_id TEXT PRIMARY KEY,
+            created_ts_ms INTEGER NOT NULL,
+            sent_ts_ms INTEGER,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            side TEXT NOT NULL,
+            requested_size REAL,
+            requested_notional REAL,
+            entry_atr REAL,
+            leverage REAL,
+            decision_ts_ms INTEGER,
+            strategy_version TEXT,
+            strategy_sha1 TEXT,
+            reason TEXT,
+            confidence TEXT,
+            status TEXT,
+            dedupe_key TEXT,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
+            last_error TEXT,
+            meta_json TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_oms_intents_dedupe ON oms_intents(dedupe_key);
+        CREATE INDEX IF NOT EXISTS idx_oms_intents_symbol_status ON oms_intents(symbol, status, sent_ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_oms_intents_client_order_id ON oms_intents(client_order_id);
+
+        CREATE TABLE IF NOT EXISTS oms_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            intent_id TEXT,
+            created_ts_ms INTEGER NOT NULL,
+            symbol TEXT,
+            side TEXT,
+            order_type TEXT,
+            requested_size REAL,
+            reduce_only INTEGER,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
+            status TEXT,
+            raw_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oms_orders_intent ON oms_orders(intent_id);
+        CREATE INDEX IF NOT EXISTS idx_oms_orders_symbol ON oms_orders(symbol, created_ts_ms);
+
+        CREATE TABLE IF NOT EXISTS oms_fills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER,
+            symbol TEXT,
+            intent_id TEXT,
+            order_id INTEGER,
+            action TEXT,
+            side TEXT,
+            pos_type TEXT,
+            price REAL,
+            size REAL,
+            notional REAL,
+            fee_usd REAL,
+            fee_token TEXT,
+            fee_rate REAL,
+            pnl_usd REAL,
+            fill_hash TEXT,
+            fill_tid INTEGER,
+            matched_via TEXT,
+            raw_json TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_oms_fills_hash_tid ON oms_fills(fill_hash, fill_tid);
+        CREATE INDEX IF NOT EXISTS idx_oms_fills_intent ON oms_fills(intent_id);
+        CREATE INDEX IF NOT EXISTS idx_oms_fills_symbol_ts ON oms_fills(symbol, ts_ms);
+
+        CREATE TABLE IF NOT EXISTS runtime_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            ts TEXT NOT NULL,
+            pid INTEGER,
+            mode TEXT,
+            stream TEXT,
+            level TEXT,
+            message TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_logs_ts_ms ON runtime_logs(ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_runtime_logs_mode_ts_ms ON runtime_logs(mode, ts_ms);
+        ",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_manual_intent(conn: &Connection, record: ManualIntentRecord<'_>) -> Result<(), HubError> {
+    let changed = conn.execute(
+        "INSERT OR IGNORE INTO oms_intents (
+            intent_id, created_ts_ms, symbol, action, side, requested_size,
+            requested_notional, leverage, reason, confidence, status,
+            client_order_id, meta_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            record.intent_id,
+            record.created_ts_ms,
+            record.symbol,
+            record.action,
+            record.side,
+            record.requested_size,
+            record.requested_notional,
+            record.leverage,
+            record.reason,
+            record.confidence,
+            record.status,
+            record.client_order_id,
+            record.meta_json,
+        ],
+    )?;
+    if changed == 0 {
+        return Err(HubError::Internal(format!(
+            "failed to insert manual OMS intent {}",
+            record.intent_id
+        )));
+    }
+    Ok(())
+}
+
+fn update_manual_intent_status(
+    conn: &Connection,
+    intent_id: &str,
+    status: &str,
+    last_error: &str,
+) -> Result<(), HubError> {
+    let changed = conn.execute(
+        "UPDATE oms_intents SET status = ?1, last_error = ?2 WHERE intent_id = ?3",
+        params![status, last_error, intent_id],
+    )?;
+    if changed == 0 {
+        return Err(HubError::Internal(format!(
+            "failed to update manual OMS intent status for {intent_id}"
+        )));
+    }
+    Ok(())
+}
+
+fn record_manual_order_submission(
+    conn: &Connection,
+    submission: ManualOrderSubmission<'_>,
+) -> Result<(), HubError> {
+    let changed = conn.execute(
+        "UPDATE oms_intents
+         SET status = ?1, sent_ts_ms = ?2, exchange_order_id = ?3, last_error = ?4
+         WHERE intent_id = ?5",
+        params![
+            submission.status,
+            submission.sent_ts_ms,
+            submission.exchange_order_id,
+            submission.last_error,
+            submission.intent_id,
+        ],
+    )?;
+    if changed == 0 {
+        return Err(HubError::Internal(format!(
+            "failed to record manual order submission for {}",
+            submission.intent_id
+        )));
+    }
+
+    conn.execute(
+        "INSERT INTO oms_orders (
+            intent_id, created_ts_ms, symbol, side, order_type, requested_size,
+            reduce_only, client_order_id, exchange_order_id, status, raw_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            submission.intent_id,
+            submission.sent_ts_ms,
+            submission.symbol,
+            submission.side,
+            submission.order_type,
+            submission.requested_size,
+            if submission.reduce_only { 1 } else { 0 },
+            submission.client_order_id,
+            submission.exchange_order_id,
+            submission.status,
+            submission.raw_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn write_manual_runtime_log(conn: &Connection, level: &str, message: &str) -> Result<(), HubError> {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let ts = chrono::DateTime::from_timestamp_millis(ts_ms)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    conn.execute(
+        "INSERT INTO runtime_logs (ts_ms, ts, pid, mode, stream, level, message)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            ts_ms,
+            ts,
+            i64::from(process::id()),
+            MANUAL_RUNTIME_MODE,
+            MANUAL_RUNTIME_STREAM,
+            level.trim().to_ascii_uppercase(),
+            message,
+        ],
+    )?;
+    Ok(())
+}
+
+fn submission_order_type(order_type: ParsedOrderType, reduce_only: bool) -> &'static str {
+    match (order_type, reduce_only) {
+        (ParsedOrderType::Market, false) => "market_open",
+        (ParsedOrderType::Market, true) => "market_close",
+        (ParsedOrderType::LimitIoc, _) => "limit_ioc",
+        (ParsedOrderType::LimitGtc, _) => "limit_gtc",
+    }
+}
+
+fn failure_status_for_error(error_text: &str) -> &'static str {
+    let lower = error_text.trim().to_ascii_lowercase();
+    if lower.contains("timed out")
+        || lower.contains("request failed")
+        || lower.contains("connection")
+        || lower.contains("dns")
+        || lower.contains("transport")
+    {
+        "UNKNOWN"
+    } else {
+        "REJECTED"
+    }
+}
+
+fn record_manual_fill_batch(
+    conn: &mut Connection,
+    fills: &[HyperliquidFill],
+    symbol_hint: &str,
+    intent_id: &str,
+    cloid: &str,
+    account_value_usd: f64,
+    leverage: f64,
+) -> Result<FillWriteSummary, HubError> {
+    let tx = conn.transaction()?;
+    let mut summary = FillWriteSummary {
+        observed_fills: fills.len(),
+        parsed_trade_rows: 0,
+        parse_failures: 0,
+        filled_size: 0.0,
+    };
+    for fill in fills {
+        let parsed = parse_fill(&fill.raw);
+        insert_manual_oms_fill(&tx, fill, parsed.as_ref(), symbol_hint, intent_id)?;
+        if let Some(parsed) = parsed.as_ref() {
+            insert_manual_trade_row(
+                &tx,
+                parsed,
+                &fill.raw,
+                intent_id,
+                cloid,
+                account_value_usd,
+                leverage,
+            )?;
+            summary.parsed_trade_rows += 1;
+            summary.filled_size += parsed.size;
+        } else {
+            summary.parse_failures += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(summary)
+}
+
+fn insert_manual_oms_fill(
+    conn: &Connection,
+    fill: &HyperliquidFill,
+    parsed: Option<&ParsedFill>,
+    symbol_hint: &str,
+    intent_id: &str,
+) -> Result<(), HubError> {
+    let fill_ts_ms = fill_timestamp_ms(&fill.raw);
+    let fill_hash = fill.raw.get("hash").and_then(|value| value.as_str());
+    let fill_tid = fill.raw.get("tid").and_then(|value| value.as_i64());
+    conn.execute(
+        "INSERT OR IGNORE INTO oms_fills (
+            ts_ms, symbol, intent_id, order_id, action, side, pos_type, price, size, notional,
+            fee_usd, fee_token, fee_rate, pnl_usd, fill_hash, fill_tid, matched_via, raw_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            fill_ts_ms,
+            parsed
+                .as_ref()
+                .map(|item| item.symbol.as_str())
+                .unwrap_or(symbol_hint),
+            intent_id,
+            fill.raw.get("oid").and_then(parse_json_integer),
+            parsed.as_ref().map(|item| item.action.as_str()),
+            parsed.as_ref().map(|item| item.side.as_str()),
+            parsed.as_ref().map(|item| item.pos_type.as_str()),
+            parsed.as_ref().map(|item| item.price),
+            parsed.as_ref().map(|item| item.size),
+            parsed.as_ref().map(|item| item.notional_usd),
+            parsed.as_ref().map(|item| item.fee_usd),
+            parsed
+                .as_ref()
+                .and_then(|item| item.fee_token.as_deref())
+                .or_else(|| fill.raw.get("feeToken").and_then(|value| value.as_str())),
+            parsed.as_ref().map(|item| item.fee_rate),
+            parsed.as_ref().map(|item| item.pnl_usd),
+            fill_hash,
+            fill_tid,
+            "manual_trade",
+            fill.raw.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_manual_trade_row(
+    conn: &Connection,
+    parsed: &ParsedFill,
+    raw_fill: &Value,
+    intent_id: &str,
+    cloid: &str,
+    account_value_usd: f64,
+    leverage: f64,
+) -> Result<(), HubError> {
+    let meta_json = json!({
+        "source": "manual_trade",
+        "intent_id": intent_id,
+        "cloid": cloid,
+        "fill": raw_fill,
+        "oms": {
+            "intent_id": intent_id,
+            "client_order_id": cloid,
+            "exchange_order_id": parsed.exchange_order_id,
+            "matched_via": "manual_trade",
+        }
+    })
+    .to_string();
+
+    let fill_hash = parsed.fill_hash.as_deref();
+    let fill_tid = parsed.fill_tid;
+    conn.execute(
+        "INSERT OR IGNORE INTO trades (
+            timestamp, symbol, type, action, price, size, notional,
+            reason, reason_code, confidence, pnl, fee_usd, fee_token, fee_rate,
+            balance, entry_atr, leverage, margin_used, meta_json, fill_hash, fill_tid
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        params![
+            parsed.timestamp,
+            parsed.symbol,
+            parsed.pos_type,
+            parsed.action,
+            parsed.price,
+            parsed.size,
+            parsed.notional_usd,
+            parsed.reason,
+            "manual_trade",
+            "MANUAL",
+            parsed.pnl_usd,
+            parsed.fee_usd,
+            parsed.fee_token,
+            parsed.fee_rate,
+            account_value_usd,
+            Option::<f64>::None,
+            leverage,
+            if leverage > 0.0 {
+                Some(parsed.notional_usd / leverage)
+            } else {
+                None
+            },
+            meta_json,
+            fill_hash,
+            fill_tid,
+        ],
+    )?;
     Ok(())
 }
 
@@ -710,75 +1490,12 @@ fn poll_fill(
     Ok(collected)
 }
 
-fn record_fill_trade(
-    live_db: &Path,
-    fill: &HyperliquidFill,
-    intent_id: &str,
-    cloid: &str,
-    account_value_usd: f64,
-    leverage: f64,
-) -> Result<(), HubError> {
-    let parsed = parse_fill(&fill.raw)
-        .ok_or_else(|| HubError::Internal("failed to parse exchange fill".into()))?;
-    let meta_json = json!({
-        "source": "manual_trade",
-        "intent_id": intent_id,
-        "cloid": cloid,
-        "fill": fill.raw,
-        "oms": {
-            "intent_id": intent_id,
-            "client_order_id": cloid,
-            "exchange_order_id": parsed.exchange_order_id,
-            "matched_via": "manual_trade",
-        }
-    })
-    .to_string();
-
-    let conn = Connection::open(live_db)?;
-    let fill_hash = parsed.fill_hash.as_deref();
-    let fill_tid = parsed.fill_tid;
-    conn.execute(
-        "INSERT OR IGNORE INTO trades (
-            timestamp, symbol, type, action, price, size, notional,
-            reason, reason_code, confidence, pnl, fee_usd, fee_token, fee_rate,
-            balance, entry_atr, leverage, margin_used, meta_json, fill_hash, fill_tid
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
-        params![
-            parsed.timestamp,
-            parsed.symbol,
-            parsed.pos_type,
-            parsed.action,
-            parsed.price,
-            parsed.size,
-            parsed.notional_usd,
-            parsed.reason,
-            "manual_trade",
-            "MANUAL",
-            parsed.pnl_usd,
-            parsed.fee_usd,
-            parsed.fee_token,
-            parsed.fee_rate,
-            account_value_usd,
-            Option::<f64>::None,
-            leverage,
-            if leverage > 0.0 {
-                Some(parsed.notional_usd / leverage)
-            } else {
-                None
-            },
-            meta_json,
-            fill_hash,
-            fill_tid,
-        ],
-    )?;
-    Ok(())
-}
-
 struct ParsedFill {
     timestamp: String,
     symbol: String,
     pos_type: String,
     action: String,
+    side: String,
     price: f64,
     size: f64,
     notional_usd: f64,
@@ -824,6 +1541,29 @@ fn parse_fill(raw: &Value) -> Option<ParsedFill> {
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0);
     let (action, pos_type) = classify_fill_direction(&dir, start_position, size)?;
+    let side = raw
+        .get("side")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            if value.eq_ignore_ascii_case("B") {
+                "BUY".to_string()
+            } else {
+                "SELL".to_string()
+            }
+        })
+        .unwrap_or_else(|| {
+            if pos_type == "LONG" {
+                if action == "OPEN" || action == "ADD" {
+                    "BUY".to_string()
+                } else {
+                    "SELL".to_string()
+                }
+            } else if action == "OPEN" || action == "ADD" {
+                "SELL".to_string()
+            } else {
+                "BUY".to_string()
+            }
+        });
     let fee_usd = raw.get("fee").and_then(parse_json_number).unwrap_or(0.0);
     let notional_usd = price * size;
     Some(ParsedFill {
@@ -831,6 +1571,7 @@ fn parse_fill(raw: &Value) -> Option<ParsedFill> {
         symbol,
         pos_type: pos_type.to_string(),
         action: action.to_string(),
+        side,
         price,
         size,
         notional_usd,
@@ -915,6 +1656,20 @@ fn parse_json_number(value: &Value) -> Option<f64> {
     value.as_str()?.parse::<f64>().ok()
 }
 
+fn parse_json_integer(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+    value.as_str()?.trim().parse::<i64>().ok()
+}
+
+fn fill_timestamp_ms(raw: &Value) -> i64 {
+    raw.get("time")
+        .or_else(|| raw.get("timestamp"))
+        .and_then(parse_json_integer)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+}
+
 fn round_size_down(value: f64, decimals: u32) -> f64 {
     let factor = 10f64.powi(decimals as i32);
     (value * factor).floor() / factor
@@ -951,4 +1706,211 @@ fn manual_cloid_from_intent_id(intent_id: &str) -> String {
     let mut bytes = MANUAL_CLOID_PREFIX.to_vec();
     bytes.extend_from_slice(&digest[..(16 - MANUAL_CLOID_PREFIX.len())]);
     format!("0x{}", hex::encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn create_trades_table(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                type TEXT,
+                action TEXT,
+                price REAL,
+                size REAL,
+                notional REAL,
+                reason TEXT,
+                confidence TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                fee_token TEXT,
+                fee_rate REAL,
+                balance REAL,
+                entry_atr REAL,
+                leverage REAL,
+                margin_used REAL,
+                meta_json TEXT,
+                fill_hash TEXT,
+                fill_tid INTEGER,
+                run_fingerprint TEXT,
+                reason_code TEXT
+            );
+            CREATE UNIQUE INDEX idx_trades_fill_hash_tid ON trades(fill_hash, fill_tid);
+            ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn manual_db_hardening_persists_intent_submission_fill_and_log() {
+        let db = NamedTempFile::new().unwrap();
+        let bootstrap = Connection::open(db.path()).unwrap();
+        create_trades_table(&bootstrap);
+        drop(bootstrap);
+
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
+        let intent_id = "manual_test_intent";
+        let cloid = manual_cloid_from_intent_id(intent_id);
+
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: 1_773_417_718_266,
+                symbol: "HYPE",
+                action: "REDUCE",
+                side: "BUY",
+                requested_size: 2.82,
+                requested_notional: 102.39138,
+                leverage: Some(4.0),
+                status: "NEW",
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        record_manual_order_submission(
+            &conn,
+            ManualOrderSubmission {
+                intent_id,
+                sent_ts_ms: 1_773_417_718_266,
+                symbol: "HYPE",
+                side: "BUY",
+                order_type: "market_close",
+                requested_size: 2.82,
+                reduce_only: true,
+                client_order_id: &cloid,
+                exchange_order_id: Some("347951877775"),
+                status: "SENT",
+                last_error: "",
+                raw_json: json!({"status":"ok"}).to_string(),
+            },
+        )
+        .unwrap();
+        let fills = vec![HyperliquidFill {
+            raw: json!({
+                "coin": "HYPE",
+                "px": "36.309",
+                "sz": "2.82",
+                "side": "B",
+                "time": 1773417718266_i64,
+                "startPosition": "-8.31",
+                "dir": "Close Short",
+                "closedPnl": "-1.606554",
+                "hash": "0xdef7b1fb28bbd467e0710436fd3db102036600e0c3bef33982c05d4de7bfae52",
+                "oid": 347951877775_i64,
+                "crossed": true,
+                "fee": "0.044233",
+                "tid": 1104752028053608_i64,
+                "feeToken": "USDC"
+            }),
+        }];
+        let summary =
+            record_manual_fill_batch(&mut conn, &fills, "HYPE", intent_id, &cloid, 223.84, 4.0)
+                .unwrap();
+        assert_eq!(summary.observed_fills, 1);
+        assert_eq!(summary.parsed_trade_rows, 1);
+        assert_eq!(summary.parse_failures, 0);
+        update_manual_intent_status(&conn, intent_id, "FILLED", "").unwrap();
+        write_manual_runtime_log(&conn, "INFO", "manual_trade fills_recorded").unwrap();
+
+        let intent_status: String = conn
+            .query_row(
+                "SELECT status FROM oms_intents WHERE intent_id = ?1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let oms_fills_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oms_fills", [], |row| row.get(0))
+            .unwrap();
+        let trades_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trades", [], |row| row.get(0))
+            .unwrap();
+        let orders_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oms_orders", [], |row| row.get(0))
+            .unwrap();
+        let runtime_logs_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_logs", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(intent_status, "FILLED");
+        assert_eq!(orders_count, 1);
+        assert_eq!(oms_fills_count, 1);
+        assert_eq!(trades_count, 1);
+        assert_eq!(runtime_logs_count, 1);
+    }
+
+    #[test]
+    fn manual_db_hardening_keeps_raw_oms_fill_when_trade_parse_fails() {
+        let db = NamedTempFile::new().unwrap();
+        let bootstrap = Connection::open(db.path()).unwrap();
+        create_trades_table(&bootstrap);
+        drop(bootstrap);
+
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
+        let intent_id = "manual_test_parse_fail";
+        let cloid = manual_cloid_from_intent_id(intent_id);
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: 1_773_439_518_520,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(4.0),
+                status: "NEW",
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        let fills = vec![HyperliquidFill {
+            raw: json!({
+                "coin": "ETH",
+                "px": "2088.6",
+                "sz": "0.0515",
+                "side": "A",
+                "time": 1773439518520_i64,
+                "hash": "0x174eaf57fd1197c218c80437013d980206d9003d9814b694bb175aaabc1571ac",
+                "oid": 348262211344_i64,
+                "fee": "0.046467",
+                "tid": 186240033668508_i64,
+                "feeToken": "USDC"
+            }),
+        }];
+        let summary =
+            record_manual_fill_batch(&mut conn, &fills, "ETH", intent_id, &cloid, 214.97, 4.0)
+                .unwrap();
+        assert_eq!(summary.parsed_trade_rows, 0);
+        assert_eq!(summary.parse_failures, 1);
+        write_manual_runtime_log(&conn, "WARN", "manual_trade fill_parse_failed").unwrap();
+
+        let oms_fills_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oms_fills", [], |row| row.get(0))
+            .unwrap();
+        let trades_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trades", [], |row| row.get(0))
+            .unwrap();
+        let runtime_logs_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_logs", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(oms_fills_count, 1);
+        assert_eq!(trades_count, 0);
+        assert_eq!(runtime_logs_count, 1);
+    }
 }
