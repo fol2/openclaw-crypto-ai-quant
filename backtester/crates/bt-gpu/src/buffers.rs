@@ -1261,47 +1261,49 @@ mod tests {
     #[test]
     fn test_gpu_combo_config_uses_resolved_execution_contract() {
         let profile = "gpu_modular";
-        let mut cfg = StrategyConfig::default();
-        cfg.runtime = RuntimeConfig {
-            profile: profile.to_string(),
-            ..RuntimeConfig::default()
-        };
-        cfg.pipeline = PipelineConfig {
-            default_profile: "production".to_string(),
-            profiles: BTreeMap::from([(
-                profile.to_string(),
-                PipelineProfileConfig {
-                    behaviours: BehaviourProfileConfig {
-                        entry_sizing: BehaviourGroupConfig {
-                            disabled: vec![
-                                "entry.sizing.dynamic".to_string(),
-                                "entry.sizing.confidence_multiplier".to_string(),
-                                "entry.sizing.adx_multiplier".to_string(),
-                                "entry.sizing.volatility_scalar".to_string(),
-                                "entry.sizing.min_notional_bump".to_string(),
-                            ],
-                            ..BehaviourGroupConfig::default()
+        let cfg = StrategyConfig {
+            runtime: RuntimeConfig {
+                profile: profile.to_string(),
+                ..RuntimeConfig::default()
+            },
+            pipeline: PipelineConfig {
+                default_profile: "production".to_string(),
+                profiles: BTreeMap::from([(
+                    profile.to_string(),
+                    PipelineProfileConfig {
+                        behaviours: BehaviourProfileConfig {
+                            entry_sizing: BehaviourGroupConfig {
+                                disabled: vec![
+                                    "entry.sizing.dynamic".to_string(),
+                                    "entry.sizing.confidence_multiplier".to_string(),
+                                    "entry.sizing.adx_multiplier".to_string(),
+                                    "entry.sizing.volatility_scalar".to_string(),
+                                    "entry.sizing.min_notional_bump".to_string(),
+                                ],
+                                ..BehaviourGroupConfig::default()
+                            },
+                            entry_progression: BehaviourGroupConfig {
+                                disabled: vec![
+                                    "entry.progression.pyramiding".to_string(),
+                                    "entry.progression.add_cooldown".to_string(),
+                                ],
+                                ..BehaviourGroupConfig::default()
+                            },
+                            risk: BehaviourGroupConfig {
+                                disabled: vec![
+                                    "risk.entry_cooldown".to_string(),
+                                    "risk.exit_cooldown".to_string(),
+                                    "risk.pesc".to_string(),
+                                ],
+                                ..BehaviourGroupConfig::default()
+                            },
+                            ..BehaviourProfileConfig::default()
                         },
-                        entry_progression: BehaviourGroupConfig {
-                            disabled: vec![
-                                "entry.progression.pyramiding".to_string(),
-                                "entry.progression.add_cooldown".to_string(),
-                            ],
-                            ..BehaviourGroupConfig::default()
-                        },
-                        risk: BehaviourGroupConfig {
-                            disabled: vec![
-                                "risk.entry_cooldown".to_string(),
-                                "risk.exit_cooldown".to_string(),
-                                "risk.pesc".to_string(),
-                            ],
-                            ..BehaviourGroupConfig::default()
-                        },
-                        ..BehaviourProfileConfig::default()
+                        ..PipelineProfileConfig::default()
                     },
-                    ..PipelineProfileConfig::default()
-                },
-            )]),
+                )]),
+            },
+            ..StrategyConfig::default()
         };
 
         let resolved = bt_core::execution_contract::resolve_execution_config(&cfg, None)

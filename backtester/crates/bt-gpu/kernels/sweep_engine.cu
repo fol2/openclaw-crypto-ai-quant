@@ -659,6 +659,209 @@ __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& sna
     return se.should_exit;
 }
 
+struct OrderedExitDecision {
+    unsigned int action;       // 0 = hold, 1 = partial, 2 = full close
+    unsigned int trace_reason; // TRACE_REASON_* for apply_close/apply_partial_close
+};
+
+__device__ OrderedExitDecision evaluate_ordered_exits(
+    GpuPosition* pos,
+    const GpuSnapshot& snap,
+    const GpuComboConfig* cfg,
+    double p_atr,
+    float tp_mult,
+    unsigned int sym_idx,
+    const GpuParams* params
+) {
+    OrderedExitDecision result;
+    result.action = 0u;
+    result.trace_reason = 0u;
+
+    unsigned int exit_order[18] = {
+        cfg->exit_order_0, cfg->exit_order_1, cfg->exit_order_2, cfg->exit_order_3,
+        cfg->exit_order_4, cfg->exit_order_5, cfg->exit_order_6, cfg->exit_order_7,
+        cfg->exit_order_8, cfg->exit_order_9, cfg->exit_order_10, cfg->exit_order_11,
+        cfg->exit_order_12, cfg->exit_order_13, cfg->exit_order_14, cfg->exit_order_15,
+        cfg->exit_order_16, cfg->exit_order_17
+    };
+
+    unsigned int active_stop_mask = 0u;
+    unsigned int active_trailing_mask = 0u;
+
+    for (unsigned int exit_idx = 0u; exit_idx < 18u; ++exit_idx) {
+        unsigned int exit_id = exit_order[exit_idx];
+
+        switch (exit_id) {
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_ASE:
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_DASE:
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_SLB:
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_BASE:
+            case GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN: {
+                unsigned int next_bit =
+                    (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_ASE)
+                        ? GPU_EXIT_MASK_STOP_LOSS_ASE
+                    : (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_DASE)
+                        ? GPU_EXIT_MASK_STOP_LOSS_DASE
+                    : (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_SLB)
+                        ? GPU_EXIT_MASK_STOP_LOSS_SLB
+                    : (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BASE)
+                        ? GPU_EXIT_MASK_STOP_LOSS_BASE
+                        : GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN;
+                active_stop_mask |= (cfg->exit_behaviour_mask & next_bit);
+                if ((active_stop_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig stop_cfg = *cfg;
+                stop_cfg.exit_behaviour_mask = active_stop_mask;
+                double sl_price = compute_sl_price_codegen(
+                    stop_cfg,
+                    (int)pos->active,
+                    (double)pos->entry_price,
+                    (double)pos->entry_atr,
+                    (double)snap.close,
+                    (double)snap.adx,
+                    (double)snap.adx_slope
+                );
+                if (stop_loss_hit(
+                        pos->active,
+                        (double)snap.close,
+                        sl_price,
+                        (double)pos->entry_atr,
+                        pos->adds_count)) {
+                    result.action = 2u;
+                    result.trace_reason = TRACE_REASON_EXIT_STOP;
+                    return result;
+                }
+                break;
+            }
+
+            case GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE:
+            case GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER:
+            case GPU_EXIT_ORDER_ID_TRAILING_BASE: {
+                unsigned int next_bit =
+                    (exit_id == GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE)
+                        ? GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE
+                    : (exit_id == GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER)
+                        ? GPU_EXIT_MASK_TRAILING_VOL_BUFFER
+                        : GPU_EXIT_MASK_TRAILING_BASE;
+                active_trailing_mask |= (cfg->exit_behaviour_mask & next_bit);
+                if ((active_trailing_mask & GPU_EXIT_MASK_TRAILING_BASE) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig trail_cfg = *cfg;
+                trail_cfg.exit_behaviour_mask = active_trailing_mask;
+                double trail_price = compute_trailing_codegen(
+                    trail_cfg,
+                    (int)pos->active,
+                    (double)pos->entry_price,
+                    (double)snap.close,
+                    (double)pos->entry_atr,
+                    (double)pos->trailing_sl,
+                    (int)pos->confidence,
+                    (double)snap.rsi,
+                    (double)snap.adx,
+                    (double)snap.adx_slope,
+                    (double)snap.atr_slope,
+                    (double)snap.bb_width_ratio,
+                    (double)p_atr
+                );
+                if (trail_price > 0.0) {
+                    pos->trailing_sl = trail_price;
+                }
+                if (check_trailing_exit(*pos, snap)) {
+                    result.action = 2u;
+                    result.trace_reason = TRACE_REASON_EXIT_TRAILING;
+                    return result;
+                }
+                break;
+            }
+
+            case GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL:
+            case GPU_EXIT_ORDER_ID_TAKE_PROFIT_FULL: {
+                unsigned int tp_mask =
+                    (exit_id == GPU_EXIT_ORDER_ID_TAKE_PROFIT_PARTIAL)
+                        ? GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL
+                        : GPU_EXIT_MASK_TAKE_PROFIT_FULL;
+                if ((cfg->exit_behaviour_mask & tp_mask) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig tp_cfg = *cfg;
+                tp_cfg.exit_behaviour_mask = tp_mask;
+                TpResult tp = check_tp_codegen(
+                    tp_cfg,
+                    (int)pos->active,
+                    (double)pos->entry_price,
+                    (double)pos->entry_atr,
+                    (double)snap.close,
+                    (double)pos->size,
+                    pos->tp1_taken,
+                    (double)tp_mult
+                );
+                if (tp.action == 1) {
+                    result.action = 1u;
+                    result.trace_reason = TRACE_REASON_PARTIAL;
+                    return result;
+                }
+                if (tp.action == 2) {
+                    result.action = 2u;
+                    result.trace_reason = TRACE_REASON_EXIT_TP;
+                    return result;
+                }
+                break;
+            }
+
+            default: {
+                unsigned int smart_mask = 0u;
+                switch (exit_id) {
+                    case GPU_EXIT_ORDER_ID_SMART_TREND_BREAKDOWN:
+                        smart_mask = GPU_SMART_EXIT_MASK_TREND_BREAKDOWN;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_TREND_EXHAUSTION:
+                        smart_mask = GPU_SMART_EXIT_MASK_TREND_EXHAUSTION;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_EMA_MACRO_BREAKDOWN:
+                        smart_mask = GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_STAGNATION:
+                        smart_mask = GPU_SMART_EXIT_MASK_STAGNATION;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_FUNDING_HEADWIND:
+                        smart_mask = GPU_SMART_EXIT_MASK_FUNDING_HEADWIND;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_TSME:
+                        smart_mask = GPU_SMART_EXIT_MASK_TSME;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_MMDE:
+                        smart_mask = GPU_SMART_EXIT_MASK_MMDE;
+                        break;
+                    case GPU_EXIT_ORDER_ID_SMART_RSI_OVEREXTENSION:
+                        smart_mask = GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION;
+                        break;
+                    default:
+                        break;
+                }
+                if (smart_mask == 0u || (cfg->smart_exit_behaviour_mask & smart_mask) == 0u) {
+                    break;
+                }
+
+                GpuComboConfig smart_cfg = *cfg;
+                smart_cfg.smart_exit_behaviour_mask = smart_mask;
+                if (check_smart_exits(*pos, snap, &smart_cfg, p_atr, sym_idx, params)) {
+                    result.action = 2u;
+                    result.trace_reason = TRACE_REASON_EXIT_SMART;
+                    return result;
+                }
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
 // -- Entry Sizing (AQC-1233: delegated to compute_entry_size_codegen) ---------
 // Thin wrapper over codegen: float->double on inputs, SizingResultD->SizingResult (double->float).
 // The codegen SizingResultD operates in double precision (AQC-734).
@@ -1112,41 +1315,24 @@ extern "C" __global__ void sweep_engine_kernel(
                             quantize12(seed_kernel_notional / kernel_lev);
                     }
 
-                    // Stop loss
-                    if (check_stop_loss(pos, hybrid, &cfg)) {
-                        apply_close(&state, sym, hybrid, sub_market_close, TRACE_REASON_EXIT_STOP, fee_rate, cfg.slippage_bps);
-                        break;
-                    }
-
-                    // Update trailing stop
-                    double new_tsl = compute_trailing(pos, hybrid, &cfg, p_atr);
-                    if (new_tsl > 0.0f) {
-                        state.positions[sym].trailing_sl = new_tsl;
-                    }
-
-                    // Trailing stop exit
-                    if (check_trailing_exit(state.positions[sym], hybrid)) {
-                        apply_close(&state, sym, hybrid, sub_market_close, TRACE_REASON_EXIT_TRAILING, fee_rate, cfg.slippage_bps);
-                        break;
-                    }
-
-                    // Take profit
                     float tp_mult = get_tp_mult(hybrid, &cfg);
-                    unsigned int tp_result = check_tp(pos, hybrid, &cfg, tp_mult);
-                    if (tp_result == 1u) {
+                    OrderedExitDecision exit_decision = evaluate_ordered_exits(
+                        &state.positions[sym],
+                        hybrid,
+                        &cfg,
+                        p_atr,
+                        tp_mult,
+                        sym,
+                        params
+                    );
+                    if (exit_decision.action == 1u) {
                         apply_partial_close(&state, sym, hybrid, sub_market_close, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
                         // CPU sub-bar semantics keep scanning later sub-bars after a partial TP.
-                        // Remaining size can still hit SL/TS/other exits within the same bar window.
+                        // Remaining size can still hit later exits within the same bar window.
                         continue;
                     }
-                    if (tp_result == 2u) {
-                        apply_close(&state, sym, hybrid, sub_market_close, TRACE_REASON_EXIT_TP, fee_rate, cfg.slippage_bps);
-                        break;
-                    }
-
-                    // Smart exits
-                    if (check_smart_exits(pos, hybrid, &cfg, p_atr, sym, params)) {
-                        apply_close(&state, sym, hybrid, sub_market_close, TRACE_REASON_EXIT_SMART, fee_rate, cfg.slippage_bps);
+                    if (exit_decision.action == 2u) {
+                        apply_close(&state, sym, hybrid, sub_market_close, exit_decision.trace_reason, fee_rate, cfg.slippage_bps);
                         break;
                     }
                 }
@@ -1817,7 +2003,6 @@ extern "C" __global__ void sweep_engine_kernel(
                         || (snap.atr > 0.0f
                             && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
                 }
-                bool partial_tp_taken = false;
                 if (!block_exits && !is_exit_cooldown_active(&state, sym, snap.t_sec, &cfg)) {
                     // CPU parity: kernel_margin_used tracks the decision-kernel margin model
                     // (per-trade leverage) and MUST NOT be overwritten during exit evaluation.
@@ -1837,39 +2022,21 @@ extern "C" __global__ void sweep_engine_kernel(
                             quantize12(seed_kernel_notional / kernel_lev);
                     }
 
-                    // Stop loss
-                    if (check_stop_loss(pos, snap, &cfg)) {
-                        apply_close(&state, sym, snap, main_market_close, TRACE_REASON_EXIT_STOP, fee_rate, cfg.slippage_bps);
-                        continue;
-                    }
-
-                    // Update trailing stop
-                    double new_tsl = compute_trailing(pos, snap, &cfg, p_atr);
-                    if (new_tsl > 0.0f) {
-                        state.positions[sym].trailing_sl = new_tsl;
-                    }
-
-                    // Trailing stop exit
-                    if (check_trailing_exit(state.positions[sym], snap)) {
-                        apply_close(&state, sym, snap, main_market_close, TRACE_REASON_EXIT_TRAILING, fee_rate, cfg.slippage_bps);
-                        continue;
-                    }
-
-                    // Take profit
                     float tp_mult = get_tp_mult(snap, &cfg);
-                    unsigned int tp_result = check_tp(pos, snap, &cfg, tp_mult);
-                    if (tp_result == 1u) {
+                    OrderedExitDecision exit_decision = evaluate_ordered_exits(
+                        &state.positions[sym],
+                        snap,
+                        &cfg,
+                        p_atr,
+                        tp_mult,
+                        sym,
+                        params
+                    );
+                    if (exit_decision.action == 1u) {
                         apply_partial_close(&state, sym, snap, main_market_close, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
-                        partial_tp_taken = true;
                     }
-                    if (tp_result == 2u) {
-                        apply_close(&state, sym, snap, main_market_close, TRACE_REASON_EXIT_TP, fee_rate, cfg.slippage_bps);
-                        continue;
-                    }
-
-                    // Smart exits (skip when partial TP fired this bar, same as prior flow)
-                    if (!partial_tp_taken && check_smart_exits(pos, snap, &cfg, p_atr, sym, params)) {
-                        apply_close(&state, sym, snap, main_market_close, TRACE_REASON_EXIT_SMART, fee_rate, cfg.slippage_bps);
+                    if (exit_decision.action == 2u) {
+                        apply_close(&state, sym, snap, main_market_close, exit_decision.trace_reason, fee_rate, cfg.slippage_bps);
                         continue;
                     }
                 }
