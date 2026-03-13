@@ -143,6 +143,7 @@ struct ExistingManualIntent {
     exchange_order_id: Option<String>,
     last_error: Option<String>,
     sent_ts_ms: Option<i64>,
+    meta_json: Option<String>,
 }
 
 enum ManualExecutionClaim {
@@ -223,6 +224,7 @@ pub fn execute_open(
     let mut early_retry_claim: Option<(String, String)> = None;
     if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
         if should_resume_existing_manual_submission(&existing) {
+            validate_resumed_open_request(&existing, request)?;
             if let Some(recovered) =
                 recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
             {
@@ -531,6 +533,7 @@ pub fn execute_close(
     let mut early_retry_claim: Option<(String, String)> = None;
     if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
         if should_resume_existing_manual_submission(&existing) {
+            validate_resumed_close_request(&existing, request)?;
             if let Some(recovered) =
                 recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
             {
@@ -1167,7 +1170,7 @@ fn load_existing_manual_intent_by_dedupe_key(
 ) -> Result<Option<ExistingManualIntent>, HubError> {
     let mut stmt = conn.prepare(
         "SELECT intent_id, created_ts_ms, symbol, action, side, status, requested_size, leverage,
-                dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms
+                dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms, meta_json
          FROM oms_intents
          WHERE dedupe_key = ?1
          LIMIT 1",
@@ -1187,6 +1190,7 @@ fn load_existing_manual_intent_by_dedupe_key(
             exchange_order_id: row.get(10)?,
             last_error: row.get(11)?,
             sent_ts_ms: row.get(12)?,
+            meta_json: row.get(13)?,
         })
     });
     match row {
@@ -1229,6 +1233,130 @@ fn existing_manual_execution_payload(kind: &str, existing: &ExistingManualIntent
         "last_error": existing.last_error,
         "sent_ts_ms": existing.sent_ts_ms,
     })
+}
+
+fn same_optional_price(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => (left - right).abs() < 1e-9,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn parse_resume_request_meta(existing: &ExistingManualIntent) -> Result<Value, HubError> {
+    existing
+        .meta_json
+        .as_deref()
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing meta_json for retry validation",
+                existing.intent_id
+            ))
+        })
+        .and_then(|raw| serde_json::from_str(raw).map_err(HubError::from))
+}
+
+fn validate_resumed_open_request(
+    existing: &ExistingManualIntent,
+    request: &ManualTradeOpenRequest,
+) -> Result<(), HubError> {
+    let meta = parse_resume_request_meta(existing)?;
+    let stored = meta
+        .get("request")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing request metadata",
+                existing.intent_id
+            ))
+        })?;
+    let stored_side = stored
+        .get("side")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    let stored_notional = stored
+        .get("notional_usd")
+        .and_then(parse_json_number)
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing stored notional",
+                existing.intent_id
+            ))
+        })?;
+    let stored_leverage = stored
+        .get("leverage")
+        .and_then(parse_json_integer)
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing stored leverage",
+                existing.intent_id
+            ))
+        })? as u32;
+    let stored_order_type = stored
+        .get("order_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let stored_limit_price = stored.get("limit_price").and_then(parse_json_number);
+
+    if existing.symbol.trim().to_ascii_uppercase() != request.symbol.trim().to_ascii_uppercase()
+        || stored_side != request.side.trim().to_ascii_uppercase()
+        || (stored_notional - request.notional_usd).abs() >= 1e-9
+        || stored_leverage != request.leverage
+        || stored_order_type != request.order_type.trim().to_ascii_lowercase()
+        || !same_optional_price(stored_limit_price, request.limit_price)
+    {
+        return Err(HubError::BadRequest(
+            "confirm token does not match parameters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resumed_close_request(
+    existing: &ExistingManualIntent,
+    request: &ManualTradeCloseRequest,
+) -> Result<(), HubError> {
+    let meta = parse_resume_request_meta(existing)?;
+    let stored = meta
+        .get("request")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing request metadata",
+                existing.intent_id
+            ))
+        })?;
+    let stored_close_pct = stored
+        .get("close_pct")
+        .and_then(parse_json_number)
+        .ok_or_else(|| {
+            HubError::Internal(format!(
+                "manual intent {} is missing stored close_pct",
+                existing.intent_id
+            ))
+        })?;
+    let stored_order_type = stored
+        .get("order_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let stored_limit_price = stored.get("limit_price").and_then(parse_json_number);
+
+    if existing.symbol.trim().to_ascii_uppercase() != request.symbol.trim().to_ascii_uppercase()
+        || (stored_close_pct - request.close_pct).abs() >= 1e-9
+        || stored_order_type != request.order_type.trim().to_ascii_lowercase()
+        || !same_optional_price(stored_limit_price, request.limit_price)
+    {
+        return Err(HubError::BadRequest(
+            "confirm token does not match parameters".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn find_matching_open_order<'a>(
@@ -2693,5 +2821,49 @@ mod tests {
 
         assert_eq!(intent_count, 1);
         assert_eq!(confirmation_status, "BOUND");
+    }
+
+    #[test]
+    fn resumed_open_retry_rejects_changed_request_body() {
+        let existing = ExistingManualIntent {
+            intent_id: "manual_resume".to_string(),
+            created_ts_ms: 1_773_500_000_000,
+            symbol: "ETH".to_string(),
+            action: "OPEN".to_string(),
+            side: "SELL".to_string(),
+            status: "NEW".to_string(),
+            requested_size: Some(0.0515),
+            leverage: Some(10.0),
+            dedupe_key: Some("confirm-open".to_string()),
+            client_order_id: Some("0x6d616e5f1234567890abcdef12345678".to_string()),
+            exchange_order_id: None,
+            last_error: None,
+            sent_ts_ms: None,
+            meta_json: Some(
+                json!({
+                    "request": {
+                        "order_type": "market",
+                        "side": "SELL",
+                        "notional_usd": 500.0,
+                        "leverage": 10,
+                        "limit_price": Value::Null
+                    }
+                })
+                .to_string(),
+            ),
+        };
+        let changed_request = ManualTradeOpenRequest {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 750.0,
+            leverage: 10,
+            order_type: "market".to_string(),
+            limit_price: None,
+        };
+
+        let error = validate_resumed_open_request(&existing, &changed_request).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("confirm token does not match parameters"));
     }
 }
