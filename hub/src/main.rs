@@ -248,7 +248,10 @@ fn spawn_hl_poller(state: Arc<AppState>) {
         }
     };
 
-    tracing::info!("HL balance poller starting (address={}…)", &address[..8.min(address.len())]);
+    tracing::info!(
+        "HL balance poller starting (address={}…)",
+        &address[..8.min(address.len())]
+    );
 
     tokio::spawn(async move {
         let poll_interval = std::time::Duration::from_secs(10);

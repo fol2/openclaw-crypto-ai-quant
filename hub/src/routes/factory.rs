@@ -3,7 +3,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
@@ -236,25 +235,6 @@ async fn run_candidates(
 
 // ── Job control routes ─────────────────────────────────────────────
 
-/// Body for POST /api/factory/run.
-#[derive(Deserialize)]
-struct RunFactoryBody {
-    profile: Option<String>,
-    strategy_mode: Option<String>,
-    gpu: Option<bool>,
-    tpe: Option<bool>,
-    walk_forward: Option<bool>,
-    slippage_stress: Option<bool>,
-    concentration_checks: Option<bool>,
-    sensitivity_checks: Option<bool>,
-    candidate_count: Option<u32>,
-    max_age_fail_hours: Option<f64>,
-    funding_max_stale_symbols: Option<u32>,
-    dry_run: Option<bool>,
-    no_deploy: Option<bool>,
-    enable_livepaper_promotion: Option<bool>,
-}
-
 /// Resolve settings file path.
 fn settings_path(state: &AppState) -> PathBuf {
     state.config.aiq_root.join("config/factory_defaults.yaml")
@@ -276,7 +256,7 @@ fn load_settings(state: &AppState) -> Value {
 /// POST /api/factory/run — launch a new factory cycle.
 async fn run_factory(
     State(_state): State<Arc<AppState>>,
-    Json(_body): Json<RunFactoryBody>,
+    Json(_body): Json<Value>,
 ) -> Result<Json<Value>, HubError> {
     Err(HubError::Forbidden(
         "factory automation was retired with the zero-Python repository cutover".into(),
@@ -352,9 +332,7 @@ async fn cancel_job(
 // ── Settings routes ────────────────────────────────────────────────
 
 /// GET /api/factory/settings — read saved factory defaults.
-async fn get_settings(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, HubError> {
+async fn get_settings(State(state): State<Arc<AppState>>) -> Result<Json<Value>, HubError> {
     Ok(Json(load_settings(&state)))
 }
 
@@ -376,9 +354,7 @@ const FACTORY_TIMER: &str = "openclaw-ai-quant-factory-v8.timer";
 const FACTORY_DEEP_TIMER: &str = "openclaw-ai-quant-factory-v8-deep.timer";
 
 /// GET /api/factory/timer — timer status.
-async fn get_timer(
-    State(_state): State<Arc<AppState>>,
-) -> Result<Json<Value>, HubError> {
+async fn get_timer(State(_state): State<Arc<AppState>>) -> Result<Json<Value>, HubError> {
     let mut timers = Vec::new();
     for timer in [FACTORY_TIMER, FACTORY_DEEP_TIMER] {
         let output = Command::new("systemctl")
@@ -418,9 +394,7 @@ async fn get_timer(
 }
 
 /// POST /api/factory/timer/{action} — enable or disable factory timer.
-async fn timer_action(
-    Path(action): Path<String>,
-) -> Result<Json<Value>, HubError> {
+async fn timer_action(Path(action): Path<String>) -> Result<Json<Value>, HubError> {
     match action.as_str() {
         "enable" | "disable" => {}
         _ => {

@@ -614,7 +614,12 @@ fn evaluate_exits_for_event(
     let mut fills = Vec::new();
 
     if let Some(ref cd) = params.cooldown_params {
-        if is_exit_cooldown_active(next_state, &event.symbol, event.timestamp_ms, cd.exit_cooldown_s) {
+        if is_exit_cooldown_active(
+            next_state,
+            &event.symbol,
+            event.timestamp_ms,
+            cd.exit_cooldown_s,
+        ) {
             diagnostics
                 .warnings
                 .push(format!("exit cooldown active for {}", event.symbol));
@@ -636,18 +641,14 @@ fn evaluate_exits_for_event(
 
         let pre_exit_side = state.positions.get(&event.symbol).map(|p| p.side);
 
-        let exit_eval = {
-            if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
-                Some(crate::kernel_exits::evaluate_exits_with_diagnostics(
-                    pos,
-                    snap,
-                    exit_params,
-                    event.timestamp_ms,
-                ))
-            } else {
-                None
-            }
-        };
+        let exit_eval = next_state.positions.get_mut(&event.symbol).map(|pos| {
+            crate::kernel_exits::evaluate_exits_with_diagnostics(
+                pos,
+                snap,
+                exit_params,
+                event.timestamp_ms,
+            )
+        });
 
         if let Some(eval) = exit_eval {
             diagnostics.applied_thresholds = eval.threshold_records;
@@ -674,17 +675,20 @@ fn evaluate_exits_for_event(
                             PositionSide::Long => "CLOSE_LONG",
                             PositionSide::Short => "CLOSE_SHORT",
                         };
-                        let reason_code = reason_code_text(classify_reason_code(action_code, reason));
+                        let reason_code =
+                            reason_code_text(classify_reason_code(action_code, reason));
                         if let Some((intent, fill)) = apply_close(
                             next_state,
-                            &event.symbol,
-                            closed_side,
-                            exit_price,
-                            fee_rate,
-                            Some(1.0),
-                            close_id,
-                            reason,
-                            reason_code,
+                            ApplyCloseInput {
+                                symbol: &event.symbol,
+                                side: closed_side,
+                                price: exit_price,
+                                fee_rate,
+                                close_fraction: Some(1.0),
+                                intent_id: close_id,
+                                reason,
+                                reason_code,
+                            },
                             diagnostics,
                         ) {
                             intents.push(intent);
@@ -717,17 +721,20 @@ fn evaluate_exits_for_event(
                             PositionSide::Long => "REDUCE_LONG",
                             PositionSide::Short => "REDUCE_SHORT",
                         };
-                        let reason_code = reason_code_text(classify_reason_code(action_code, reason));
+                        let reason_code =
+                            reason_code_text(classify_reason_code(action_code, reason));
                         if let Some((intent, fill)) = apply_close(
                             next_state,
-                            &event.symbol,
-                            closed_side,
-                            exit_price,
-                            fee_rate,
-                            Some(fraction),
-                            close_id,
-                            reason,
-                            reason_code,
+                            ApplyCloseInput {
+                                symbol: &event.symbol,
+                                side: closed_side,
+                                price: exit_price,
+                                fee_rate,
+                                close_fraction: Some(fraction),
+                                intent_id: close_id,
+                                reason,
+                                reason_code,
+                            },
                             diagnostics,
                         ) {
                             intents.push(intent);
@@ -899,18 +906,32 @@ fn apply_open(
     Some((intent, fill))
 }
 
-fn apply_close(
-    state: &mut StrategyState,
-    symbol: &str,
+struct ApplyCloseInput<'a> {
+    symbol: &'a str,
     side: PositionSide,
     price: f64,
     fee_rate: f64,
     close_fraction: Option<f64>,
     intent_id: u64,
-    reason: &str,
-    reason_code: &str,
+    reason: &'a str,
+    reason_code: &'a str,
+}
+
+fn apply_close(
+    state: &mut StrategyState,
+    input: ApplyCloseInput<'_>,
     diagnostics: &mut Diagnostics,
 ) -> Option<(OrderIntent, FillEvent)> {
+    let ApplyCloseInput {
+        symbol,
+        side,
+        price,
+        fee_rate,
+        close_fraction,
+        intent_id,
+        reason,
+        reason_code,
+    } = input;
     let position = match state.positions.get(symbol) {
         Some(pos) => pos.clone(),
         None => {
@@ -1148,32 +1169,32 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
         // Record gate thresholds for entry decisions.
         {
-            let mut thr = Vec::new();
-            thr.push(ThresholdRecord {
-                name: "adx_above_min".into(),
-                actual: snap.adx,
-                threshold: gate_result.effective_min_adx,
-                passed: gate_result.adx_above_min,
-            });
-            thr.push(ThresholdRecord {
-                name: "adx_trending_up".into(),
-                actual: snap.adx_slope,
-                threshold: 0.0,
-                passed: gate_result.is_trending_up,
-            });
-            thr.push(ThresholdRecord {
-                name: "vol_confirm".into(),
-                actual: snap.volume,
-                threshold: snap.vol_sma,
-                passed: gate_result.vol_confirm,
-            });
-            thr.push(ThresholdRecord {
-                name: "bb_width_ratio".into(),
-                actual: snap.bb_width_ratio,
-                threshold: 1.0,
-                passed: !gate_result.is_ranging,
-            });
-            diagnostics.applied_thresholds = thr;
+            diagnostics.applied_thresholds = vec![
+                ThresholdRecord {
+                    name: "adx_above_min".into(),
+                    actual: snap.adx,
+                    threshold: gate_result.effective_min_adx,
+                    passed: gate_result.adx_above_min,
+                },
+                ThresholdRecord {
+                    name: "adx_trending_up".into(),
+                    actual: snap.adx_slope,
+                    threshold: 0.0,
+                    passed: gate_result.is_trending_up,
+                },
+                ThresholdRecord {
+                    name: "vol_confirm".into(),
+                    actual: snap.volume,
+                    threshold: snap.vol_sma,
+                    passed: gate_result.vol_confirm,
+                },
+                ThresholdRecord {
+                    name: "bb_width_ratio".into(),
+                    actual: snap.bb_width_ratio,
+                    threshold: 1.0,
+                    passed: !gate_result.is_ranging,
+                },
+            ];
         }
 
         if entry_result.signal == bt_signals::Signal::Neutral {
@@ -1221,7 +1242,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 let is_same_side = next_state
                     .positions
                     .get(&event.symbol)
-                    .map_or(false, |p| p.side == requested_side);
+                    .is_some_and(|p| p.side == requested_side);
 
                 if !has_position || is_same_side {
                     diagnostics.gate_blocked = true;
@@ -1246,7 +1267,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             let is_opposite_close = next_state
                 .positions
                 .get(&event.symbol)
-                .map_or(false, |p| p.side != requested_side);
+                .is_some_and(|p| p.side != requested_side);
 
             if !is_opposite_close {
                 if let Some(ref cd) = params.cooldown_params {
@@ -1409,7 +1430,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             let is_same_side = next_state
                 .positions
                 .get(&event.symbol)
-                .map_or(false, |p| p.side == requested_side);
+                .is_some_and(|p| p.side == requested_side);
 
             // Block new entries (no existing position) and same-side pyramids
             if !has_position || is_same_side {
@@ -1436,7 +1457,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         let is_opposite_close = next_state
             .positions
             .get(&event.symbol)
-            .map_or(false, |p| p.side != requested_side);
+            .is_some_and(|p| p.side != requested_side);
 
         if !is_opposite_close {
             if let Some(ref cd) = params.cooldown_params {
@@ -1609,14 +1630,16 @@ fn execute_entry(
             let closed_side = position.side;
             if let Some((intent, fill)) = apply_close(
                 next_state,
-                &event.symbol,
-                closed_side,
-                event.price,
-                fee_rate,
-                event.close_fraction,
-                close_id,
-                "Signal Flip",
-                "exit_signal_flip",
+                ApplyCloseInput {
+                    symbol: &event.symbol,
+                    side: closed_side,
+                    price: event.price,
+                    fee_rate,
+                    close_fraction: event.close_fraction,
+                    intent_id: close_id,
+                    reason: "Signal Flip",
+                    reason_code: "exit_signal_flip",
+                },
                 diagnostics,
             ) {
                 intents.push(OrderIntent {
@@ -1937,7 +1960,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "full close should remove position"
         );
         assert_eq!(result.fills.len(), 1);
@@ -1956,7 +1979,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "None fraction should behave as full close"
         );
     }
@@ -2008,7 +2031,7 @@ mod tests {
             ..event
         };
         let result2 = step(&result.state, &event2, &params);
-        assert!(result2.state.positions.get("BTC").is_none());
+        assert!(!result2.state.positions.contains_key("BTC"));
 
         // Total round-trip: initial_cash + total_pnl - total_fees.
         let open_fee = accounting::apply_open_fill(notional, fee_rate).fee_usd;
@@ -2798,7 +2821,7 @@ mod tests {
         assert!(!result.intents.is_empty(), "should emit close intent");
         assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "position should be closed"
         );
     }
@@ -2818,7 +2841,7 @@ mod tests {
 
         assert!(result.intents.is_empty(), "no exit should trigger");
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "position should remain"
         );
     }
@@ -2879,7 +2902,7 @@ mod tests {
 
         assert!(result.intents.is_empty(), "no intents without exit_params");
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "position should remain"
         );
     }
@@ -2982,7 +3005,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "failing gates should block new entry"
         );
         assert!(result.intents.is_empty());
@@ -3000,7 +3023,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "passing gates should allow entry"
         );
         assert_eq!(result.intents.len(), 1);
@@ -3035,7 +3058,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "opposite-side signal should still close despite failing gates"
         );
         assert!(!result.intents.is_empty());
@@ -3055,7 +3078,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "None gate_result should allow entry (backwards compatible)"
         );
         assert!(!result.diagnostics.gate_blocked);
@@ -3248,7 +3271,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "Evaluate with bullish snap + passing gates should open position"
         );
         assert!(!result.intents.is_empty());
@@ -3266,7 +3289,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "Evaluate with ranging snap should not open position"
         );
         assert!(result.intents.is_empty());
@@ -3291,7 +3314,7 @@ mod tests {
         );
         assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "position should be closed by Evaluate-triggered exit check"
         );
     }
@@ -3307,7 +3330,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "Buy signal should still work even with entry_params set"
         );
         assert_eq!(result.diagnostics.entry_signal, None);
@@ -3323,7 +3346,7 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "Evaluate without entry_params should not open position"
         );
         assert!(result.intents.is_empty());
@@ -3355,7 +3378,7 @@ mod tests {
         );
         assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "position should be closed even without entry_params"
         );
         assert!(result
@@ -3441,7 +3464,7 @@ mod tests {
         event.timestamp_ms = 1_000;
         let result = step(&state, &event, &params);
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "setup: position should open"
         );
         (result.state, params)
@@ -3469,7 +3492,7 @@ mod tests {
         };
         let closed = step(&state_after_open, &close_evt, &params);
         assert!(
-            closed.state.positions.get("BTC").is_none(),
+            !closed.state.positions.contains_key("BTC"),
             "position should be closed"
         );
 
@@ -3492,7 +3515,7 @@ mod tests {
         };
         let result = step(&closed.state, &reopen_evt, &params);
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "entry cooldown should block rapid re-entry"
         );
         assert!(result.diagnostics.cooldown_blocked);
@@ -3538,7 +3561,7 @@ mod tests {
         };
         let result = step(&closed.state, &reopen_evt, &params);
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "entry should be allowed after cooldown expires"
         );
         assert!(!result.diagnostics.cooldown_blocked);
@@ -3561,7 +3584,7 @@ mod tests {
 
         let result = step(&state_after_open, &event, &params);
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "exit cooldown should block exit evaluation"
         );
         assert!(result.diagnostics.cooldown_blocked);
@@ -3582,7 +3605,7 @@ mod tests {
 
         let result = step(&state_after_open, &event, &params);
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "exit should be allowed after cooldown expires"
         );
         assert!(!result.diagnostics.cooldown_blocked);
@@ -3608,7 +3631,7 @@ mod tests {
         sl_event.timestamp_ms = 100_000;
         let closed = step(&state_with_atr, &sl_event, &params);
         assert!(
-            closed.state.positions.get("BTC").is_none(),
+            !closed.state.positions.contains_key("BTC"),
             "should be closed by SL"
         );
         // Verify last_close_info was recorded
@@ -3636,7 +3659,7 @@ mod tests {
         };
         let result = step(&closed.state, &reopen_evt, &params);
         assert!(
-            result.state.positions.get("BTC").is_none(),
+            !result.state.positions.contains_key("BTC"),
             "PESC should block same-direction reentry"
         );
         assert!(result.diagnostics.pesc_blocked);
@@ -3661,7 +3684,7 @@ mod tests {
         let mut sl_event = price_update_event("BTC", 9_750.0, snap);
         sl_event.timestamp_ms = 100_000;
         let closed = step(&state_with_atr, &sl_event, &params);
-        assert!(closed.state.positions.get("BTC").is_none());
+        assert!(!closed.state.positions.contains_key("BTC"));
 
         // Open short (opposite direction) — should be allowed despite PESC
         // Use timestamp well past entry cooldown but within PESC window
@@ -3682,7 +3705,7 @@ mod tests {
         };
         let result = step(&closed.state, &short_evt, &params);
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "opposite direction should be allowed"
         );
         assert!(!result.diagnostics.pesc_blocked);
@@ -3721,7 +3744,7 @@ mod tests {
             ema_slow_slope_pct: None,
         };
         let closed = step(&opened.state, &close_evt, &params);
-        assert!(closed.state.positions.get("BTC").is_none());
+        assert!(!closed.state.positions.contains_key("BTC"));
         // Verify it was recorded as Signal Flip
         let (_, _, ref reason) = closed.state.last_close_info["BTC"];
         assert_eq!(reason, "Signal Flip");
@@ -3744,7 +3767,7 @@ mod tests {
         };
         let result = step(&closed.state, &reopen_evt, &params);
         assert!(
-            result.state.positions.get("BTC").is_some(),
+            result.state.positions.contains_key("BTC"),
             "Signal Flip should exempt PESC"
         );
         assert!(!result.diagnostics.pesc_blocked);
@@ -3810,7 +3833,7 @@ mod tests {
         let mut event = event_with_signal("BTC", MarketSignal::Buy);
         event.notional_hint_usd = Some(10_000.0);
         let result = step(&state, &event, &params);
-        assert!(result.state.positions.get("BTC").is_some());
+        assert!(result.state.positions.contains_key("BTC"));
         assert!(!result.diagnostics.cooldown_blocked);
         assert!(!result.diagnostics.pesc_blocked);
 
@@ -3828,7 +3851,7 @@ mod tests {
         // Should succeed (pyramid allowed, no cooldown)
         assert!(!result2.diagnostics.cooldown_blocked);
         assert!(!result2.diagnostics.pesc_blocked);
-        assert!(result2.fills.len() > 0);
+        assert!(!result2.fills.is_empty());
     }
 
     #[test]
@@ -3850,7 +3873,7 @@ mod tests {
         let mut event = event_with_signal("BTC", MarketSignal::Buy);
         event.notional_hint_usd = Some(10_000.0);
         let result = step(&state, &event, &params);
-        assert!(result.state.positions.get("BTC").is_some());
+        assert!(result.state.positions.contains_key("BTC"));
         assert!(!result.diagnostics.cooldown_blocked);
         assert!(!result.diagnostics.pesc_blocked);
 
@@ -3875,7 +3898,7 @@ mod tests {
         reopen.notional_hint_usd = Some(10_000.0);
         let result2 = step(&state_with_close, &reopen, &params);
         assert!(
-            result2.state.positions.get("BTC").is_some(),
+            result2.state.positions.contains_key("BTC"),
             "zero cooldowns should not block"
         );
         assert!(!result2.diagnostics.cooldown_blocked);

@@ -647,10 +647,10 @@ impl BboSnapshotStore {
                         let res = stmt.execute((
                             job.symbol, job.ts_ms, job.bid, job.ask, job.mid, updated_at,
                         ));
-                        if let Err(e) = res {
-                            if !e.to_string().to_ascii_lowercase().contains("locked") {
-                                eprintln!("bbo snapshots db write failed: {e}");
-                            }
+                        if let Err(e) = res
+                            && !e.to_string().to_ascii_lowercase().contains("locked")
+                        {
+                            eprintln!("bbo snapshots db write failed: {e}");
                         }
                     }
                     BboSnapshotMsg::Sweep => {
@@ -1032,6 +1032,16 @@ struct CandleDbStat {
     close_span_ms_mode: Option<i64>,
 }
 
+type CandleDbRow = (
+    i64,
+    Option<i64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+
 fn compute_db_stat(
     db_path: &str,
     symbol: &str,
@@ -1044,11 +1054,13 @@ fn compute_db_stat(
         return Err(anyhow!("interval is empty"));
     }
 
-    let mut st = CandleDbStat::default();
-    st.symbol = sym_u.clone();
-    st.interval = interval_s.clone();
-    st.db_path = db_path.to_string();
-    st.bars_wanted = bars_wanted;
+    let mut st = CandleDbStat {
+        symbol: sym_u.clone(),
+        interval: interval_s.clone(),
+        db_path: db_path.to_string(),
+        bars_wanted,
+        ..Default::default()
+    };
 
     let interval_ms = interval_to_ms(&interval_s).max(1);
     let now_ms = now_ms_i64();
@@ -1071,15 +1083,7 @@ fn compute_db_stat(
         "#,
     )?;
 
-    let mut rows: Vec<(
-        i64,
-        Option<i64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = Vec::new();
+    let mut rows: Vec<CandleDbRow> = Vec::new();
     let mut iter = stmt.query((sym_u.clone(), interval_s.clone(), limit as i64))?;
     while let Some(row) = iter.next()? {
         let t: i64 = row.get(0)?;
@@ -1135,7 +1139,7 @@ fn compute_db_stat(
     }
 
     // Gap stats.
-    let tol_ms = (interval_ms / 10).max(1_000).min(2_000);
+    let tol_ms = (interval_ms / 10).clamp(1_000, 2_000);
     let mut prev_t: Option<i64> = None;
     for (t, _t_close, _o, _h, _l, _c, _v) in rows.iter() {
         if let Some(pt) = prev_t {
@@ -1363,13 +1367,11 @@ fn apply_all_mids_snapshot(
     let mut changed = false;
     for (sym, mid_val) in mids.iter() {
         let sym_u = sym.to_ascii_uppercase();
-        if mids_from_bbo {
-            if let Some(ts) = st.bbo_updated_at.get(&sym_u) {
-                let bbo_age_s = now.duration_since(*ts).as_secs_f64();
-                if bbo_age_s <= mids_from_bbo_fallback_age_s {
-                    // Fresh BBO takes precedence in BBO-driven mode.
-                    continue;
-                }
+        if mids_from_bbo && let Some(ts) = st.bbo_updated_at.get(&sym_u) {
+            let bbo_age_s = now.duration_since(*ts).as_secs_f64();
+            if bbo_age_s <= mids_from_bbo_fallback_age_s {
+                // Fresh BBO takes precedence in BBO-driven mode.
+                continue;
             }
         }
         let Some(px) = parse_f64(mid_val) else {
@@ -1537,17 +1539,30 @@ async fn fetch_candle_snapshot(
     Err(last_err.unwrap_or_else(|| anyhow!("REST candleSnapshot failed")))
 }
 
-async fn rest_backfill_range(
-    http: &Client,
-    cfg: &Config,
-    pacer: &Arc<tokio::sync::Mutex<Instant>>,
-    state: &Arc<RwLock<State>>,
-    db: &DbWorkers,
-    symbol: &str,
-    interval: &str,
+struct RestBackfillRange<'a> {
+    http: &'a Client,
+    cfg: &'a Config,
+    pacer: &'a Arc<tokio::sync::Mutex<Instant>>,
+    state: &'a Arc<RwLock<State>>,
+    db: &'a DbWorkers,
+    symbol: &'a str,
+    interval: &'a str,
     start_ms: i64,
     end_ms: i64,
-) -> Result<usize> {
+}
+
+async fn rest_backfill_range(input: RestBackfillRange<'_>) -> Result<usize> {
+    let RestBackfillRange {
+        http,
+        cfg,
+        pacer,
+        state,
+        db,
+        symbol,
+        interval,
+        start_ms,
+        end_ms,
+    } = input;
     let sym_u = symbol.trim().to_ascii_uppercase();
     let interval_s = canonical_interval(interval);
     if interval_s.is_empty() {
@@ -1631,21 +1646,34 @@ async fn rest_backfill_range(
     Ok(total)
 }
 
-async fn compute_db_health(
-    cfg: &Config,
-    symbol: &str,
-    interval: &str,
+type CandleCoverageRow = (Option<i64>, Option<i64>, i64, Option<i64>);
+
+struct DbHealthRequest<'a> {
+    cfg: &'a Config,
+    symbol: &'a str,
+    interval: &'a str,
     required_start_ms: i64,
     interval_ms: i64,
     now_ms: i64,
     min_required_count: i64,
-) -> CandleHealth {
+}
+
+async fn compute_db_health(input: DbHealthRequest<'_>) -> CandleHealth {
+    let DbHealthRequest {
+        cfg,
+        symbol,
+        interval,
+        required_start_ms,
+        interval_ms,
+        now_ms,
+        min_required_count,
+    } = input;
     let interval_s = canonical_interval(interval);
     let db_path = db_path_for_interval(cfg, &interval_s);
     let sym_u = symbol.trim().to_ascii_uppercase();
     let timeout = Duration::from_secs(cfg.db_timeout_s.max(1));
 
-    let res = tokio::task::spawn_blocking(move || -> Result<(Option<i64>, Option<i64>, i64, Option<i64>)> {
+    let res = tokio::task::spawn_blocking(move || -> Result<CandleCoverageRow> {
         if let Some(parent) = Path::new(&db_path).parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -1666,9 +1694,11 @@ async fn compute_db_health(
     })
     .await;
 
-    let mut h = CandleHealth::default();
-    h.checked_at_ms = now_ms_i64();
-    h.expected_count = ((now_ms - required_start_ms).max(0) / interval_ms.max(1)) + 1;
+    let mut h = CandleHealth {
+        checked_at_ms: now_ms_i64(),
+        expected_count: ((now_ms - required_start_ms).max(0) / interval_ms.max(1)) + 1,
+        ..Default::default()
+    };
 
     match res {
         Ok(Ok((min_t, max_t, cnt, max_t_close))) => {
@@ -1706,10 +1736,10 @@ async fn compute_db_health(
 
             // Freshness: last close time should be near now (within ~2 intervals).
             let last_close = max_t_close.or_else(|| max_t.map(|t| t + interval_ms));
-            if let Some(lc) = last_close {
-                if lc < (now_ms - interval_ms.saturating_mul(2)) {
-                    ok = false;
-                }
+            if let Some(lc) = last_close
+                && lc < (now_ms - interval_ms.saturating_mul(2))
+            {
+                ok = false;
             }
 
             h.ready = ok;
@@ -1764,7 +1794,7 @@ async fn candle_manager_loop(cfg: Config, state: Arc<RwLock<State>>, db: DbWorke
                 let now_ms = now_ms_i64();
 
                 // Periodic prune (best-effort).
-                if prune_every % 6 == 0 {
+                if prune_every.is_multiple_of(6) {
                     // IMPORTANT:
                     // Prune must respect the largest requested candle_limit for each interval.
                     // Otherwise, longer-interval clients (e.g. 15m with 1500 lookback) can end up in a
@@ -1843,8 +1873,16 @@ async fn candle_manager_loop(cfg: Config, state: Arc<RwLock<State>>, db: DbWorke
                     let slack_bars = buffer_bars.min(50);
                     let min_required = (expected + slack_bars).max(lim_i64);
 
-                    let mut health =
-                        compute_db_health(&cfg, &sym, &interval, required_start, interval_ms, now_ms, min_required).await;
+                    let mut health = compute_db_health(DbHealthRequest {
+                        cfg: &cfg,
+                        symbol: &sym,
+                        interval: &interval,
+                        required_start_ms: required_start,
+                        interval_ms,
+                        now_ms,
+                        min_required_count: min_required,
+                    })
+                    .await;
                     let hk = (sym.clone(), interval.clone());
                     {
                         let mut st = state.write().await;
@@ -1933,17 +1971,17 @@ async fn candle_manager_loop(cfg: Config, state: Arc<RwLock<State>>, db: DbWorke
 
                     tokio::spawn(async move {
                         let _permit = sem2.acquire().await;
-                        let res = rest_backfill_range(
-                            &http2,
-                            &cfg2,
-                            &pacer2,
-                            &state2,
-                            &db2,
-                            &sym,
-                            &interval,
-                            start_ms2,
-                            end_ms2,
-                        )
+                        let res = rest_backfill_range(RestBackfillRange {
+                            http: &http2,
+                            cfg: &cfg2,
+                            pacer: &pacer2,
+                            state: &state2,
+                            db: &db2,
+                            symbol: &sym,
+                            interval: &interval,
+                            start_ms: start_ms2,
+                            end_ms: end_ms2,
+                        })
                         .await;
                         {
                             let mut st = state2.write().await;
@@ -2330,13 +2368,13 @@ async fn handle_ws_message(
             if bbo.len() < 2 {
                 return Ok(());
             }
-            let bid = bbo.get(0).and_then(|x| x.get("px")).and_then(parse_f64);
+            let bid = bbo.first().and_then(|x| x.get("px")).and_then(parse_f64);
             let ask = bbo.get(1).and_then(|x| x.get("px")).and_then(parse_f64);
             if let (Some(bid), Some(ask)) = (bid, ask) {
-                if cfg.bbo_snapshots_enable {
-                    if let Some(s) = bbo_sampler {
-                        s.on_bbo(&sym, bid, ask, now);
-                    }
+                if cfg.bbo_snapshots_enable
+                    && let Some(s) = bbo_sampler
+                {
+                    s.on_bbo(&sym, bid, ask, now);
                 }
                 let mut st = state.write().await;
                 let bbo_changed = st
@@ -2662,7 +2700,7 @@ async fn handle_client(
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(Vec::new);
+                    .unwrap_or_default();
 
                 let interval_raw =
                     get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
@@ -2768,12 +2806,11 @@ async fn handle_client(
                                 }
                             }
                         }
-                        if new_user.is_none() {
-                            if let Some(u) = c.user.as_ref() {
-                                if !u.is_empty() {
-                                    new_user = Some(u.clone());
-                                }
-                            }
+                        if new_user.is_none()
+                            && let Some(u) = c.user.as_ref()
+                            && !u.is_empty()
+                        {
+                            new_user = Some(u.clone());
                         }
                     }
 
@@ -2837,7 +2874,7 @@ async fn handle_client(
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(Vec::new);
+                    .unwrap_or_default();
                 let interval_raw =
                     get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
                 let interval = canonical_interval(&interval_raw);
@@ -2927,7 +2964,7 @@ async fn handle_client(
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(Vec::new);
+                    .unwrap_or_default();
                 let interval_raw =
                     get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
                 let interval = canonical_interval(&interval_raw);
@@ -2964,7 +3001,7 @@ async fn handle_client(
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(Vec::new);
+                    .unwrap_or_default();
                 let interval_raw =
                     get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
                 let interval = canonical_interval(&interval_raw);
@@ -3033,31 +3070,32 @@ async fn handle_client(
                     .to_ascii_uppercase();
                 let max_age = get_param_f64(&params, "max_age_s");
                 let st = state.read().await;
-                let px = st.mids.get(&sym).copied();
-                if px.is_none() {
-                    RpcResponse {
-                        id: req.id,
-                        ok: true,
-                        result: Some(Value::Null),
-                        error: None,
-                    }
-                } else if let Some(max_age) = max_age {
-                    let age = st
-                        .mids_updated_at
-                        .map(|t| t.elapsed().as_secs_f64())
-                        .unwrap_or(f64::INFINITY);
-                    if age > max_age {
-                        RpcResponse {
-                            id: req.id,
-                            ok: true,
-                            result: Some(Value::Null),
-                            error: None,
+                if let Some(px) = st.mids.get(&sym).copied() {
+                    if let Some(max_age) = max_age {
+                        let age = st
+                            .mids_updated_at
+                            .map(|t| t.elapsed().as_secs_f64())
+                            .unwrap_or(f64::INFINITY);
+                        if age > max_age {
+                            RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(Value::Null),
+                                error: None,
+                            }
+                        } else {
+                            RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(json!(px)),
+                                error: None,
+                            }
                         }
                     } else {
                         RpcResponse {
                             id: req.id,
                             ok: true,
-                            result: Some(json!(px.unwrap())),
+                            result: Some(json!(px)),
                             error: None,
                         }
                     }
@@ -3065,7 +3103,7 @@ async fn handle_client(
                     RpcResponse {
                         id: req.id,
                         ok: true,
-                        result: Some(json!(px.unwrap())),
+                        result: Some(Value::Null),
                         error: None,
                     }
                 }
@@ -3081,7 +3119,7 @@ async fn handle_client(
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(Vec::new);
+                    .unwrap_or_default();
                 let max_age = get_param_f64(&params, "max_age_s");
 
                 let st = state.read().await;
@@ -3104,7 +3142,7 @@ async fn handle_client(
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(Vec::new);
+                    .unwrap_or_default();
                 let max_age = get_param_f64(&params, "max_age_s");
                 let after_seq = get_param_u64(&params, "after_seq").unwrap_or(0);
                 let after_bbo_seq = get_param_u64(&params, "after_bbo_seq").unwrap_or(0);
@@ -3184,29 +3222,29 @@ async fn handle_client(
                     .to_ascii_uppercase();
                 let max_age = get_param_f64(&params, "max_age_s");
                 let st = state.read().await;
-                let bbo = st.bbo.get(&sym).copied();
-                if bbo.is_none() {
-                    RpcResponse {
-                        id: req.id,
-                        ok: true,
-                        result: Some(Value::Null),
-                        error: None,
-                    }
-                } else if let Some(max_age) = max_age {
-                    let age = st
-                        .bbo_updated_at
-                        .get(&sym)
-                        .map(|t| t.elapsed().as_secs_f64())
-                        .unwrap_or(f64::INFINITY);
-                    if age > max_age {
-                        RpcResponse {
-                            id: req.id,
-                            ok: true,
-                            result: Some(Value::Null),
-                            error: None,
+                if let Some((bid, ask)) = st.bbo.get(&sym).copied() {
+                    if let Some(max_age) = max_age {
+                        let age = st
+                            .bbo_updated_at
+                            .get(&sym)
+                            .map(|t| t.elapsed().as_secs_f64())
+                            .unwrap_or(f64::INFINITY);
+                        if age > max_age {
+                            RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(Value::Null),
+                                error: None,
+                            }
+                        } else {
+                            RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(json!([bid, ask])),
+                                error: None,
+                            }
                         }
                     } else {
-                        let (bid, ask) = bbo.unwrap();
                         RpcResponse {
                             id: req.id,
                             ok: true,
@@ -3215,11 +3253,10 @@ async fn handle_client(
                         }
                     }
                 } else {
-                    let (bid, ask) = bbo.unwrap();
                     RpcResponse {
                         id: req.id,
                         ok: true,
-                        result: Some(json!([bid, ask])),
+                        result: Some(Value::Null),
                         error: None,
                     }
                 }
@@ -3282,27 +3319,35 @@ async fn handle_client(
                 let st = state.read().await;
                 let key = (sym.clone(), interval.clone());
                 let q = st.candles.get(&key);
-                if q.is_none() || q.unwrap().is_empty() {
+                if let Some(q) = q {
+                    if let Some(last) = q.back() {
+                        let now_ms = now_ms_i64();
+                        let mut chosen = last;
+                        if let Some(tclose) = last.t_close
+                            && now_ms < (tclose - grace_ms)
+                            && q.len() >= 2
+                        {
+                            chosen = &q[q.len() - 2];
+                        }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(json!([chosen.t, chosen.t_close])),
+                            error: None,
+                        }
+                    } else {
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(json!([Value::Null, Value::Null])),
+                            error: None,
+                        }
+                    }
+                } else {
                     RpcResponse {
                         id: req.id,
                         ok: true,
                         result: Some(json!([Value::Null, Value::Null])),
-                        error: None,
-                    }
-                } else {
-                    let q = q.unwrap();
-                    let now_ms = now_ms_i64();
-                    let last = q.back().unwrap();
-                    let mut chosen = last;
-                    if let Some(tclose) = last.t_close {
-                        if now_ms < (tclose - grace_ms) && q.len() >= 2 {
-                            chosen = &q[q.len() - 2];
-                        }
-                    }
-                    RpcResponse {
-                        id: req.id,
-                        ok: true,
-                        result: Some(json!([chosen.t, chosen.t_close])),
                         error: None,
                     }
                 }
@@ -3313,10 +3358,10 @@ async fn handle_client(
                 let mut out: Vec<Value> = Vec::new();
                 while let Some(v) = st.user_fills.pop_front() {
                     out.push(v);
-                    if let Some(m) = max_items {
-                        if out.len() >= m {
-                            break;
-                        }
+                    if let Some(m) = max_items
+                        && out.len() >= m
+                    {
+                        break;
                     }
                 }
                 RpcResponse {
@@ -3332,10 +3377,10 @@ async fn handle_client(
                 let mut out: Vec<Value> = Vec::new();
                 while let Some(v) = st.order_updates.pop_front() {
                     out.push(v);
-                    if let Some(m) = max_items {
-                        if out.len() >= m {
-                            break;
-                        }
+                    if let Some(m) = max_items
+                        && out.len() >= m
+                    {
+                        break;
                     }
                 }
                 RpcResponse {
@@ -3351,10 +3396,10 @@ async fn handle_client(
                 let mut out: Vec<Value> = Vec::new();
                 while let Some(v) = st.user_fundings.pop_front() {
                     out.push(v);
-                    if let Some(m) = max_items {
-                        if out.len() >= m {
-                            break;
-                        }
+                    if let Some(m) = max_items
+                        && out.len() >= m
+                    {
+                        break;
                     }
                 }
                 RpcResponse {
@@ -3370,10 +3415,10 @@ async fn handle_client(
                 let mut out: Vec<Value> = Vec::new();
                 while let Some(v) = st.user_ledger_updates.pop_front() {
                     out.push(v);
-                    if let Some(m) = max_items {
-                        if out.len() >= m {
-                            break;
-                        }
+                    if let Some(m) = max_items
+                        && out.len() >= m
+                    {
+                        break;
                     }
                 }
                 RpcResponse {

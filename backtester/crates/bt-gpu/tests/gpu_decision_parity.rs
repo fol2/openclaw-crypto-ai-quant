@@ -1982,22 +1982,22 @@ fn test_signal_stoch_rsi_filter() {
 }
 
 #[test]
-fn test_signal_ave_confidence_upgrade() {
-    // AQC-1262: AVE upgrades confidence to High when ATR ratio exceeds threshold
+fn test_signal_ave_gate_stays_in_gate_phase() {
+    // AQC-1262: AVE remains part of gate evaluation, while Mode 1 keeps
+    // the volume-driven High-confidence upgrade.
     let src = get_decision_cuda_source();
 
-    // Find the Mode 1 section specifically
     let mode1_marker = "// Mode 1: Standard";
     let mode1_start = src.find(mode1_marker).expect("Mode 1 section must exist");
     let mode1_section = &src[mode1_start..];
 
     assert!(
-        mode1_section.contains("cfg.ave_enabled"),
-        "AVE must check ave_enabled in Mode 1"
+        src.contains("cfg.ave_enabled"),
+        "AVE must still be referenced in generated decision code"
     );
     assert!(
         mode1_section.contains("confidence = 2"),
-        "AVE must upgrade confidence to 2 (CONF_HIGH)"
+        "Mode 1 must still upgrade confidence to 2 (CONF_HIGH)"
     );
 }
 
@@ -3404,7 +3404,7 @@ fn test_pesc_no_prior_close_bypass() {
 
 #[test]
 fn test_pesc_elapsed_time_check() {
-    // AQC-1269: PESC compares elapsed time against cooldown
+    // AQC-1269: PESC compares elapsed milliseconds against cooldown
     let src = get_decision_cuda_source();
 
     let pesc_start = src
@@ -3413,12 +3413,12 @@ fn test_pesc_elapsed_time_check() {
     let pesc_section = &src[pesc_start..];
 
     assert!(
-        pesc_section.contains("elapsed < cooldown_sec"),
-        "PESC must block when elapsed < cooldown_sec"
+        pesc_section.contains("elapsed_ms < cooldown_ms"),
+        "PESC must block when elapsed_ms < cooldown_ms"
     );
     assert!(
-        pesc_section.contains("cooldown_mins * 60.0"),
-        "PESC must convert cooldown minutes to seconds"
+        pesc_section.contains("cooldown_mins * 60000.0"),
+        "PESC must convert cooldown minutes to milliseconds"
     );
 }
 
@@ -3427,14 +3427,14 @@ fn test_pesc_elapsed_time_check() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_config_round_trip_size_140_fields() {
-    // AQC-1270: Verify GpuComboConfig is 560 bytes = 140 x 4-byte fields.
+fn test_config_round_trip_size_141_fields() {
+    // AQC-1270: Verify GpuComboConfig is 564 bytes = 141 x 4-byte fields.
     // This ensures all fields are accounted for and none were accidentally
     // added or removed without updating the struct size assertion.
     assert_eq!(
         std::mem::size_of::<bt_gpu::buffers::GpuComboConfig>(),
-        560,
-        "GpuComboConfig must be exactly 560 bytes (140 x 4-byte fields)"
+        564,
+        "GpuComboConfig must be exactly 564 bytes (141 x 4-byte fields)"
     );
 }
 
@@ -7709,7 +7709,6 @@ struct MarketSnapshot {
     adx_slope: f64,
     atr: f64,
     avg_atr: f64,
-    atr_slope: f64,
     rsi: f64,
     stoch_k: f64,
     bb_width_ratio: f64,
@@ -7735,7 +7734,6 @@ impl MarketSnapshot {
             adx_slope: 1.5,
             atr: 1.5,
             avg_atr: 1.4,
-            atr_slope: 0.1,
             rsi: 57.0,
             stoch_k: 0.5,
             bb_width_ratio: 1.2,
@@ -7761,7 +7759,6 @@ impl MarketSnapshot {
             adx_slope: 1.5,
             atr: 1.5,
             avg_atr: 1.4,
-            atr_slope: 0.1,
             rsi: 42.0,
             stoch_k: 0.5,
             bb_width_ratio: 1.2,

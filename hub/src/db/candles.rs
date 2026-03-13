@@ -110,7 +110,8 @@ pub fn fetch_candles_range(
     };
 
     let mut stmt = conn.prepare(&sql)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|b| b.as_ref()).collect();
 
     let mut candles: Vec<Candle> = stmt
         .query_map(params_refs.as_slice(), |row| {
@@ -205,7 +206,7 @@ pub fn list_available_intervals(candles_dir: &std::path::Path) -> Vec<String> {
             }
         }
     }
-    intervals.sort_by(|a, b| interval_sort_key(a).cmp(&interval_sort_key(b)));
+    intervals.sort_by_key(|a| interval_sort_key(a));
     intervals
 }
 

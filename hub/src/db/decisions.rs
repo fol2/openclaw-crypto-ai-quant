@@ -46,6 +46,17 @@ pub struct DecisionLineage {
     pub duration_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DecisionListQuery<'a> {
+    pub symbol: Option<&'a str>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub event_type: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub limit: u32,
+    pub offset: u32,
+}
+
 // ── Queries ──────────────────────────────────────────────────────────────
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, HubError> {
@@ -63,13 +74,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, HubE
 /// List decision events with optional filters and pagination.
 pub fn list_decisions(
     conn: &Connection,
-    symbol: Option<&str>,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    event_type: Option<&str>,
-    status: Option<&str>,
-    limit: u32,
-    offset: u32,
+    query: DecisionListQuery<'_>,
 ) -> Result<(Vec<DecisionEvent>, i64), HubError> {
     if !has_table(conn, "decision_events") {
         return Ok((Vec::new(), 0));
@@ -83,23 +88,23 @@ pub fn list_decisions(
     let mut where_clauses: Vec<String> = Vec::new();
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    if let Some(sym) = symbol {
+    if let Some(sym) = query.symbol {
         where_clauses.push("symbol = ?".into());
         params_vec.push(Box::new(sym.trim().to_uppercase()));
     }
-    if let Some(s) = start_ms {
+    if let Some(s) = query.start_ms {
         where_clauses.push("timestamp_ms >= ?".into());
         params_vec.push(Box::new(s));
     }
-    if let Some(e) = end_ms {
+    if let Some(e) = query.end_ms {
         where_clauses.push("timestamp_ms <= ?".into());
         params_vec.push(Box::new(e));
     }
-    if let Some(et) = event_type {
+    if let Some(et) = query.event_type {
         where_clauses.push("event_type = ?".into());
         params_vec.push(Box::new(et.trim().to_string()));
     }
-    if let Some(st) = status {
+    if let Some(st) = query.status {
         where_clauses.push("status = ?".into());
         params_vec.push(Box::new(st.trim().to_string()));
     }
@@ -127,23 +132,23 @@ pub fn list_decisions(
     );
     // Rebuild params for data query
     let mut data_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    if let Some(sym) = symbol {
+    if let Some(sym) = query.symbol {
         data_params.push(Box::new(sym.trim().to_uppercase()));
     }
-    if let Some(s) = start_ms {
+    if let Some(s) = query.start_ms {
         data_params.push(Box::new(s));
     }
-    if let Some(e) = end_ms {
+    if let Some(e) = query.end_ms {
         data_params.push(Box::new(e));
     }
-    if let Some(et) = event_type {
+    if let Some(et) = query.event_type {
         data_params.push(Box::new(et.trim().to_string()));
     }
-    if let Some(st) = status {
+    if let Some(st) = query.status {
         data_params.push(Box::new(st.trim().to_string()));
     }
-    data_params.push(Box::new(limit));
-    data_params.push(Box::new(offset));
+    data_params.push(Box::new(query.limit));
+    data_params.push(Box::new(query.offset));
 
     let data_refs: Vec<&dyn rusqlite::types::ToSql> =
         data_params.iter().map(|p| p.as_ref()).collect();
@@ -183,14 +188,12 @@ pub fn decision_detail(conn: &Connection, decision_id: &str) -> Result<Option<Va
     };
 
     let decision = conn
-        .prepare(
-            &format!(
-                "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+        .prepare(&format!(
+            "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                 parent_decision_id, trade_id, triggered_by, action_taken,
                 rejection_reason, {cfg_col}, context_json
          FROM decision_events WHERE id = ?"
-            ),
-        )?
+        ))?
         .query_row(params![decision_id], |row| {
             Ok(DecisionEvent {
                 id: row.get(0)?,

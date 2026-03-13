@@ -3,6 +3,21 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::Value;
 
+type TradeJourneyRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    f64,
+    f64,
+    f64,
+    f64,
+    String,
+    String,
+    String,
+);
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,16 +105,6 @@ pub struct LastTrade {
     pub pnl: Option<f64>,
     pub reason: Option<String>,
     pub confidence: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BalanceInfo {
-    pub balance_source: String,
-    pub realised_usd: Option<f64>,
-    pub equity_est_usd: Option<f64>,
-    pub unreal_pnl_est_usd: f64,
-    pub est_close_fees_usd: f64,
-    pub fee_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -342,16 +347,18 @@ pub fn paginated_trades(
         format!("WHERE {}", where_clauses.join(" AND "))
     };
 
-    let filter_refs: Vec<&dyn rusqlite::types::ToSql> =
-        values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+    let filter_refs: Vec<&dyn rusqlite::types::ToSql> = values
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
 
     // Summary query (total count + aggregates)
     let summary_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(pnl), 0), COALESCE(SUM(ABS(fee_usd)), 0) FROM trades {where_sql}"
     );
     let mut stmt = conn.prepare(&summary_sql)?;
-    let (total, summary_pnl, summary_fees): (i64, f64, f64) =
-        stmt.query_row(filter_refs.as_slice(), |row| {
+    let (total, summary_pnl, summary_fees): (i64, f64, f64) = stmt
+        .query_row(filter_refs.as_slice(), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
 
@@ -362,8 +369,10 @@ pub fn paginated_trades(
          ORDER BY id DESC
          LIMIT ? OFFSET ?"
     );
-    let mut data_refs: Vec<&dyn rusqlite::types::ToSql> =
-        values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+    let mut data_refs: Vec<&dyn rusqlite::types::ToSql> = values
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
     data_refs.push(&limit);
     data_refs.push(&offset);
 
@@ -629,7 +638,7 @@ fn enrich_entry_reason(reason: &str, meta_json: &str) -> String {
         return reason.to_string();
     };
     let tags: Vec<&str> = tags.iter().filter_map(|v| v.as_str()).collect();
-    let has = |t: &str| tags.iter().any(|&s| s == t);
+    let has = |t: &str| tags.contains(&t);
 
     // Determine entry mode
     let mode = if has("mode:pullback") {
@@ -682,44 +691,43 @@ pub fn trade_journeys(
 
     let mut stmt = conn.prepare(sql)?;
 
-    let rows: Vec<(i64, String, String, String, String, f64, f64, f64, f64, String, String, String)> =
-        if let Some(sym) = symbol_filter {
-            stmt.query_map(params![sym], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    row.get::<_, f64>(5).unwrap_or(0.0),
-                    row.get::<_, f64>(6).unwrap_or(0.0),
-                    row.get::<_, f64>(7).unwrap_or(0.0),
-                    row.get::<_, f64>(8).unwrap_or(0.0),
-                    row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    row.get::<_, f64>(5).unwrap_or(0.0),
-                    row.get::<_, f64>(6).unwrap_or(0.0),
-                    row.get::<_, f64>(7).unwrap_or(0.0),
-                    row.get::<_, f64>(8).unwrap_or(0.0),
-                    row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
+    let rows: Vec<TradeJourneyRow> = if let Some(sym) = symbol_filter {
+        stmt.query_map(params![sym], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                row.get::<_, f64>(5).unwrap_or(0.0),
+                row.get::<_, f64>(6).unwrap_or(0.0),
+                row.get::<_, f64>(7).unwrap_or(0.0),
+                row.get::<_, f64>(8).unwrap_or(0.0),
+                row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                row.get::<_, f64>(5).unwrap_or(0.0),
+                row.get::<_, f64>(6).unwrap_or(0.0),
+                row.get::<_, f64>(7).unwrap_or(0.0),
+                row.get::<_, f64>(8).unwrap_or(0.0),
+                row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     // Walk chronologically, building journeys keyed by symbol.
     // current_size tracks live position size for weighted avg entry calc;
@@ -733,7 +741,9 @@ pub fn trade_journeys(
         std::collections::HashMap::new();
     let mut completed: Vec<TradeJourney> = Vec::new();
 
-    for (id, ts, symbol, pos_type, action, price, size, pnl, fee, reason, confidence, meta_json) in rows {
+    for (id, ts, symbol, pos_type, action, price, size, pnl, fee, reason, confidence, meta_json) in
+        rows
+    {
         let reason = enrich_entry_reason(&reason, &meta_json);
         let action_upper = action.to_uppercase();
         let sym_upper = symbol.to_uppercase();
@@ -1008,9 +1018,9 @@ pub fn range_metrics(conn: &Connection, from_iso: Option<&str>) -> Result<RangeM
             }
         }
         // Peak balance
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT MAX(balance) FROM trades WHERE timestamp >= ? AND balance IS NOT NULL",
-        ) {
+        if let Ok(mut stmt) = conn
+            .prepare("SELECT MAX(balance) FROM trades WHERE timestamp >= ? AND balance IS NOT NULL")
+        {
             if let Ok(b) = stmt.query_row(params![ts], |row| row.get::<_, Option<f64>>(0)) {
                 metrics.peak_balance = b;
             }
@@ -1022,18 +1032,18 @@ pub fn range_metrics(conn: &Connection, from_iso: Option<&str>) -> Result<RangeM
             }
         }
         // Fees
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT SUM(COALESCE(fee_usd, 0)) FROM trades WHERE timestamp >= ?",
-        ) {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT SUM(COALESCE(fee_usd, 0)) FROM trades WHERE timestamp >= ?")
+        {
             if let Ok(f) = stmt.query_row(params![ts], |row| row.get::<_, Option<f64>>(0)) {
                 metrics.fees_usd = f.unwrap_or(0.0);
             }
         }
     } else {
         // All-time: no lower bound
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT balance FROM trades WHERE balance IS NOT NULL ORDER BY id ASC LIMIT 1",
-        ) {
+        if let Ok(mut stmt) = conn
+            .prepare("SELECT balance FROM trades WHERE balance IS NOT NULL ORDER BY id ASC LIMIT 1")
+        {
             if let Ok(b) = stmt.query_row([], |row| row.get::<_, f64>(0)) {
                 metrics.start_balance = Some(b);
             }
@@ -1045,9 +1055,9 @@ pub fn range_metrics(conn: &Connection, from_iso: Option<&str>) -> Result<RangeM
                 metrics.end_balance = Some(b);
             }
         }
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT MAX(balance) FROM trades WHERE balance IS NOT NULL",
-        ) {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT MAX(balance) FROM trades WHERE balance IS NOT NULL")
+        {
             if let Ok(b) = stmt.query_row([], |row| row.get::<_, Option<f64>>(0)) {
                 metrics.peak_balance = b;
             }
@@ -1278,12 +1288,10 @@ pub fn metrics_counters(conn: &Connection) -> Result<Value, HubError> {
                 counters.insert("fills_total".into(), serde_json::json!(n));
             }
         }
-    } else {
-        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades") {
-            if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
-                counters.insert("orders_total".into(), serde_json::json!(n));
-                counters.insert("fills_total".into(), serde_json::json!(n));
-            }
+    } else if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades") {
+        if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
+            counters.insert("orders_total".into(), serde_json::json!(n));
+            counters.insert("fills_total".into(), serde_json::json!(n));
         }
     }
 

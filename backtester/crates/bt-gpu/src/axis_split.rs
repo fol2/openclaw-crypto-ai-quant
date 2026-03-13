@@ -227,7 +227,10 @@ mod tests {
             seen.push((en, x));
         }
         seen.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        assert_eq!(seen, vec![(0.0, 10.0), (1.0, 10.0), (1.0, 20.0), (1.0, 30.0)]);
+        assert_eq!(
+            seen,
+            vec![(0.0, 10.0), (1.0, 10.0), (1.0, 20.0), (1.0, 30.0)]
+        );
     }
 
     #[test]

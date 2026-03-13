@@ -271,18 +271,4 @@ impl SidecarClient {
                 .unwrap_or(false),
         })
     }
-
-    /// Get a single mid price.
-    pub async fn get_mid(&self, symbol: &str) -> Result<Option<f64>, String> {
-        let result = self
-            .rpc(
-                "get_mid",
-                serde_json::json!({
-                    "symbol": symbol.to_uppercase(),
-                    "max_age_s": null
-                }),
-            )
-            .await?;
-        Ok(result.as_f64())
-    }
 }

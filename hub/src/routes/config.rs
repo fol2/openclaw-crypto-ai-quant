@@ -42,13 +42,6 @@ pub struct DiffQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PromoteLiveBody {
-    pub paper_mode: Option<String>,
-    pub config_id: Option<String>,
-    pub dry_run: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct RollbackLiveBody {
     pub steps: Option<u32>,
     pub reason: Option<String>,
@@ -125,15 +118,6 @@ fn ensure_admin_actions_enabled(state: &AppState) -> Result<(), HubError> {
         Err(HubError::Forbidden(
             "admin actions disabled (set AIQ_MONITOR_ADMIN_ACTIONS_ENABLE=1)".to_string(),
         ))
-    }
-}
-
-fn normalize_paper_mode(raw: &str) -> Option<String> {
-    match raw.trim().to_lowercase().as_str() {
-        "paper" | "paper1" => Some("paper1".to_string()),
-        "paper2" => Some("paper2".to_string()),
-        "paper3" => Some("paper3".to_string()),
-        _ => None,
     }
 }
 
@@ -430,9 +414,9 @@ async fn get_config_history(
                 let modified = meta
                     .modified()
                     .ok()
-                    .and_then(|t| {
+                    .map(|t| {
                         let dt: chrono::DateTime<chrono::Utc> = t.into();
-                        Some(dt.to_rfc3339())
+                        dt.to_rfc3339()
                     })
                     .unwrap_or_default();
                 entries.push(BackupEntry {
@@ -562,7 +546,7 @@ async fn get_config_files(
 /// POST /api/config/actions/promote-live — Promote a selected paper config to live.
 async fn post_promote_live(
     State(_state): State<Arc<AppState>>,
-    Json(_body): Json<PromoteLiveBody>,
+    Json(_body): Json<Value>,
 ) -> Result<Json<Value>, HubError> {
     Err(HubError::Forbidden(
         "live promotion tooling was retired with the zero-Python repository cutover".into(),

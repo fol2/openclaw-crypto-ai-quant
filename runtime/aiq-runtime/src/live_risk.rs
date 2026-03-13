@@ -481,11 +481,9 @@ impl LiveRiskManager {
         match self.equity_peak {
             None => {
                 self.equity_peak = Some(equity);
-                return;
             }
             Some(peak) if equity > peak => {
                 self.equity_peak = Some(equity);
-                return;
             }
             Some(peak) if peak > 0.0 => {
                 let drawdown_pct = ((peak - equity).max(0.0) / peak) * 100.0;

@@ -597,7 +597,7 @@ async fn api_marks(
     // Fetch mid price and compute unrealised PnL
     let mid = state
         .sidecar
-        .get_mids(&[sym.clone()])
+        .get_mids(std::slice::from_ref(&sym))
         .await
         .ok()
         .and_then(|s| s.mids.get(&sym).copied());

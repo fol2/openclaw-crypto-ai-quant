@@ -292,7 +292,6 @@ fn maybe_debug_stop_snapshot(
 /// Mirrors `exits/trailing.rs::compute_trailing`.
 struct ComputeTrailingInput<'a> {
     side: PositionSide,
-    entry: f64,
     atr: f64,
     confidence: Option<u8>,
     current_trailing: Option<f64>,
@@ -304,7 +303,6 @@ struct ComputeTrailingInput<'a> {
 fn compute_trailing(input: ComputeTrailingInput<'_>) -> Option<f64> {
     let ComputeTrailingInput {
         side,
-        entry,
         atr,
         confidence,
         current_trailing,
@@ -430,10 +428,9 @@ fn check_tp(
                     };
                 }
                 // pct == 0 or >= 1.0 → fall through to full close
+            } else if params.tp_partial_atr_mult <= 0.0 {
+                return KernelExitResult::Hold;
             } else {
-                if params.tp_partial_atr_mult <= 0.0 {
-                    return KernelExitResult::Hold;
-                }
                 // Fall through to check full TP
             }
         } else {
@@ -1018,7 +1015,6 @@ pub fn evaluate_exits_with_diagnostics(
     // ── 2. Trailing Stop ────────────────────────────────────────────────
     let new_tsl = compute_trailing(ComputeTrailingInput {
         side: pos.side,
-        entry,
         atr,
         confidence: pos.confidence,
         current_trailing: pos.trailing_sl,
@@ -1383,13 +1379,6 @@ mod tests {
         // Base SL = 100 - 2.0 = 98.0; final = max(98, 100.05) = 100.05
         // close = 100.0 → below 100.05 → trigger SL
         let mut pos = long_pos(100.0);
-        let snap = default_snap(100.0);
-        // We need to set snap so that close triggers breakeven but also SL.
-        // Actually breakeven_start needs profit >= 0.7 ATR. At close=100.0, profit=0.
-        // Let me use a different approach: snap shows price dropped to 100.0 AFTER
-        // having been at 100.8 — but we only see current close.
-        // Breakeven fires when (snap.close - entry) >= be_start. At 100.0, diff = 0.
-        // So breakeven won't fire. Need close >= 100.7 for breakeven.
         let snap2 = default_snap(100.04); // profit = 0.04, below 0.7 ATR
         let params = ExitParams {
             enable_partial_tp: false,
@@ -1905,7 +1894,11 @@ mod tests {
         // TP = entry + atr * tp_atr_mult = 100 + 1.0*4.0 = 104
         assert!((bounds.upper_full - 104.0).abs() < 0.01);
         // SL ~98 (no trailing at this profit level), must be below entry
-        assert!(bounds.lower_full < 100.0, "lower_full={}", bounds.lower_full);
+        assert!(
+            bounds.lower_full < 100.0,
+            "lower_full={}",
+            bounds.lower_full
+        );
         // Partial TP: tp_partial_atr_mult=0 → falls back to tp_atr_mult=4.0 → 104
         assert!(bounds.upper_partial.is_some());
     }
@@ -1923,7 +1916,11 @@ mod tests {
         // TP = entry - atr * tp_atr_mult = 100 - 4.0 = 96
         assert!((bounds.upper_full - 96.0).abs() < 0.01);
         // SL = entry + atr * sl_atr_mult = 100 + 2.0 = 102 (no trailing)
-        assert!(bounds.lower_full > 100.0, "lower_full={}", bounds.lower_full);
+        assert!(
+            bounds.lower_full > 100.0,
+            "lower_full={}",
+            bounds.lower_full
+        );
     }
 
     #[test]
@@ -1936,7 +1933,11 @@ mod tests {
         let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
         let bounds = eval.exit_bounds.expect("bounds should be Some");
         // lower_full = max(sl_price, 99.5); sl_price ~98.0 → lower_full ~99.5
-        assert!(bounds.lower_full >= 99.0, "trailing should raise lower_full, got {}", bounds.lower_full);
+        assert!(
+            bounds.lower_full >= 99.0,
+            "trailing should raise lower_full, got {}",
+            bounds.lower_full
+        );
     }
 
     #[test]
@@ -1948,7 +1949,10 @@ mod tests {
         let params = default_params();
         let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
         let bounds = eval.exit_bounds.expect("bounds should be Some");
-        assert!(bounds.upper_partial.is_none(), "tp1_taken → upper_partial should be None");
+        assert!(
+            bounds.upper_partial.is_none(),
+            "tp1_taken → upper_partial should be None"
+        );
     }
 
     #[test]
@@ -1959,7 +1963,9 @@ mod tests {
         let params = default_params();
         let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
         assert!(matches!(eval.result, KernelExitResult::FullClose { .. }));
-        let bounds = eval.exit_bounds.expect("bounds should be present even on SL hit");
+        let bounds = eval
+            .exit_bounds
+            .expect("bounds should be present even on SL hit");
         assert!(bounds.upper_full > 100.0);
         assert!(bounds.lower_full < 100.0);
     }
@@ -1983,6 +1989,9 @@ mod tests {
         params.enable_partial_tp = false;
         let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
         let bounds = eval.exit_bounds.expect("bounds should be Some");
-        assert!(bounds.upper_partial.is_none(), "partial TP disabled → upper_partial None");
+        assert!(
+            bounds.upper_partial.is_none(),
+            "partial TP disabled → upper_partial None"
+        );
     }
 }

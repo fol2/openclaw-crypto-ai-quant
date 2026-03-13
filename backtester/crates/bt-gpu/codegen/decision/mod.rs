@@ -43,6 +43,8 @@ pub fn render_all_decision(source_hashes_json: Option<&str>) -> String {
     // Sizing & Cooldowns (Phase 3)
     out.push_str(&decision_templates::compute_entry_size_codegen());
     out.push_str(&decision_templates::is_pesc_blocked_codegen());
+    out.push_str(&decision_templates::check_entry_cooldown_codegen());
+    out.push_str(&decision_templates::check_exit_cooldown_codegen());
 
     out
 }

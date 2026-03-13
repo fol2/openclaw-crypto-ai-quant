@@ -171,25 +171,13 @@ impl Default for StochRsiThresholdsView {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ThresholdsView {
     pub entry: EntryThresholdsView,
     pub ranging: RangingThresholdsView,
     pub anomaly: AnomalyThresholdsView,
     pub tp_and_momentum: TpAndMomentumThresholdsView,
     pub stoch_rsi: StochRsiThresholdsView,
-}
-
-impl Default for ThresholdsView {
-    fn default() -> Self {
-        Self {
-            entry: EntryThresholdsView::default(),
-            ranging: RangingThresholdsView::default(),
-            anomaly: AnomalyThresholdsView::default(),
-            tp_and_momentum: TpAndMomentumThresholdsView::default(),
-            stoch_rsi: StochRsiThresholdsView::default(),
-        }
-    }
 }
 
 pub trait SignalConfigLike {

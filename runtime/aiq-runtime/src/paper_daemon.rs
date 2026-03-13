@@ -1046,14 +1046,11 @@ impl Drop for SignalHandlerGuard {
 }
 
 fn install_signal_handlers(stop_flag: &Arc<AtomicBool>) -> Result<SignalHandlerGuard> {
-    let mut ids = Vec::new();
-    ids.push(
+    let ids = vec![
         flag::register(SIGINT, Arc::clone(stop_flag))
             .context("failed to install paper daemon SIGINT handler")?,
-    );
-    ids.push(
         flag::register(SIGTERM, Arc::clone(stop_flag))
             .context("failed to install paper daemon SIGTERM handler")?,
-    );
+    ];
     Ok(SignalHandlerGuard { ids })
 }

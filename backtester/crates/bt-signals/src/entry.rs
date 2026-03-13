@@ -24,7 +24,7 @@ use crate::{
 /// * `gates`              - Pre-computed gate result from [`super::gates::check_gates`].
 /// * `cfg`                - Signal-relevant strategy config view.
 /// * `ema_slow_slope_pct` - Pre-computed EMA-slow slope used by slow-drift mode:
-///                          `(ema_slow_now - ema_slow_prev_N) / close_now`.
+///   `(ema_slow_now - ema_slow_prev_N) / close_now`.
 pub fn generate_signal<S, C>(
     snap: &S,
     gates: &GateResult,
@@ -137,23 +137,24 @@ fn try_standard_entry(
         }
     }
     // --- SHORT (elif in Python — only reached if LONG branch did not enter) ---
-    else if gates.bearish_alignment && snap.close < snap.ema_fast {
-        if snap.rsi < gates.rsi_short_limit {
-            let macd_ok = check_macd_short(macd_mode, snap.macd_hist, snap.prev_macd_hist);
-            if macd_ok {
-                let stoch_ok = if gates.stoch_rsi_active {
-                    gates.stoch_k > stoch_thr.block_short_if_k_lt
+    else if gates.bearish_alignment
+        && snap.close < snap.ema_fast
+        && snap.rsi < gates.rsi_short_limit
+    {
+        let macd_ok = check_macd_short(macd_mode, snap.macd_hist, snap.prev_macd_hist);
+        if macd_ok {
+            let stoch_ok = if gates.stoch_rsi_active {
+                gates.stoch_k > stoch_thr.block_short_if_k_lt
+            } else {
+                true
+            };
+            if stoch_ok && gates.btc_ok_short {
+                let conf = if snap.volume > snap.vol_sma * high_conf_mult {
+                    Confidence::High
                 } else {
-                    true
+                    Confidence::Medium
                 };
-                if stoch_ok && gates.btc_ok_short {
-                    let conf = if snap.volume > snap.vol_sma * high_conf_mult {
-                        Confidence::High
-                    } else {
-                        Confidence::Medium
-                    };
-                    return Some((Signal::Sell, conf));
-                }
+                return Some((Signal::Sell, conf));
             }
         }
     }

@@ -397,7 +397,8 @@ fn within_abs_or_rel(delta_abs: f64, lhs: f64, rhs: f64, abs_eps: f64, rel_eps: 
 
 /// Read only the `balance` field from a runtime snapshot JSON file.
 fn read_balance_from_json(path: &str) -> Result<f64, Box<dyn std::error::Error>> {
-    let data = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
     let json: serde_json::Value =
         serde_json::from_str(&data).map_err(|e| format!("Invalid JSON in {:?}: {}", path, e))?;
     let balance = json
@@ -466,14 +467,13 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let mut base_cfg = bt_core::config::load_config_checked(&args.config, None, false).map_err(
-        |e| {
+    let mut base_cfg =
+        bt_core::config::load_config_checked(&args.config, None, false).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("[axis-parity] {e}"),
             )
-        },
-    )?;
+        })?;
     let spec = bt_core::sweep::load_sweep_spec(&args.sweep_spec)
         .map_err(|e| format!("failed to load sweep spec {}: {e}", args.sweep_spec))?;
 
@@ -531,7 +531,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 args.from_ts,
                 args.to_ts,
             )
-                .map_err(|e| format!("failed to load entry candles from {db}: {e}"))?;
+            .map_err(|e| format!("failed to load entry candles from {db}: {e}"))?;
             if loaded.is_empty() {
                 return Err(format!("no entry candles loaded from {db}").into());
             }
@@ -558,12 +558,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let funding_rates: Option<FundingRateData> = match args.funding_db.as_ref() {
         Some(fdb) => {
-            let loaded = bt_data::sqlite_loader::load_funding_rates_filtered(
-                fdb,
-                args.from_ts,
-                args.to_ts,
-            )
-            .map_err(|e| format!("failed to load funding rates from {fdb}: {e}"))?;
+            let loaded =
+                bt_data::sqlite_loader::load_funding_rates_filtered(fdb, args.from_ts, args.to_ts)
+                    .map_err(|e| format!("failed to load funding rates from {fdb}: {e}"))?;
             Some(loaded)
         }
         None => None,
@@ -573,10 +570,10 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         None => spec.initial_balance,
     };
     if !base_balance.is_finite() || base_balance <= 0.0 {
-        return Err(
-            format!("invalid effective initial balance {base_balance}; must be finite and > 0")
-                .into(),
-        );
+        return Err(format!(
+            "invalid effective initial balance {base_balance}; must be finite and > 0"
+        )
+        .into());
     }
 
     if let Some(parent) = args.output.parent() {
@@ -633,7 +630,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.from_ts,
         args.to_ts,
     )
-        .map_err(|e| format!("gpu preflight failed before axis loop: {e}"))?;
+    .map_err(|e| format!("gpu preflight failed before axis loop: {e}"))?;
 
     let baseline_cpu = run_cpu_single(
         &base_cfg,
@@ -673,9 +670,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.pnl_eps,
         args.pnl_rel_eps,
     );
-    let baseline_pass = baseline_trade_delta == 0
-        && baseline_balance_ok
-        && baseline_pnl_ok;
+    let baseline_pass = baseline_trade_delta == 0 && baseline_balance_ok && baseline_pnl_ok;
     let baseline_cause = if baseline_pass {
         None
     } else if baseline_trade_delta != 0 {
@@ -887,9 +882,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 args.pnl_rel_eps,
             );
 
-            let pass = trade_delta == 0
-                && balance_ok
-                && pnl_ok;
+            let pass = trade_delta == 0 && balance_ok && pnl_ok;
 
             let cause = if pass {
                 None
@@ -1050,8 +1043,8 @@ fn run_cpu_single(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<CompactResult, Box<dyn std::error::Error>> {
-    let rows = bt_core::sweep::run_sweep(
-        cfg,
+    let rows = bt_core::sweep::run_sweep(bt_core::sweep::RunSweepInput {
+        base_cfg: cfg,
         spec,
         candles,
         exit_candles,
@@ -1059,7 +1052,7 @@ fn run_cpu_single(
         funding_rates,
         from_ts,
         to_ts,
-    );
+    });
     let first = rows
         .first()
         .ok_or("cpu sweep returned no rows for single config")?;
@@ -1213,16 +1206,15 @@ fn run_gpu_single_with_trace(
     trace_symbol_idx: u32,
 ) -> Result<(CompactResult, GpuComboState, Vec<String>), Box<dyn std::error::Error>> {
     with_trace_env(0, trace_symbol_idx, || {
-        let (rows, states, symbols) =
-            run_gpu_sweep_with_states(
-                candles,
-                cfg,
-                spec,
-                funding_rates,
-                sub_candles,
-                from_ts,
-                to_ts,
-            );
+        let (rows, states, symbols) = run_gpu_sweep_with_states(
+            candles,
+            cfg,
+            spec,
+            funding_rates,
+            sub_candles,
+            from_ts,
+            to_ts,
+        );
         let first = rows.first().ok_or(
             "gpu trace sweep returned no rows for single config. \
 likely no CUDA-capable device (or driver visibility failure) in this runtime; \

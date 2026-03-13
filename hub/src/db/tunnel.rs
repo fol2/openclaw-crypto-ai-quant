@@ -47,7 +47,8 @@ pub fn fetch_tunnel(
     sql.push_str(" ORDER BY ts_ms ASC LIMIT ?");
     param_values.push(Box::new(limit));
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params_ref.as_slice(), |row| {

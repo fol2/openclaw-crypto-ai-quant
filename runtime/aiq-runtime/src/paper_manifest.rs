@@ -215,20 +215,20 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         ));
     }
 
-    let (resume, start_step_close_ts_ms) = resolve_resume_state(
-        &mut warnings,
-        &runtime_bootstrap,
-        &effective_config,
-        input.live,
-        &paper_db,
-        &candles_db,
-        &interval_symbols,
+    let resume_input = ResumeStateInput {
+        runtime_bootstrap: &runtime_bootstrap,
+        effective_config: &effective_config,
+        live: input.live,
+        paper_db: &paper_db,
+        candles_db: &candles_db,
+        explicit_symbols: &interval_symbols,
         watch_symbols_file_configured,
         watch_symbols_file,
-        &btc_symbol,
+        btc_symbol: &btc_symbol,
         requested_start_step_close_ts_ms,
         bootstrap_from_latest_common_close,
-    );
+    };
+    let (resume, start_step_close_ts_ms) = resolve_resume_state(&mut warnings, &resume_input);
 
     let mut daemon_command = vec![
         "aiq-runtime".to_string(),
@@ -332,19 +332,23 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     })
 }
 
-fn resolve_resume_state(
-    warnings: &mut Vec<String>,
-    runtime_bootstrap: &RuntimeBootstrap,
-    effective_config: &PaperEffectiveConfig,
+struct ResumeStateInput<'a> {
+    runtime_bootstrap: &'a RuntimeBootstrap,
+    effective_config: &'a PaperEffectiveConfig,
     live: bool,
-    paper_db: &Path,
-    candles_db: &Path,
-    explicit_symbols: &[String],
+    paper_db: &'a Path,
+    candles_db: &'a Path,
+    explicit_symbols: &'a [String],
     watch_symbols_file_configured: bool,
     watch_symbols_file: bool,
-    btc_symbol: &str,
+    btc_symbol: &'a str,
     requested_start_step_close_ts_ms: Option<i64>,
     bootstrap_from_latest_common_close: bool,
+}
+
+fn resolve_resume_state(
+    warnings: &mut Vec<String>,
+    input: &ResumeStateInput<'_>,
 ) -> (PaperManifestResumeState, Option<i64>) {
     let mut resume = PaperManifestResumeState {
         launch_ready: false,
@@ -355,21 +359,21 @@ fn resolve_resume_state(
         next_due_step_close_ts_ms: None,
     };
 
-    if !paper_db.exists() || !candles_db.exists() {
+    if !input.paper_db.exists() || !input.candles_db.exists() {
         return (resume, None);
     }
-    if !watch_symbols_file_configured {
+    if !input.watch_symbols_file_configured {
         return (resume, None);
     }
 
     let Some(context) = (match paper_loop::inspect_loop_context(
-        runtime_bootstrap,
-        effective_config,
-        live,
-        paper_db,
-        candles_db,
-        explicit_symbols,
-        btc_symbol,
+        input.runtime_bootstrap,
+        input.effective_config,
+        input.live,
+        input.paper_db,
+        input.candles_db,
+        input.explicit_symbols,
+        input.btc_symbol,
     ) {
         Ok(context) => context,
         Err(err) => {
@@ -379,15 +383,15 @@ fn resolve_resume_state(
             return (resume, None);
         }
     }) else {
-        resume.launch_ready = watch_symbols_file;
+        resume.launch_ready = input.watch_symbols_file;
         resume.launch_state = PaperManifestLaunchState::IdleNoSymbols;
-        if !watch_symbols_file {
+        if !input.watch_symbols_file {
             warnings.push(
                 "paper manifest resolved no active symbols or open paper positions; launch would fail closed without watch-symbols-file"
                     .to_string(),
             );
         }
-        return (resume, requested_start_step_close_ts_ms);
+        return (resume, input.requested_start_step_close_ts_ms);
     };
 
     resume.active_symbols = context.active_symbols.clone();
@@ -425,13 +429,17 @@ fn resolve_resume_state(
             (resume, None)
         }
         None => {
-            let effective_start_step_close_ts_ms = requested_start_step_close_ts_ms.or_else(|| {
-                bootstrap_from_latest_common_close.then_some(context.latest_common_close_ts_ms)
-            });
+            let effective_start_step_close_ts_ms =
+                input.requested_start_step_close_ts_ms.or_else(|| {
+                    input
+                        .bootstrap_from_latest_common_close
+                        .then_some(context.latest_common_close_ts_ms)
+                });
             if effective_start_step_close_ts_ms.is_some() {
                 resume.launch_ready = true;
                 resume.launch_state = PaperManifestLaunchState::BootstrapReady;
-                if requested_start_step_close_ts_ms.is_none() && bootstrap_from_latest_common_close
+                if input.requested_start_step_close_ts_ms.is_none()
+                    && input.bootstrap_from_latest_common_close
                 {
                     warnings.push(
                         "paper manifest derived start-step-close-ts-ms from the latest common close because AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE is enabled"
@@ -486,7 +494,7 @@ fn resolve_symbols(cli_symbols: &[String]) -> Vec<String> {
     }
     let mut symbols = raw
         .into_iter()
-        .filter_map(|symbol| normalise_symbol(symbol))
+        .filter_map(normalise_symbol)
         .collect::<Vec<_>>();
     symbols.sort();
     symbols.dedup();

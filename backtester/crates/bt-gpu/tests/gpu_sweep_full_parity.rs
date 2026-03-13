@@ -1546,7 +1546,7 @@ fn sub_entry_margin_cap_uses_full_precision_pct() {
     let rounded_count = kernel_src.matches(rounded_expr).count();
 
     assert_eq!(
-        full_precision_count, 3,
+        full_precision_count, 4,
         "Expected full-precision max_total_margin_pct in sub-entry/add/main-entry paths, found {}",
         full_precision_count
     );

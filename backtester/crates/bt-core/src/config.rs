@@ -496,7 +496,7 @@ impl Default for StochRsiThresholds {
 // Thresholds (parent)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct ThresholdsConfig {
     pub entry: EntryThresholds,
@@ -504,18 +504,6 @@ pub struct ThresholdsConfig {
     pub anomaly: AnomalyThresholds,
     pub tp_and_momentum: TpAndMomentumThresholds,
     pub stoch_rsi: StochRsiThresholds,
-}
-
-impl Default for ThresholdsConfig {
-    fn default() -> Self {
-        Self {
-            entry: EntryThresholds::default(),
-            ranging: RangingThresholds::default(),
-            anomaly: AnomalyThresholds::default(),
-            tp_and_momentum: TpAndMomentumThresholds::default(),
-            stoch_rsi: StochRsiThresholds::default(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +562,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct PipelineProfileConfig {
     /// Stable ranker identifier used by the Rust runtime registry.
@@ -585,17 +573,6 @@ pub struct PipelineProfileConfig {
     pub enabled_stages: Vec<String>,
     /// Optional explicit stage block-list removals.
     pub disabled_stages: Vec<String>,
-}
-
-impl Default for PipelineProfileConfig {
-    fn default() -> Self {
-        Self {
-            ranker: String::new(),
-            stage_order: Vec::new(),
-            enabled_stages: Vec::new(),
-            disabled_stages: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -620,7 +597,7 @@ impl Default for PipelineConfig {
 // Top-level strategy config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct StrategyConfig {
     pub trade: TradeConfig,
@@ -631,21 +608,6 @@ pub struct StrategyConfig {
     pub engine: EngineConfig,
     pub runtime: RuntimeConfig,
     pub pipeline: PipelineConfig,
-}
-
-impl Default for StrategyConfig {
-    fn default() -> Self {
-        Self {
-            trade: TradeConfig::default(),
-            indicators: IndicatorsConfig::default(),
-            filters: FiltersConfig::default(),
-            market_regime: MarketRegimeConfig::default(),
-            thresholds: ThresholdsConfig::default(),
-            engine: EngineConfig::default(),
-            runtime: RuntimeConfig::default(),
-            pipeline: PipelineConfig::default(),
-        }
-    }
 }
 
 impl StrategyConfig {
@@ -1211,8 +1173,12 @@ pub fn materialise_runtime_document(
             if symbol.is_empty() {
                 continue;
             }
-            let symbol_cfg =
-                load_config_document_checked(document, Some(symbol.as_str()), is_live, strategy_mode)?;
+            let symbol_cfg = load_config_document_checked(
+                document,
+                Some(symbol.as_str()),
+                is_live,
+                strategy_mode,
+            )?;
             materialised_symbols.insert(
                 serde_yaml::Value::String(symbol.to_ascii_uppercase()),
                 strategy_config_to_yaml_value(&symbol_cfg),
@@ -1278,6 +1244,7 @@ pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> Stra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_defaults_roundtrip() {
@@ -1333,21 +1300,21 @@ mod tests {
         deep_merge_yaml_value_python_compat(&mut base, &overlay);
         let m = base.as_mapping().unwrap();
         assert_eq!(
-            m.get(&serde_yaml::Value::String("a".into()))
+            m.get(serde_yaml::Value::String("a".into()))
                 .unwrap()
                 .as_i64()
                 .unwrap(),
             1
         );
         assert_eq!(
-            m.get(&serde_yaml::Value::String("b".into()))
+            m.get(serde_yaml::Value::String("b".into()))
                 .unwrap()
                 .as_i64()
                 .unwrap(),
             99
         );
         assert_eq!(
-            m.get(&serde_yaml::Value::String("c".into()))
+            m.get(serde_yaml::Value::String("c".into()))
                 .unwrap()
                 .as_i64()
                 .unwrap(),
@@ -1366,13 +1333,13 @@ mod tests {
         let trade = base
             .as_mapping()
             .unwrap()
-            .get(&serde_yaml::Value::String("trade".into()))
+            .get(serde_yaml::Value::String("trade".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         assert_eq!(
             trade
-                .get(&serde_yaml::Value::String("leverage".into()))
+                .get(serde_yaml::Value::String("leverage".into()))
                 .unwrap()
                 .as_f64()
                 .unwrap(),
@@ -1381,7 +1348,7 @@ mod tests {
         // sl_atr_mult should be preserved from base.
         assert_eq!(
             trade
-                .get(&serde_yaml::Value::String("sl_atr_mult".into()))
+                .get(serde_yaml::Value::String("sl_atr_mult".into()))
                 .unwrap()
                 .as_f64()
                 .unwrap(),

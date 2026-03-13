@@ -233,13 +233,15 @@ pub fn run_daemon(input: LiveDaemonInput<'_>) -> Result<LiveDaemonReport> {
             &input,
             &lock_path,
             started_at_ms,
-            None,
-            last_step_close_ts_ms,
-            last_fill_cursor_ms,
-            &[],
-            &[],
-            None,
-            false,
+            LiveStatusContext {
+                latest_common_close_ts_ms: None,
+                last_step_close_ts_ms,
+                last_fill_cursor_ms,
+                warnings: &[],
+                errors: &[],
+                last_cycle: None,
+                stopped: false,
+            },
         ),
     )?;
 
@@ -318,13 +320,15 @@ pub fn run_daemon(input: LiveDaemonInput<'_>) -> Result<LiveDaemonReport> {
                     &input,
                     &lock_path,
                     started_at_ms,
-                    Some(latest_common_close_ts_ms),
-                    last_step_close_ts_ms,
-                    last_fill_cursor_ms,
-                    &warnings,
-                    &errors,
-                    last_cycle.as_ref(),
-                    false,
+                    LiveStatusContext {
+                        latest_common_close_ts_ms: Some(latest_common_close_ts_ms),
+                        last_step_close_ts_ms,
+                        last_fill_cursor_ms,
+                        warnings: &warnings,
+                        errors: &errors,
+                        last_cycle: last_cycle.as_ref(),
+                        stopped: false,
+                    },
                 ),
             )?;
             if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
@@ -376,13 +380,15 @@ pub fn run_daemon(input: LiveDaemonInput<'_>) -> Result<LiveDaemonReport> {
                 &input,
                 &lock_path,
                 started_at_ms,
-                Some(latest_common_close_ts_ms),
-                last_step_close_ts_ms,
-                last_fill_cursor_ms,
-                &warnings,
-                &errors,
-                last_cycle.as_ref(),
-                false,
+                LiveStatusContext {
+                    latest_common_close_ts_ms: Some(latest_common_close_ts_ms),
+                    last_step_close_ts_ms,
+                    last_fill_cursor_ms,
+                    warnings: &warnings,
+                    errors: &errors,
+                    last_cycle: last_cycle.as_ref(),
+                    stopped: false,
+                },
             ),
         )?;
         sleep_with_stop_flag(input.idle_sleep_ms, &stop_flag);
@@ -395,13 +401,15 @@ pub fn run_daemon(input: LiveDaemonInput<'_>) -> Result<LiveDaemonReport> {
             &input,
             &lock_path,
             started_at_ms,
-            None,
-            last_step_close_ts_ms,
-            last_fill_cursor_ms,
-            &warnings,
-            &errors,
-            last_cycle.as_ref(),
-            true,
+            LiveStatusContext {
+                latest_common_close_ts_ms: None,
+                last_step_close_ts_ms,
+                last_fill_cursor_ms,
+                warnings: &warnings,
+                errors: &errors,
+                last_cycle: last_cycle.as_ref(),
+                stopped: true,
+            },
         )
         .with_stopped_at(stopped_at_ms, stop_requested),
     )?;
@@ -1075,6 +1083,7 @@ fn acquire_lock(lock_path: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(lock_path)
         .with_context(|| format!("failed to open live lock file: {}", lock_path.display()))?;
     lock_file
@@ -1125,21 +1134,25 @@ fn sleep_with_stop_flag(idle_sleep_ms: u64, stop_flag: &AtomicBool) {
     }
 }
 
+struct LiveStatusContext<'a> {
+    latest_common_close_ts_ms: Option<i64>,
+    last_step_close_ts_ms: Option<i64>,
+    last_fill_cursor_ms: i64,
+    warnings: &'a [String],
+    errors: &'a [String],
+    last_cycle: Option<&'a LiveCycleReport>,
+    stopped: bool,
+}
+
 fn build_status(
     input: &LiveDaemonInput<'_>,
     lock_path: &Path,
     started_at_ms: i64,
-    latest_common_close_ts_ms: Option<i64>,
-    last_step_close_ts_ms: Option<i64>,
-    last_fill_cursor_ms: i64,
-    warnings: &[String],
-    errors: &[String],
-    last_cycle: Option<&LiveCycleReport>,
-    stopped: bool,
+    context: LiveStatusContext<'_>,
 ) -> LiveDaemonStatus {
     LiveDaemonStatus {
-        ok: errors.is_empty(),
-        running: !stopped,
+        ok: context.errors.is_empty(),
+        running: !context.stopped,
         pid: std::process::id(),
         config_path: input.effective_config.config_path().display().to_string(),
         live_db: input.live_db.display().to_string(),
@@ -1157,12 +1170,15 @@ fn build_status(
         lookback_bars: input.lookback_bars,
         explicit_symbols: input.explicit_symbols.to_vec(),
         symbols_file: input.symbols_file.map(|path| path.display().to_string()),
-        latest_common_close_ts_ms,
-        last_step_close_ts_ms,
-        last_fill_cursor_ms,
-        last_plans_count: last_cycle.map(|cycle| cycle.plans.len()).unwrap_or(0),
-        warnings: warnings.to_vec(),
-        errors: errors.to_vec(),
+        latest_common_close_ts_ms: context.latest_common_close_ts_ms,
+        last_step_close_ts_ms: context.last_step_close_ts_ms,
+        last_fill_cursor_ms: context.last_fill_cursor_ms,
+        last_plans_count: context
+            .last_cycle
+            .map(|cycle| cycle.plans.len())
+            .unwrap_or(0),
+        warnings: context.warnings.to_vec(),
+        errors: context.errors.to_vec(),
     }
 }
 

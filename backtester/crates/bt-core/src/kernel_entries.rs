@@ -381,11 +381,13 @@ mod tests {
             stoch_rsi_active: false,
             all_gates_pass: false,
         };
-        let mut params = EntryParams::default();
-        params.enable_pullback = true;
-        params.pullback_min_adx = 20.0;
-        params.pullback_rsi_long_min = 50.0;
-        params.pullback_require_macd_sign = true;
+        let params = EntryParams {
+            enable_pullback: true,
+            pullback_min_adx: 20.0,
+            pullback_rsi_long_min: 50.0,
+            pullback_require_macd_sign: true,
+            ..EntryParams::default()
+        };
 
         let result = evaluate_entry(&snap, &gates, &params, 0.0);
         assert_eq!(result.signal, Signal::Buy);
@@ -420,13 +422,15 @@ mod tests {
             all_gates_pass: false,
         };
 
-        let mut params = EntryParams::default();
-        params.enable_pullback = false; // skip pullback
-        params.enable_slow_drift = true;
-        params.slow_drift_min_adx = 10.0;
-        params.slow_drift_min_slope_pct = 0.0005;
-        params.slow_drift_rsi_long_min = 50.0;
-        params.slow_drift_require_macd_sign = true;
+        let params = EntryParams {
+            enable_pullback: false, // skip pullback
+            enable_slow_drift: true,
+            slow_drift_min_adx: 10.0,
+            slow_drift_min_slope_pct: 0.0005,
+            slow_drift_rsi_long_min: 50.0,
+            slow_drift_require_macd_sign: true,
+            ..EntryParams::default()
+        };
 
         // Provide slope large enough to trigger drift
         let result = evaluate_entry(&snap, &gates, &params, 0.001);

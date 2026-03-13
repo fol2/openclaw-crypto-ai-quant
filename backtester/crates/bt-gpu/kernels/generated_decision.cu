@@ -14,7 +14,7 @@
 
 #pragma once
 
-// SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"6971a3a32cd759a171401243b5f5ba3ec62dde916658a4ebbef39f8cb8a30d02","../bt-core/src/exits/smart_exits.rs":"20c5f62e408df61ad7fb06bebc397b1db98270a1499bd2115f1bfe2b9c44d22f","../bt-core/src/exits/stop_loss.rs":"971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63","../bt-core/src/exits/take_profit.rs":"97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"7046e519e86605bc8f631c8ee3bcadfadeea119f616a1ad07f9b19f647072fbc","../bt-signals/src/gates.rs":"730aacfca4ec69a383157e2fdce134c5e5e16a40caf4ab36cf15a6ab0fa47acb"}
+// SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"6971a3a32cd759a171401243b5f5ba3ec62dde916658a4ebbef39f8cb8a30d02","../bt-core/src/exits/smart_exits.rs":"20c5f62e408df61ad7fb06bebc397b1db98270a1499bd2115f1bfe2b9c44d22f","../bt-core/src/exits/stop_loss.rs":"971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63","../bt-core/src/exits/take_profit.rs":"97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"678516374f4ba66145f5a6e2a288a3f77e4f125153fcf0914201e9a83592cfb9","../bt-signals/src/gates.rs":"bb0a731c877d26fec35dab4182790be746196ac9ed9c169d2f7b12275c69a08d"}
 
 // Derived from bt-signals/src/gates.rs
 // Gate evaluation: 8 gates + TMC/AVE + DRE + slow-drift override.
@@ -1297,4 +1297,46 @@ __device__ bool is_pesc_blocked_codegen(
     long long elapsed_ms =
         ((long long)current_sec - (long long)close_ts) * 1000ll;
     return elapsed_ms < cooldown_ms;
+}
+// Derived from bt-core/src/engine.rs cooldown logic
+// Entry cooldown: after closing a position, block new entries for
+// `cooldown_minutes` to prevent whipsaw re-entries.
+//
+// Returns true (blocked) when elapsed time since last close < cooldown.
+// If last_close_time_sec == 0, no previous close exists — not blocked.
+
+__device__ bool check_entry_cooldown_codegen(
+    unsigned int last_close_time_sec,
+    unsigned int current_time_sec,
+    unsigned int cooldown_minutes,
+    const GpuComboConfig& cfg
+) {
+    // No previous close recorded — no cooldown to enforce
+    if (last_close_time_sec == 0u) { return false; }
+
+    unsigned int elapsed_sec = current_time_sec - last_close_time_sec;
+    unsigned int cooldown_sec = cooldown_minutes * 60u;
+
+    return elapsed_sec < cooldown_sec;  // true = blocked
+}
+// Derived from bt-core/src/engine.rs cooldown logic
+// Exit cooldown (minimum hold time): after opening a position, enforce a
+// minimum hold period before allowing any exit except stop-loss.
+//
+// Returns true (blocked) when held time < min_hold.
+// If min_hold_minutes == 0, the feature is disabled — never blocked.
+
+__device__ bool check_exit_cooldown_codegen(
+    unsigned int entry_time_sec,
+    unsigned int current_time_sec,
+    unsigned int min_hold_minutes,
+    const GpuComboConfig& cfg
+) {
+    // Feature disabled when min_hold_minutes == 0
+    if (min_hold_minutes == 0u) { return false; }
+
+    unsigned int held_sec = current_time_sec - entry_time_sec;
+    unsigned int min_hold_sec = min_hold_minutes * 60u;
+
+    return held_sec < min_hold_sec;  // true = blocked (except SL)
 }

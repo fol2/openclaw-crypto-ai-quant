@@ -90,10 +90,16 @@ fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
         lookback: 0,
     };
 
-    let cpu = bt_core::sweep::run_sweep(
-        &cfg, &spec, &candles, None, // no sub-bar candles
-        None, None, None, None,
-    );
+    let cpu = bt_core::sweep::run_sweep(bt_core::sweep::RunSweepInput {
+        base_cfg: &cfg,
+        spec: &spec,
+        candles: &candles,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        from_ts: None,
+        to_ts: None,
+    });
     assert_eq!(cpu.len(), 1);
     let cpu_rpt = &cpu[0].report;
     eprintln!(

@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::fmt;
+use std::str::FromStr;
 
 pub mod confidence;
 pub mod entry;
@@ -29,8 +30,10 @@ pub enum Confidence {
     High = 2,
 }
 
-impl Confidence {
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl FromStr for Confidence {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "low" => Ok(Confidence::Low),
             "medium" => Ok(Confidence::Medium),
@@ -58,7 +61,7 @@ impl<'de> Deserialize<'de> for Confidence {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Confidence::from_str(&s).map_err(serde::de::Error::custom)
+        <Confidence as FromStr>::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -73,8 +76,10 @@ pub enum MacdMode {
     None,
 }
 
-impl MacdMode {
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl FromStr for MacdMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "accel" => Ok(MacdMode::Accel),
             "sign" => Ok(MacdMode::Sign),
@@ -100,13 +105,14 @@ impl<'de> Deserialize<'de> for MacdMode {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        MacdMode::from_str(&s).map_err(serde::de::Error::custom)
+        <MacdMode as FromStr>::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Confidence, MacdMode};
+    use std::str::FromStr;
 
     #[test]
     fn confidence_from_str_rejects_unknown_values() {

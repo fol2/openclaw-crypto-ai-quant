@@ -6,10 +6,8 @@ use serde_json::json;
 #[derive(Debug)]
 pub enum HubError {
     Db(String),
-    Sidecar(String),
     NotFound(String),
     BadRequest(String),
-    Unauthorized,
     Forbidden(String),
     Internal(String),
 }
@@ -18,10 +16,8 @@ impl std::fmt::Display for HubError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Db(msg) => write!(f, "db_error: {msg}"),
-            Self::Sidecar(msg) => write!(f, "sidecar_error: {msg}"),
             Self::NotFound(msg) => write!(f, "not_found: {msg}"),
             Self::BadRequest(msg) => write!(f, "bad_request: {msg}"),
-            Self::Unauthorized => write!(f, "unauthorized"),
             Self::Forbidden(msg) => write!(f, "forbidden: {msg}"),
             Self::Internal(msg) => write!(f, "internal_error: {msg}"),
         }
@@ -34,10 +30,8 @@ impl IntoResponse for HubError {
     fn into_response(self) -> Response {
         let (status, error_str) = match &self {
             Self::Db(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db_error:{msg}")),
-            Self::Sidecar(msg) => (StatusCode::BAD_GATEWAY, format!("sidecar_error:{msg}")),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
