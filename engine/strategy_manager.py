@@ -145,7 +145,7 @@ class StrategyManager:
         - AI_QUANT_STRATEGY_YAML. defaults to ./config/strategy_overrides.yaml
         - AI_QUANT_STRATEGY_CHANGELOG. optional path to strategy_changelog.json
 
-        Defaults are pulled from mei_alpha_v1._DEFAULT_STRATEGY_CONFIG when available.
+        Defaults are pulled from `strategy.defaults.DEFAULT_STRATEGY_CONFIG` when available.
         """
         with cls._instance_lock:
             if cls._instance is not None:
@@ -165,9 +165,9 @@ class StrategyManager:
                 if _rust_effective_config_owner():
                     return {}
                 try:
-                    import strategy.mei_alpha_v1 as mei_alpha_v1
+                    from strategy.defaults import DEFAULT_STRATEGY_CONFIG
 
-                    return copy.deepcopy(getattr(mei_alpha_v1, "_DEFAULT_STRATEGY_CONFIG"))
+                    return copy.deepcopy(DEFAULT_STRATEGY_CONFIG)
                 except (ImportError, AttributeError, TypeError):
                     return {"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}}
 
@@ -378,7 +378,7 @@ class StrategyManager:
         Priority:
         1) AI_QUANT_SYMBOLS explicit list
         2) top-N by 24h notional volume via hyperliquid_meta.top_symbols_by_day_notional_volume
-        3) fallback list from mei_alpha_v1._FALLBACK_SYMBOLS
+        3) fallback list from `strategy.defaults.FALLBACK_SYMBOLS`
 
         The list is cached for watchlist_refresh_s seconds.
         """
@@ -410,9 +410,9 @@ class StrategyManager:
 
         if not watchlist:
             try:
-                import strategy.mei_alpha_v1 as mei_alpha_v1
+                from strategy.defaults import FALLBACK_SYMBOLS
 
-                watchlist = list(getattr(mei_alpha_v1, "_FALLBACK_SYMBOLS", []))
+                watchlist = list(FALLBACK_SYMBOLS)
             except Exception:
                 watchlist = []
 

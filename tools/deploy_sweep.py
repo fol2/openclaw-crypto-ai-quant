@@ -332,10 +332,10 @@ def show_metrics(result: dict):
 def close_live_positions(*, max_retries: int = 3):
     """Close all live positions via Hyperliquid API."""
     sys.path.insert(0, PROJECT_DIR)
-    from exchange.executor import load_live_secrets, HyperliquidLiveExecutor
+    from exchange.operator_client import HyperliquidOperatorClient, load_live_secrets
 
     secrets = load_live_secrets(SECRETS_PATH)
-    executor = HyperliquidLiveExecutor(
+    executor = HyperliquidOperatorClient(
         secret_key=secrets.secret_key,
         main_address=secrets.main_address,
     )

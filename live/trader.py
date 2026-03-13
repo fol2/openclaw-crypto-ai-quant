@@ -30,8 +30,8 @@ try:
 except Exception:
     _DB_TIMEOUT_S = 5.0
 
-from exchange.executor import (
-    HyperliquidLiveExecutor,
+from exchange.operator_client import (
+    HyperliquidOperatorClient as HyperliquidLiveExecutor,
     live_entries_enabled,
     live_mode,
     live_orders_enabled,
@@ -4118,6 +4118,5 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
 def run_trader():
     raise SystemExit(
         "Python live trader is retired. Use `aiq-runtime live daemon` or "
-        "`scripts/run_live.sh`. Set AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 and "
-        "run `python -m engine.daemon` only for archival recovery."
+        "`scripts/run_live.sh`."
     )

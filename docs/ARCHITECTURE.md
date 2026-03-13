@@ -39,7 +39,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` or `ai_quant_live.lo
 
 ### 3. Exchange Adapters (`exchange/`)
 
-- **HyperliquidLiveExecutor** (`exchange/executor.py`): Python SDK adapter retained for non-runtime tooling and archival recovery workflows.
+- **HyperliquidOperatorClient** (`exchange/operator_client.py`): Python SDK adapter retained for non-runtime tooling and operator workflows after the Rust runtime cutover.
 - **WebSocket Client** (`exchange/ws.py`): Streams `allMids`, `bbo`, `candle` for market data; `userFills`, `orderUpdates`, `userFundings` for live mode.
 - **Sidecar Client** (`exchange/sidecar.py`): Unix socket client for the Rust WS sidecar.
 - **Meta** (`exchange/meta.py`): Hyperliquid metadata — sz/price rounding, symbol info.
@@ -270,7 +270,7 @@ The `engine.interval` parameter is NOT hot-reloadable — changing it requires a
 1. Entry/exit decision → `OrderIntent`
 2. OMS creates intent row (dedupe guard)
 3. Broker adapter translates to SDK call (`market_open` / `market_close`)
-4. `HyperliquidLiveExecutor` sends order
+4. the exchange adapter submits the order
 5. Fill arrives via `userFills` WS stream → OMS matches fill to intent
 6. SQLite logger persists trade record
 

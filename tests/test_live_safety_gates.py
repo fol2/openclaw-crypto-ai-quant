@@ -17,7 +17,7 @@ Functions under test:
 
 import pytest
 
-from exchange.executor import (
+from exchange.operator_client import (
     _env_bool,
     live_entries_enabled,
     live_mode,

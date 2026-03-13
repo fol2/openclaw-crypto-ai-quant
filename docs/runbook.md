@@ -860,8 +860,8 @@ cargo run -p aiq-runtime -- \
 
 Operational expectations:
 
-- `paper daemon` is the active paper runtime path; Python `engine.daemon` remains a legacy recovery/debug path and is no longer the authoritative paper service
-- `live daemon` is the authoritative live runtime path; Python `engine.daemon` / `live.trader` remain archival recovery/debug surfaces only
+- `paper daemon` is the active paper runtime path
+- `live daemon` is the authoritative live runtime path
 - `--lane paper1|paper2|paper3|livepaper` resolves the conventional per-lane config path, promoted-role / strategy-mode contract, watched symbols file path, candle DB directory, DB path, and lock/status paths inside Rust
 - `--project-dir` lets operators point those lane defaults at a different worktree/root without rebuilding the binary
 - a lane-default watched symbols file may be absent at start-up; the daemon now idles cleanly and waits for later watchlist materialisation instead of failing before the first poll

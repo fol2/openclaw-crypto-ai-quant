@@ -19,6 +19,10 @@ import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
 from engine.alerting import send_openclaw_message
 from engine.kernel_shadow_report import ShadowReport
+from strategy.defaults import (
+    DEFAULT_STRATEGY_CONFIG as _EXTRACTED_DEFAULT_STRATEGY_CONFIG,
+    FALLBACK_SYMBOLS as _EXTRACTED_FALLBACK_SYMBOLS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1575,28 +1579,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 #   Configure N with: `AI_QUANT_TOP_N` (default: 50).
 #
 # Why: a static list gets stale and can be "too quiet" as markets rotate.
-_FALLBACK_SYMBOLS = [
-    "BTC",
-    "ETH",
-    "SOL",
-    "HYPE",
-    "XRP",
-    "ARB",
-    "OP",
-    "SUI",
-    "AVAX",
-    "APT",
-    "LINK",
-    "NEAR",
-    "LTC",
-    "BCH",
-    "XLM",
-    "ADA",
-    "DOT",
-    "STX",
-    "POL",
-    "TIA",
-]
+_FALLBACK_SYMBOLS = list(_EXTRACTED_FALLBACK_SYMBOLS)
 
 
 def _parse_symbol_list(raw: str) -> list[str]:
@@ -1717,210 +1700,10 @@ STRATEGY_TOML_PATH = os.getenv(
 )
 
 # Legacy compatibility mirror only: Rust now owns the effective-config
-# resolution contract for promoted-role and strategy-mode selection.
-_DEFAULT_STRATEGY_CONFIG = {
-    "trade": {
-        "allocation_pct": ALLOCATION_PCT,
-        "sl_atr_mult": 2.0,
-        "tp_atr_mult": TP_ATR_MULT,
-        "leverage": HL_DEFAULT_LEVERAGE,
-        # v5.018: RSI Entry Extreme Filter (REEF) - block overextended entries.
-        # v5.020: REEF v2 - Dynamic RSI limits based on ADX.
-        "enable_reef_filter": True,
-        "reef_long_rsi_block_gt": 70.0,  # baseline (ADX < 45)
-        "reef_short_rsi_block_lt": 30.0,  # baseline (ADX < 45)
-        "reef_adx_threshold": 45.0,
-        "reef_long_rsi_extreme_gt": 75.0,  # extreme (ADX >= 45)
-        "reef_short_rsi_extreme_lt": 25.0,  # extreme (ADX >= 45)
-        # Dynamic leverage: scales leverage by signal confidence for NEW positions.
-        # Adds (pyramiding) reuse existing position leverage to avoid thrash.
-        "leverage_low": 1.0,
-        "leverage_medium": 3.0,
-        "leverage_high": 5.0,
-        "slippage_bps": HL_SLIPPAGE_BPS,
-        "use_bbo_for_fills": True,
-        "min_notional_usd": 10.0,
-        "bump_to_min_notional": False,
-        "max_total_margin_pct": 0.60,
-        # Dynamic sizing (less aggressive): scales margin by confidence + trend strength + volatility.
-        "enable_dynamic_sizing": True,
-        "confidence_mult_high": 1.0,
-        "confidence_mult_medium": 0.7,
-        "confidence_mult_low": 0.5,
-        "adx_sizing_min_mult": 0.6,
-        "adx_sizing_full_adx": 40.0,
-        "vol_baseline_pct": 0.01,
-        "vol_scalar_min": 0.5,
-        "vol_scalar_max": 1.0,
-        # Position building / scaling
-        "enable_pyramiding": True,
-        "max_adds_per_symbol": 2,
-        "add_fraction_of_base_margin": 0.5,
-        "add_cooldown_minutes": 60,
-        "add_min_profit_atr": 0.5,
-        "add_min_confidence": "medium",
-        "entry_min_confidence": "high",
-        # Partial exits (take-profit ladder)
-        "enable_partial_tp": True,
-        "tp_partial_pct": 0.5,
-        "tp_partial_min_notional_usd": 10.0,
-        "tp_partial_atr_mult": 0.0,  # 0 = use tp_atr_mult (same level). >0 = separate partial TP level.
-        "trailing_start_atr": 1.0,
-        "trailing_distance_atr": 0.8,
-        # v5.037: Make SSF and breakeven configurable (defaults preserve prior behavior).
-        "enable_ssf_filter": True,
-        "enable_breakeven_stop": True,
-        "breakeven_start_atr": 0.7,
-        "breakeven_buffer_atr": 0.05,
-        # v5.046: RSI Overextension Exit is now configurable (defaults preserve prior behavior).
-        # This is a *smart exit* (not an entry filter) used to take profit in extreme RSI regimes.
-        "enable_rsi_overextension_exit": True,
-        "rsi_exit_profit_atr_switch": 1.5,
-        "rsi_exit_ub_lo_profit": 80.0,
-        "rsi_exit_ub_hi_profit": 70.0,
-        "rsi_exit_lb_lo_profit": 20.0,
-        "rsi_exit_lb_hi_profit": 30.0,
-        # v5.015: ADX-Adaptive PESC.
-        # v5.017: SRC - Increased minimums to filter noise.
-        # v5.018: Enhanced weak-trend cooldown (ADX < 25 => 180m).
-        "reentry_cooldown_minutes": 60,
-        "reentry_cooldown_min_mins": 45,
-        "reentry_cooldown_max_mins": 180,
-        # v5.015: Volatility-Buffered Trailing Stop.
-        "enable_vol_buffered_trailing": True,
-        # v5.001: Trend Saturation Momentum Exit (TSME) extra gate
-        # Only allow the "ADX>50 + momentum contraction" exit if:
-        # - the position has at least `tsme_min_profit_atr` profit, AND
-        # - ADX slope is negative (trend strength is no longer accelerating),
-        # to reduce premature exits on normal pullbacks within strong trends.
-        "tsme_min_profit_atr": 1.0,
-        "tsme_require_adx_slope_negative": True,
-        "min_atr_pct": 0.003,
-        "reverse_entry_signal": False,
-        "block_exits_on_extreme_dev": False,
-        "glitch_price_dev_pct": 0.40,
-        "glitch_atr_mult": 12.0,
-        # --- Per-confidence trailing overrides (0 = use main value) ---
-        "trailing_start_atr_low_conf": 0.0,
-        "trailing_distance_atr_low_conf": 0.0,
-        # --- Smart exit ADX exhaustion ---
-        "smart_exit_adx_exhaustion_lt": 18.0,
-        "smart_exit_adx_exhaustion_lt_low_conf": 0.0,
-        # --- RSI overextension exit - low confidence overrides (0 = use main) ---
-        "rsi_exit_ub_lo_profit_low_conf": 0.0,
-        "rsi_exit_ub_hi_profit_low_conf": 0.0,
-        "rsi_exit_lb_lo_profit_low_conf": 0.0,
-        "rsi_exit_lb_hi_profit_low_conf": 0.0,
-        # --- Rate limits / capacity ---
-        "max_open_positions": 20,
-        "entry_cooldown_s": 20,
-        "exit_cooldown_s": 15,
-        "max_entry_orders_per_loop": 6,
-    },
-    "indicators": {
-        "ema_slow_window": 50,
-        "ema_fast_window": 20,
-        "ema_macro_window": 200,
-        "adx_window": 14,
-        "bb_window": 20,
-        "bb_width_avg_window": 30,
-        "atr_window": 14,
-        "rsi_window": 14,
-        "vol_sma_window": 20,
-        "vol_trend_window": 5,
-        "stoch_rsi_window": 14,
-        "stoch_rsi_smooth1": 3,
-        "stoch_rsi_smooth2": 3,
-    },
-    "filters": {
-        "enable_ranging_filter": True,
-        "enable_anomaly_filter": True,
-        # v5.042: Extension filter toggle (distance-to-EMA_fast gate).
-        "enable_extension_filter": True,
-        "require_adx_rising": True,
-        "adx_rising_saturation": 40.0,
-        "require_volume_confirmation": False,
-        "vol_confirm_include_prev": True,
-        "use_stoch_rsi_filter": True,
-        "require_btc_alignment": True,
-        "require_macro_alignment": False,
-    },
-    "market_regime": {
-        "enable_regime_filter": False,
-        "breadth_block_short_above": 90.0,
-        "breadth_block_long_below": 10.0,
-        "enable_auto_reverse": False,
-        "auto_reverse_breadth_low": 10.0,
-        "auto_reverse_breadth_high": 90.0,
-        # Global regime gate (engine-only): block entries when the regime is not trend OK.
-        "enable_regime_gate": False,
-        "regime_gate_breadth_low": 20.0,
-        "regime_gate_breadth_high": 80.0,
-        "regime_gate_btc_adx_min": 20.0,
-        "regime_gate_btc_atr_pct_min": 0.003,
-        "regime_gate_fail_open": False,
-    },
-    "watchlist_exclude": [],
-    "thresholds": {
-        "entry": {
-            "min_adx": 22.0,
-            "high_conf_volume_mult": 2.5,
-            "btc_adx_override": 40.0,
-            "max_dist_ema_fast": 0.04,
-            # v5.042: Adaptive Volatility Entry (AVE) is now configurable.
-            "ave_enabled": True,
-            "ave_atr_ratio_gt": 1.5,
-            "ave_adx_mult": 1.25,
-            "ave_avg_atr_window": 50,
-            # v5.042: MACD gating mode for trend entries.
-            # - accel: require MACD_hist > prev_MACD_hist (legacy)
-            # - sign : require MACD_hist > 0 for BUY, < 0 for SELL
-            # - none : ignore MACD_hist gate
-            "macd_hist_entry_mode": "accel",
-            # v5.042: Pullback continuation entries (off by default).
-            "enable_pullback_entries": False,
-            "pullback_confidence": "low",
-            "pullback_min_adx": 22.0,
-            "pullback_rsi_long_min": 50.0,
-            "pullback_rsi_short_max": 50.0,
-            "pullback_require_macd_sign": True,
-            # v5.040: Slow drift entry mode (off by default; enable via YAML).
-            # Goal: capture low-vol grind regimes as low-confidence entries.
-            "enable_slow_drift_entries": False,
-            "slow_drift_slope_window": 20,
-            "slow_drift_min_slope_pct": 0.0006,
-            "slow_drift_min_adx": 10.0,
-            "slow_drift_rsi_long_min": 50.0,
-            "slow_drift_rsi_short_max": 50.0,
-            "slow_drift_require_macd_sign": True,
-        },
-        "ranging": {
-            "min_signals": 2,
-            "adx_below": 21.0,
-            "bb_width_ratio_below": 0.8,
-            "rsi_low": 47.0,
-            "rsi_high": 53.0,
-        },
-        "anomaly": {
-            "price_change_pct_gt": 0.10,
-            "ema_fast_dev_pct_gt": 0.50,
-        },
-        "tp_and_momentum": {
-            "adx_strong_gt": 40.0,
-            "adx_weak_lt": 30.0,
-            "tp_mult_strong": 7.0,
-            "tp_mult_weak": 3.0,
-            "rsi_long_strong": 52.0,
-            "rsi_long_weak": 56.0,
-            "rsi_short_strong": 48.0,
-            "rsi_short_weak": 44.0,
-        },
-        "stoch_rsi": {
-            "block_long_if_k_gt": 0.85,
-            "block_short_if_k_lt": 0.15,
-        },
-    },
-}
+# resolution contract for promoted-role and strategy-mode selection. The shared
+# defaults source now lives in `strategy.defaults` so compatibility consumers can
+# avoid importing the full legacy runtime module.
+_DEFAULT_STRATEGY_CONFIG = copy.deepcopy(_EXTRACTED_DEFAULT_STRATEGY_CONFIG)
 
 # v5 StrategyManager integration:
 # - hot reloads YAML by file mtime (no module reload required)

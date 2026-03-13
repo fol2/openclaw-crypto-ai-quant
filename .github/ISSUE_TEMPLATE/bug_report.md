@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in the Rust runtime, archival Python recovery path, backtester, or tooling
+about: Report a bug in the Rust runtime, backtester, or tooling
 title: ''
 labels: ''
 assignees: ''
@@ -22,11 +22,7 @@ Include the precise command, script, or systemd unit you used.
 ./scripts/run_paper_lane.sh paper1
 # or
 ./scripts/run_live.sh
-# or
-AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
 ```
-
-If you used the archival Python recovery path, say so explicitly.
 
 **To reproduce**
 1. Set config or environment value(s):
@@ -48,4 +44,4 @@ Paste the relevant YAML fragment or environment overrides. Redact secrets.
 ```
 
 **Additional context**
-Anything else that helps explain timing, market conditions, or whether this reproduced under the Rust runtime, the archival Python recovery path, or both.
+Anything else that helps explain timing, market conditions, or whether this reproduced under paper, dry-live, or live runtime paths.

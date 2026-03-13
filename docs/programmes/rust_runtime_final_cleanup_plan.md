@@ -68,7 +68,7 @@ tooling:
 Delivered:
 
 1. `engine/daemon.py` no longer acts as a production runtime owner for any mode
-2. all Python daemon modes now require `AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1`
+2. `engine/daemon.py` is now a retired fail-fast shim rather than an executable archival runtime
 3. `live/trader.py` standalone entry messaging now points to Rust-only runtime paths
 4. runbooks, architecture docs, and issue templates reflect Rust-owned production paths
 
@@ -77,6 +77,8 @@ Exit gate:
 1. no Python entrypoint can be launched accidentally as a production runtime path
 
 ### Tranche 1. Operator Tool Migration Off `exchange/executor.py`
+
+**Status:** Completed on the current branch.
 
 **Goal:** make all operationally important tools work without the Python live
 exchange adapter.
@@ -105,7 +107,15 @@ Exit gates:
 2. emergency flatten workflow is validated through the Rust-owned path
 3. live-state export no longer requires the Python executor
 
+Delivered:
+
+1. `tools/flat_now.py`, `tools/export_state.py`, `tools/deploy_sweep.py`, and `tools/manual_trade.py` now use a dedicated non-runtime operator client
+2. production/operator tooling no longer imports `exchange/executor.py`
+3. operator-facing exchange access is isolated from the legacy runtime adapter
+
 ### Tranche 2. Extract Strategy Defaults And Helper Surface From `mei_alpha_v1.py`
+
+**Status:** Completed on the current branch for defaults and fallback-symbol extraction.
 
 **Goal:** separate legacy trader classes from the still-needed strategy helpers.
 
@@ -132,7 +142,16 @@ Exit gates:
 2. `tools/validate_config.py` no longer imports `strategy.mei_alpha_v1`
 3. legacy `PaperTrader` can be reasoned about as a self-contained archival surface
 
+Delivered:
+
+1. shared defaults now live in `strategy/defaults.py`
+2. `engine/strategy_manager.py` now reads defaults and fallback symbols from `strategy.defaults`
+3. `tools/validate_config.py` no longer imports `strategy.mei_alpha_v1`
+4. `strategy/mei_alpha_v1.py` consumes the extracted defaults module instead of owning those compatibility values directly
+
 ### Tranche 3. Retire Legacy Python Execution Classes
+
+**Status:** In progress; `engine/daemon.py` has been reduced to a retired shim on the current branch.
 
 **Goal:** remove the remaining Python execution-loop ownership surfaces once
 their helper dependencies are extracted.
@@ -192,6 +211,12 @@ Use atomic PRs in this order:
 6. Tranche 3b: delete/archive `live/trader.py` runtime class
 7. Tranche 3c: delete/archive `PaperTrader` runtime ownership and Python loop ownership
 8. Tranche 4: parity/bridge retirement
+
+Completed so far:
+
+1. Tranche 1 operator-tool migration
+2. Tranche 2 defaults/fallback-symbol extraction
+3. Tranche 3a daemon retirement shim
 
 ## 5. Verification Checklist
 

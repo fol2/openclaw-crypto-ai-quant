@@ -9,7 +9,7 @@ Actions:
     preview      — fetch mid price, validate, compute estimated size/margin/fees
     execute      — create OMS intent, set leverage, submit order
     close        — fetch exchange position, submit reduce-only order
-    cancel       — cancel a GTC order by intent_id (via executor.cancel_order)
+    cancel       — cancel a GTC order by intent_id
     open-orders  — list current open GTC orders from exchange for a symbol
 """
 
@@ -47,18 +47,18 @@ logger = logging.getLogger("manual_trade")
 # Lazy imports (deferred so --help is fast and syntax-check doesn't need deps)
 # ---------------------------------------------------------------------------
 
-_executor_mod = None
+_operator_mod = None
 _meta_mod = None
 _oms_mod = None
 
 
 def _load_modules() -> None:
-    global _executor_mod, _meta_mod, _oms_mod
-    if _executor_mod is None:
-        from exchange import executor as _ex, meta as _me  # type: ignore
+    global _operator_mod, _meta_mod, _oms_mod
+    if _operator_mod is None:
+        from exchange import meta as _me, operator_client as _op  # type: ignore
         from engine import oms as _om  # type: ignore
 
-        _executor_mod = _ex
+        _operator_mod = _op
         _meta_mod = _me
         _oms_mod = _om
 
@@ -294,11 +294,9 @@ def _poll_fills(
         now_ms = int(time.time() * 1000)
         try:
             fills = (
-                executor._info.user_fills_by_time(
-                    executor.main_address,
+                executor.user_fills_by_time(
                     start_ms,
                     now_ms,
-                    aggregate_by_time=False,
                 )
                 or []
             )
@@ -561,8 +559,8 @@ def _record_fill(
 
 def _build_executor(secrets_path: str) -> Any:
     _load_modules()
-    secrets = _executor_mod.load_live_secrets(secrets_path)
-    return _executor_mod.HyperliquidLiveExecutor(
+    secrets = _operator_mod.load_live_secrets(secrets_path)
+    return _operator_mod.HyperliquidOperatorClient(
         secret_key=secrets.secret_key,
         main_address=secrets.main_address,
     )
@@ -604,7 +602,7 @@ def _action_preview(args: argparse.Namespace) -> dict[str, Any]:
         return _err(f"Leverage {leverage}x exceeds max {max_lev:.0f}x for {symbol} at ${notional:.0f} notional")
 
     # Fetch mid price
-    mids = executor._info.all_mids() or {}
+    mids = executor.all_mids() or {}
     mid_price = _safe_float(mids.get(symbol), 0.0)
     if mid_price <= 0:
         return _err(f"Could not fetch mid price for {symbol}")
@@ -690,7 +688,7 @@ def _action_execute(args: argparse.Namespace) -> dict[str, Any]:
         return _err(f"Leverage {leverage}x exceeds max {max_lev:.0f}x for {symbol} at ${notional:.0f} notional")
 
     # Fetch mid price
-    mids = executor._info.all_mids() or {}
+    mids = executor.all_mids() or {}
     mid_price = _safe_float(mids.get(symbol), 0.0)
     if mid_price <= 0:
         return _err(f"Could not fetch mid price for {symbol}")
@@ -768,36 +766,34 @@ def _action_execute(args: argparse.Namespace) -> dict[str, Any]:
             store.update_intent(intent_id, status="REJECTED", last_error="limit_price required for limit_ioc")
             return _err("limit_price is required for limit_ioc orders", intent_id=intent_id)
         limit_px = float(args.limit_price)
-        cloid_obj = _make_cloid_obj(cloid)
-        result_raw = executor._exchange.order(
+        result_raw = executor.limit_order(
             symbol,
             is_buy=is_buy,
             sz=est_size,
             limit_px=limit_px,
-            order_type={"limit": {"tif": "Ioc"}},
+            tif="Ioc",
             reduce_only=False,
-            cloid=cloid_obj,
+            cloid=cloid,
         )
     elif order_type == "limit_gtc":
         if args.limit_price is None:
             store.update_intent(intent_id, status="REJECTED", last_error="limit_price required for limit_gtc")
             return _err("limit_price is required for limit_gtc orders", intent_id=intent_id)
         limit_px = float(args.limit_price)
-        cloid_obj = _make_cloid_obj(cloid)
-        result_raw = executor._exchange.order(
+        result_raw = executor.limit_order(
             symbol,
             is_buy=is_buy,
             sz=est_size,
             limit_px=limit_px,
-            order_type={"limit": {"tif": "Gtc"}},
+            tif="Gtc",
             reduce_only=False,
-            cloid=cloid_obj,
+            cloid=cloid,
         )
     else:
         store.update_intent(intent_id, status="REJECTED", last_error=f"unknown order_type: {order_type}")
         return _err(f"Unknown order_type: {order_type}", intent_id=intent_id)
 
-    if result_raw is None or not _executor_mod._is_ok_response(result_raw):
+    if result_raw is None or not _operator_mod.is_ok_response(result_raw):
         err_msg = "Order rejected by exchange"
         if result_raw is not None:
             err_msg += f": {result_raw}"
@@ -961,7 +957,7 @@ def _action_close(args: argparse.Namespace) -> dict[str, Any]:
     created_ms = int(time.time() * 1000)
 
     # Fetch mid price for notional estimate
-    mids = executor._info.all_mids() or {}
+    mids = executor.all_mids() or {}
     mid_price = _safe_float(mids.get(symbol), 0.0)
     est_notional = close_size * mid_price if mid_price > 0 else 0.0
 
@@ -1023,36 +1019,34 @@ def _action_close(args: argparse.Namespace) -> dict[str, Any]:
             store.update_intent(intent_id, status="REJECTED", last_error="limit_price required for limit_ioc close")
             return _err("limit_price is required for limit_ioc orders", intent_id=intent_id)
         limit_px = float(args.limit_price)
-        cloid_obj = _make_cloid_obj(cloid)
-        result_raw = executor._exchange.order(
+        result_raw = executor.limit_order(
             symbol,
             is_buy=is_buy,
             sz=close_size,
             limit_px=limit_px,
-            order_type={"limit": {"tif": "Ioc"}},
+            tif="Ioc",
             reduce_only=True,
-            cloid=cloid_obj,
+            cloid=cloid,
         )
     elif order_type == "limit_gtc":
         if args.limit_price is None:
             store.update_intent(intent_id, status="REJECTED", last_error="limit_price required for limit_gtc close")
             return _err("limit_price is required for limit_gtc orders", intent_id=intent_id)
         limit_px = float(args.limit_price)
-        cloid_obj = _make_cloid_obj(cloid)
-        result_raw = executor._exchange.order(
+        result_raw = executor.limit_order(
             symbol,
             is_buy=is_buy,
             sz=close_size,
             limit_px=limit_px,
-            order_type={"limit": {"tif": "Gtc"}},
+            tif="Gtc",
             reduce_only=True,
-            cloid=cloid_obj,
+            cloid=cloid,
         )
     else:
         store.update_intent(intent_id, status="REJECTED", last_error=f"unknown order_type: {order_type}")
         return _err(f"Unknown order_type: {order_type}", intent_id=intent_id)
 
-    if result_raw is None or not _executor_mod._is_ok_response(result_raw):
+    if result_raw is None or not _operator_mod.is_ok_response(result_raw):
         err_msg = "Close order rejected by exchange"
         if result_raw is not None:
             err_msg += f": {result_raw}"
@@ -1258,7 +1252,7 @@ def _action_open_orders(args: argparse.Namespace) -> dict[str, Any]:
 
     # Fetch open orders from exchange via Info API
     try:
-        raw = executor._info.open_orders(executor.main_address) or []
+        raw = executor.open_orders() or []
     except Exception as exc:
         return _err(f"Failed to fetch open orders: {exc}")
 
@@ -1293,23 +1287,6 @@ def _action_open_orders(args: argparse.Namespace) -> dict[str, Any]:
             "orders": orders,
         }
     )
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_cloid_obj(cloid: str | None) -> Any:
-    """Convert a cloid hex string to a Hyperliquid Cloid object."""
-    if not cloid:
-        return None
-    try:
-        from hyperliquid.utils import types
-
-        return types.Cloid(str(cloid))
-    except Exception:
-        return None
 
 
 def _extract_exchange_oid(result: dict | None) -> str | None:

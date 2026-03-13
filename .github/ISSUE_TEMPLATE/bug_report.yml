@@ -9,8 +9,6 @@ body:
         Thanks for reporting. Please fill in as much detail as possible.
 
         Production paper and live services now run through the Rust `aiq-runtime`.
-        If you reproduced the issue through an archival Python recovery path,
-        please say so explicitly.
   - type: dropdown
     id: component
     attributes:
@@ -57,11 +55,6 @@ body:
       placeholder: |
         1. Set config X to Y
         2. Run `cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"`
-        3. Observe ...
-
-        Or, for an archival Python recovery path:
-        1. Set config X to Y
-        2. Run `AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon`
         3. Observe ...
     validations:
       required: true

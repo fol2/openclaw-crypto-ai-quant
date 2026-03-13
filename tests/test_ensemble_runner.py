@@ -37,7 +37,12 @@ def test_build_launch_plan_writes_derived_yaml(tmp_path: Path):
         encoding="utf-8",
     )
 
-    plans = build_launch_plan(spec_path=spec_path, out_dir=tmp_path / "out", mode="dry_live", daemon_argv=["python3", "-m", "engine.daemon"])
+    plans = build_launch_plan(
+        spec_path=spec_path,
+        out_dir=tmp_path / "out",
+        mode="dry_live",
+        daemon_argv=["./target/release/aiq-runtime", "live", "daemon"],
+    )
     assert [p.name for p in plans] == ["s1", "s2"]
 
     for p in plans:
@@ -67,5 +72,5 @@ def test_build_launch_plan_rejects_retired_paper_mode(tmp_path: Path):
             spec_path=spec_path,
             out_dir=tmp_path / "out",
             mode="paper",
-            daemon_argv=["python3", "-m", "engine.daemon"],
+            daemon_argv=["./target/release/aiq-runtime", "live", "daemon"],
         )

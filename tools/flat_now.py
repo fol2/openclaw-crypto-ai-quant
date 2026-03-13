@@ -170,10 +170,10 @@ def close_live_positions(
 ) -> int:
     """Close all live positions via Hyperliquid API. Returns the number of positions closed."""
     sys.path.insert(0, str(PROJECT_DIR))
-    from exchange.executor import HyperliquidLiveExecutor, load_live_secrets  # type: ignore
+    from exchange.operator_client import HyperliquidOperatorClient, load_live_secrets  # type: ignore
 
     secrets = load_live_secrets(str(Path(secrets_path).expanduser().resolve()))
-    executor = HyperliquidLiveExecutor(secret_key=secrets.secret_key, main_address=secrets.main_address)
+    executor = HyperliquidOperatorClient(secret_key=secrets.secret_key, main_address=secrets.main_address)
 
     positions = executor.get_positions(force=True)
     if not positions:

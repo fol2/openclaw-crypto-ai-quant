@@ -1,7 +1,7 @@
 # Development Guide
 
-This repository contains Python (archival recovery/debug runtime surfaces,
-strategies, monitoring) and Rust (production runtime, backtester, WS sidecar,
+This repository contains Python (compatibility helpers, strategies, monitoring)
+and Rust (production runtime, backtester, WS sidecar,
 hub dashboard) components.
 
 ## Python (uv / ruff / pytest)
@@ -11,7 +11,6 @@ Managed by `uv`:
 - Project config: `pyproject.toml`
 - Lockfile: `uv.lock`
 - Dev venv: `.venv/` (uv-managed, gitignored)
-- Archived Python runtime entrypoint: `python -m engine.daemon`
 - Rust service wrappers: `scripts/run_paper_lane.sh`, `scripts/run_live.sh`
 
 ### Setup
