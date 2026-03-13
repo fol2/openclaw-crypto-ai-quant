@@ -707,8 +707,8 @@ fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
 
 fn ensure_default_group_order(
     group: &str,
-    actual: &bt_signals::behaviour::BehaviourGroupPlan,
-    expected: &bt_signals::behaviour::BehaviourGroupPlan,
+    actual: &bt_core::signals::behaviour::BehaviourGroupPlan,
+    expected: &bt_core::signals::behaviour::BehaviourGroupPlan,
 ) -> Result<(), String> {
     let actual_ids = actual.ordered_ids().collect::<Vec<_>>();
     let expected_ids = expected.ordered_ids().collect::<Vec<_>>();
@@ -723,7 +723,7 @@ fn ensure_default_group_order(
 
 fn ensure_supported_disabled_behaviours(
     group: &str,
-    plan: &bt_signals::behaviour::BehaviourGroupPlan,
+    plan: &bt_core::signals::behaviour::BehaviourGroupPlan,
     supported: &[&str],
 ) -> Result<(), String> {
     for item in &plan.items {
