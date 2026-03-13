@@ -1217,7 +1217,7 @@ mod tests {
         );
 
         let err = GpuComboConfig::from_strategy_config(&cfg).unwrap_err();
-        assert!(err.contains("default `exits` behaviour order"));
+        assert!(err.contains("canonical order for `exits`"));
     }
 
     #[test]
