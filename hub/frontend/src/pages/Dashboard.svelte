@@ -1595,7 +1595,7 @@
                     >{iv.toUpperCase()}</button>
                   {/each}
                 </div>
-                <button class="journey-close-btn" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; journeyTunnelPoints = []; }}>
+                <button class="journey-close-btn" aria-label="Close journey detail" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; journeyTunnelPoints = []; }}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
               </div>

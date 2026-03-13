@@ -11,11 +11,13 @@ pub const FACTORY_SERVICE_UNITS: [&str; 2] = [
     "openclaw-ai-quant-factory-v8",
     "openclaw-ai-quant-factory-v8-deep",
 ];
+const FACTORY_EXECUTION_WIRED: bool = false;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FactoryCapability {
     pub compiled: bool,
     pub policy_enabled: bool,
+    pub executor_wired: bool,
     pub execution_enabled: bool,
     pub mode: &'static str,
     pub reason: String,
@@ -28,19 +30,25 @@ impl FactoryCapability {
     pub fn current(config: &HubConfig) -> Self {
         let compiled = cfg!(feature = "factory");
         let policy_enabled = config.factory_enabled;
-        let execution_enabled = compiled && policy_enabled;
-        let reason = match (compiled, policy_enabled) {
-            (true, true) => "Factory execution is explicitly enabled for this Hub instance."
-                .to_string(),
+        let executor_wired = FACTORY_EXECUTION_WIRED;
+        let execution_enabled = compiled && policy_enabled && executor_wired;
+        let reason = match (compiled, policy_enabled, executor_wired) {
+            (true, true, true) => {
+                "Factory execution is explicitly enabled for this Hub instance.".to_string()
+            }
+            (true, true, false) => format!(
+                "Factory execution was requested, but this Hub build still exposes only the dormant contract. A future build must wire the executor before {}=1 can activate it.",
+                FACTORY_ENABLE_ENV
+            ),
             (true, false) => format!(
                 "Factory execution is compiled in, but policy keeps it dormant until {}=1.",
                 FACTORY_ENABLE_ENV
             ),
-            (false, true) => {
+            (false, true, _) => {
                 "Factory policy is enabled, but this Hub build was compiled without the `factory` feature."
                     .to_string()
             }
-            (false, false) => format!(
+            (false, false, _) => format!(
                 "Factory execution is dormant by default. Re-enable it only with a build that includes the `factory` feature and {}=1.",
                 FACTORY_ENABLE_ENV
             ),
@@ -49,6 +57,7 @@ impl FactoryCapability {
         Self {
             compiled,
             policy_enabled,
+            executor_wired,
             execution_enabled,
             mode: if execution_enabled {
                 "enabled"
@@ -101,6 +110,16 @@ mod tests {
             assert!(cap
                 .reason
                 .contains("compiled without the `factory` feature"));
+        }
+    }
+
+    #[test]
+    fn remains_dormant_when_executor_is_not_wired() {
+        let cap = FactoryCapability::current(&config_with_factory_enabled(true));
+        if cfg!(feature = "factory") {
+            assert!(!cap.execution_enabled);
+            assert!(!cap.executor_wired);
+            assert!(cap.reason.contains("dormant contract"));
         }
     }
 }

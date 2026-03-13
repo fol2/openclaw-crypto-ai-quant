@@ -154,15 +154,15 @@
       <p>{capability?.reason}</p>
       <div class="capability-grid">
         <div>
-          <label>Enable gate</label>
+          <div class="field-label">Enable gate</div>
           <code>{capability?.enable_env ?? 'AI_QUANT_FACTORY_ENABLE'}</code>
         </div>
         <div>
-          <label>Settings path</label>
+          <div class="field-label">Settings path</div>
           <code>{capability?.settings_path ?? 'config/factory_defaults.yaml'}</code>
         </div>
         <div>
-          <label>Service units</label>
+          <div class="field-label">Service units</div>
           <code>{(capability?.service_units ?? []).join(', ') || 'none'}</code>
         </div>
       </div>
@@ -203,26 +203,26 @@
         {#if selectedRun}
           <div class="detail-grid">
             <div>
-              <label>Run</label>
+              <div class="field-label">Run</div>
               <div class="mono">{selectedRun.date}/{selectedRun.run_id}</div>
             </div>
             <div>
-              <label>Subdirectories</label>
+              <div class="field-label">Subdirectories</div>
               <div class="mono">{(selectedRun.subdirs ?? []).join(', ') || '—'}</div>
             </div>
           </div>
 
           <div class="stack">
             <div>
-              <label>Metadata</label>
+              <div class="field-label">Metadata</div>
               <pre>{JSON.stringify(selectedRun.metadata ?? {}, null, 2)}</pre>
             </div>
             <div>
-              <label>Report</label>
+              <div class="field-label">Report</div>
               <pre>{JSON.stringify(selectedReport ?? {}, null, 2)}</pre>
             </div>
             <div>
-              <label>Candidates</label>
+              <div class="field-label">Candidates</div>
               <pre>{JSON.stringify(selectedCandidates ?? [], null, 2)}</pre>
             </div>
           </div>
@@ -257,7 +257,7 @@
           <div class="timer-list">
             {#each timers as timer}
               <div class="timer-card">
-                <div class="timer-name mono">{timer.name}</div>
+                <div class="timer-name mono">{timer.unit ?? timer.name}</div>
                 <div class="timer-meta">
                   <span>active: <strong>{timer.active || 'unknown'}</strong></span>
                   <span>enabled: <strong>{timer.enabled ? 'yes' : 'no'}</strong></span>
@@ -439,12 +439,12 @@
   .run-meta,
   .timer-meta,
   .hint,
-  label {
+  .field-label {
     font-size: 12px;
     color: var(--text-muted);
   }
 
-  label {
+  .field-label {
     display: block;
     margin-bottom: 4px;
     text-transform: uppercase;

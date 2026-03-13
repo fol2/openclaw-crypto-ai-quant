@@ -376,8 +376,8 @@ async fn put_settings(State(state): State<Arc<AppState>>, Json(body): Json<Value
 
 /// Factory timer unit names.
 /// GET /api/factory/timer — timer status.
-async fn get_timer(State(_state): State<Arc<AppState>>) -> Result<Json<Value>, HubError> {
-    let capability = capability(&_state);
+async fn get_timer(State(state): State<Arc<AppState>>) -> Result<Json<Value>, HubError> {
+    let capability = capability(&state);
     let mut timers = Vec::new();
     for timer in FACTORY_SERVICE_UNITS.map(|name| format!("{name}.timer")) {
         let output = Command::new("systemctl")

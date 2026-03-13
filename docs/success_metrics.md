@@ -56,8 +56,8 @@ Trigger rotation if **any** condition is met:
 | Trigger | Threshold | Action |
 |---------|-----------|--------|
 | Rolling profit factor | PF < 1.0 over last 30 trades | Pause config, fall back to safety mode |
-| Live drawdown warning | DD > 15% from config-start HWM | Pause config, queue replacement from nightly run |
-| Nightly validation fail | Config no longer passes OOS validation suite | Schedule rotation at next deployment window |
+| Live drawdown warning | DD > 15% from config-start HWM | Pause config, queue a replacement from the latest validation run |
+| Latest validation fail | Config no longer passes the current OOS validation suite | Schedule rotation at the next deployment window |
 | Max config age | 14 days since deployment | Re-validate; retire if no longer passing |
 
 When a config is rotated out, record: config hash, start/stop timestamps, reason for rotation, and final performance summary.

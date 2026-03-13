@@ -15,9 +15,7 @@ body:
       label: Component
       options:
         - Rust Runtime (runtime/)
-        - Python Compatibility Runtime (engine/)
-        - Strategy (strategy/)
-        - Live Trader (live/, archival)
+        - Legacy Compatibility Surface (archival)
         - Exchange Adapter (exchange/)
         - Rust Backtester (backtester/)
         - WS Sidecar (ws_sidecar/)

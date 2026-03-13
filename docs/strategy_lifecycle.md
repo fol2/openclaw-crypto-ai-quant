@@ -35,7 +35,7 @@ factory contract reserved for future reactivation.
     │ validated │           │ retired │
     └─────┬─────┘           └─────────┘
           │                       ▲
-          │ auto-deploy           │
+          │ deploy to paper       │
           ▼                       │
     ┌─────────┐                   │
     │  paper  ├───────────────────┤
@@ -67,11 +67,12 @@ factory contract reserved for future reactivation.
 
 ## Transitions
 
-Every trigger below is measurable from logs, metrics, or the nightly validation pipeline. No subjective judgement is involved.
+Every trigger below is measurable from logs, metrics, or the current validation
+workflow. No subjective judgement is involved.
 
 ### candidate → validated
 
-**Trigger**: Config passes the nightly OOS validation suite.
+**Trigger**: Config passes the current OOS validation suite.
 
 All conditions must be met:
 
@@ -148,7 +149,7 @@ Step down or pause immediately.
 |---------|--------|-----------|
 | Rolling PF degradation | PF over last 30 trades | < 1.0 |
 | Drawdown warning | DD from config-start HWM | > 15% |
-| Nightly validation fail | OOS validation suite result | Fail |
+| Latest validation fail | OOS validation suite result | Fail |
 | Max config age | Days since deployment | > 14 |
 
 **Source**: live trading DB (rolling window) + validation pipeline output.
