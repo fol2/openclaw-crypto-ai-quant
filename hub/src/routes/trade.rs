@@ -131,23 +131,15 @@ async fn trade_preview(
     };
     let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
         let preview = manual_trade::preview_open(&config, &request)?;
-        let confirm_token = manual_trade::issue_confirm_token(
-            &config,
-            "OPEN",
-            &param_hash,
-            &symbol,
-            &preview,
-        )?;
+        let confirm_token =
+            manual_trade::issue_confirm_token(&config, "OPEN", &param_hash, &symbol, &preview)?;
         Ok::<_, HubError>((preview, confirm_token))
     })
     .await
     .map_err(|error| HubError::Internal(format!("preview task failed: {error}")))??;
     let mut payload = preview;
     if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "confirm_token".to_string(),
-            Value::String(confirm_token),
-        );
+        object.insert("confirm_token".to_string(), Value::String(confirm_token));
     }
     Ok(Json(payload))
 }
@@ -214,10 +206,7 @@ async fn trade_close(
         .map_err(|error| HubError::Internal(format!("close preview task failed: {error}")))??;
         let mut payload = preview;
         if let Some(object) = payload.as_object_mut() {
-            object.insert(
-                "confirm_token".to_string(),
-                Value::String(confirm_token),
-            );
+            object.insert("confirm_token".to_string(), Value::String(confirm_token));
         }
         return Ok(Json(payload));
     }

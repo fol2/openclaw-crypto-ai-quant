@@ -29,6 +29,26 @@ cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper.json --tar
 ./scripts/run_live.sh
 ```
 
+## Factory
+
+Build the Hub with the `factory` feature and install the Rust executor before
+enabling policy:
+
+```bash
+cargo build --release --manifest-path hub/Cargo.toml --features factory
+cargo build --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-factory
+AI_QUANT_FACTORY_ENABLE=1 cargo run --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-factory -- run --config config/strategy_overrides.yaml --settings config/factory_defaults.yaml --profile daily --json
+```
+
+The tracked service examples live under:
+
+```bash
+systemd/openclaw-ai-quant-factory-v8.service.example
+systemd/openclaw-ai-quant-factory-v8.timer.example
+systemd/openclaw-ai-quant-factory-v8-deep.service.example
+systemd/openclaw-ai-quant-factory-v8-deep.timer.example
+```
+
 ## Diagnostics
 
 ```bash

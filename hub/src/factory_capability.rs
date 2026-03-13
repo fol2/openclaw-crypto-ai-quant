@@ -11,7 +11,6 @@ pub const FACTORY_SERVICE_UNITS: [&str; 2] = [
     "openclaw-ai-quant-factory-v8",
     "openclaw-ai-quant-factory-v8-deep",
 ];
-const FACTORY_EXECUTION_WIRED: bool = false;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FactoryCapability {
@@ -30,18 +29,19 @@ impl FactoryCapability {
     pub fn current(config: &HubConfig) -> Self {
         let compiled = cfg!(feature = "factory");
         let policy_enabled = config.factory_enabled;
-        let executor_wired = FACTORY_EXECUTION_WIRED;
+        let executor_wired = compiled && config.factory_bin.is_file();
         let execution_enabled = compiled && policy_enabled && executor_wired;
         let reason = match (compiled, policy_enabled, executor_wired) {
             (true, true, true) => {
                 "Factory execution is explicitly enabled for this Hub instance.".to_string()
             }
             (true, true, false) => format!(
-                "Factory execution was requested, but this Hub build still exposes only the dormant contract. A future build must wire the executor before {}=1 can activate it.",
+                "Factory execution was requested, but the Rust executor binary is not available at {}. Build and install `aiq-factory` before {}=1 can activate it.",
+                config.factory_bin.display(),
                 FACTORY_ENABLE_ENV
             ),
             (true, false, _) => format!(
-                "Factory execution is compiled in, but policy keeps it dormant until {}=1.",
+                "Factory execution is compiled in and the executor binary is available, but policy keeps it disabled until {}=1.",
                 FACTORY_ENABLE_ENV
             ),
             (false, true, _) => {
@@ -91,6 +91,7 @@ mod tests {
     fn config_with_factory_enabled(enabled: bool) -> HubConfig {
         let mut cfg = HubConfig::from_env();
         cfg.factory_enabled = enabled;
+        cfg.factory_bin = std::env::current_exe().expect("current executable");
         cfg
     }
 
@@ -117,9 +118,9 @@ mod tests {
     fn remains_dormant_when_executor_is_not_wired() {
         let cap = FactoryCapability::current(&config_with_factory_enabled(true));
         if cfg!(feature = "factory") {
-            assert!(!cap.execution_enabled);
-            assert!(!cap.executor_wired);
-            assert!(cap.reason.contains("dormant contract"));
+            let expects_enabled = config_with_factory_enabled(true).factory_bin.is_file();
+            assert_eq!(cap.execution_enabled, expects_enabled);
+            assert_eq!(cap.executor_wired, expects_enabled);
         }
     }
 }

@@ -210,11 +210,13 @@ fn live_position_override_for<'a>(
     db_position: &trading::OpenPosition,
     live_positions: &'a HashMap<String, HlPositionSnapshot>,
 ) -> Option<&'a HlPositionSnapshot> {
-    live_positions.get(&db_position.symbol).filter(|live_position| {
-        live_position
-            .pos_type
-            .eq_ignore_ascii_case(&db_position.pos_type)
-    })
+    live_positions
+        .get(&db_position.symbol)
+        .filter(|live_position| {
+            live_position
+                .pos_type
+                .eq_ignore_ascii_case(&db_position.pos_type)
+        })
 }
 
 fn position_json(
@@ -408,7 +410,9 @@ async fn api_snapshot(
 
         if let (Some(p), Some(m)) = (pos, mid) {
             let live_override = live_position_override_for(p, &live_positions);
-            let entry_price = live_override.map(|live| live.entry_price).unwrap_or(p.entry_price);
+            let entry_price = live_override
+                .map(|live| live.entry_price)
+                .unwrap_or(p.entry_price);
             let size = live_override.map(|live| live.size).unwrap_or(p.size);
             let u = if p.pos_type == "LONG" {
                 (m - entry_price) * size
@@ -676,7 +680,9 @@ async fn api_marks(
 
     let position_json = pos.as_ref().map(|p| {
         let live_override = live_position_override_for(p, &live_positions);
-        let entry_price = live_override.map(|live| live.entry_price).unwrap_or(p.entry_price);
+        let entry_price = live_override
+            .map(|live| live.entry_price)
+            .unwrap_or(p.entry_price);
         let size = live_override.map(|live| live.size).unwrap_or(p.size);
         let unreal_pnl = mid.map(|m| {
             if p.pos_type == "LONG" {

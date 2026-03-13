@@ -1,4 +1,5 @@
 pub mod backtester;
+pub mod factory;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
