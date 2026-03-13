@@ -1495,6 +1495,201 @@ pub fn cancel_order(
     ))
 }
 
+pub fn recover_unknown_manual_intents(
+    cfg: &HubConfig,
+    limit: usize,
+) -> Result<Value, HubError> {
+    if limit == 0 {
+        return Ok(json!({
+            "ok": true,
+            "scanned": 0,
+            "recovered_fills": 0,
+            "recovered_open_orders": 0,
+        }));
+    }
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    let intents = load_unknown_manual_intents(&conn, limit)?;
+    if intents.is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "scanned": 0,
+            "recovered_fills": 0,
+            "recovered_open_orders": 0,
+        }));
+    }
+
+    let client = build_client(cfg)?;
+    let open_orders = client
+        .open_orders()
+        .map_err(|error| HubError::Internal(format!("failed to inspect open orders: {error}")))?;
+    let mut recovered_fills = 0usize;
+    let mut recovered_open_orders = 0usize;
+    let mut scanned = 0usize;
+
+    for intent in intents {
+        scanned += 1;
+        let cloid = existing_intent_cloid(&intent);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let fills = collect_matching_fills_once(
+            &client,
+            &intent.symbol,
+            intent.created_ts_ms.saturating_sub(5_000),
+            now_ms,
+            &cloid,
+            intent.exchange_order_id.as_deref(),
+        )?;
+        if !fills.is_empty() {
+            let account_value_usd = client
+                .account_snapshot()
+                .map_err(|error| HubError::Internal(error.to_string()))?
+                .account_value_usd;
+            let fill_summary = record_manual_fill_batch(
+                &mut conn,
+                &fills,
+                &intent.symbol,
+                &intent.intent_id,
+                &cloid,
+                account_value_usd,
+                intent.leverage.unwrap_or(1.0).max(1.0),
+            )?;
+            let requested_size = intent.requested_size.unwrap_or(fill_summary.filled_size);
+            let status = if fill_summary.parse_failures > 0 {
+                "UNKNOWN_RECONCILED"
+            } else if fill_summary.filled_size + 1e-9 >= requested_size {
+                "FILLED"
+            } else {
+                "PARTIAL"
+            };
+            let last_error = if fill_summary.parse_failures > 0 {
+                "one_or_more_fills_failed_to_parse_into_trades"
+            } else {
+                ""
+            };
+            update_manual_intent_status(&conn, &intent.intent_id, status, last_error)?;
+            write_manual_runtime_log(
+                &conn,
+                if fill_summary.parse_failures > 0 {
+                    "WARN"
+                } else {
+                    "INFO"
+                },
+                &format!(
+                    "manual_trade unknown_recovered_fills intent_id={} symbol={} observed_fills={} parsed_trade_rows={} filled_size={} status={}",
+                    intent.intent_id,
+                    intent.symbol,
+                    fill_summary.observed_fills,
+                    fill_summary.parsed_trade_rows,
+                    fill_summary.filled_size,
+                    status
+                ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&intent.symbol),
+                "MANUAL_FILLS_RECORDED",
+                if fill_summary.parse_failures > 0 {
+                    "WARN"
+                } else {
+                    "INFO"
+                },
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "action": &intent.action,
+                    "status": status,
+                    "observed_fills": fill_summary.observed_fills,
+                    "parsed_trade_rows": fill_summary.parsed_trade_rows,
+                    "filled_size": fill_summary.filled_size,
+                    "source": "unknown_recovery",
+                }),
+            )?;
+            write_manual_reconcile_event(
+                &conn,
+                "manual_unknown_recovery",
+                Some(&intent.symbol),
+                if fill_summary.parse_failures > 0 {
+                    "fills_parse_failed"
+                } else {
+                    "fills_recovered"
+                },
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "status": status,
+                    "observed_fills": fill_summary.observed_fills,
+                    "parse_failures": fill_summary.parse_failures,
+                }),
+            )?;
+            recovered_fills += 1;
+            continue;
+        }
+
+        if let Some(order) = find_matching_open_order(&open_orders, &intent, &cloid) {
+            let exchange_order_id = order
+                .get("oid")
+                .and_then(parse_json_integer)
+                .map(|value| value.to_string());
+            record_manual_order_submission(
+                &conn,
+                ManualOrderSubmission {
+                    intent_id: &intent.intent_id,
+                    sent_ts_ms: now_ms,
+                    symbol: &intent.symbol,
+                    side: &intent.side,
+                    order_type: "recovered_unknown_open_order",
+                    requested_size: intent.requested_size.unwrap_or(0.0),
+                    reduce_only: matches!(intent.action.as_str(), "CLOSE" | "REDUCE"),
+                    client_order_id: &cloid,
+                    exchange_order_id: exchange_order_id.as_deref(),
+                    status: "SENT",
+                    last_error: "",
+                    raw_json: order.to_string(),
+                },
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "INFO",
+                &format!(
+                    "manual_trade unknown_recovered_open_order intent_id={} symbol={} exchange_order_id={}",
+                    intent.intent_id,
+                    intent.symbol,
+                    exchange_order_id.as_deref().unwrap_or("unknown")
+                ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&intent.symbol),
+                "MANUAL_ORDER_SUBMITTED",
+                "INFO",
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "action": &intent.action,
+                    "exchange_order_id": &exchange_order_id,
+                    "client_order_id": &cloid,
+                    "order_type": "recovered_unknown_open_order",
+                    "source": "unknown_recovery",
+                }),
+            )?;
+            write_manual_reconcile_event(
+                &conn,
+                "manual_unknown_recovery",
+                Some(&intent.symbol),
+                "open_order_recovered",
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "exchange_order_id": &exchange_order_id,
+                }),
+            )?;
+            recovered_open_orders += 1;
+        }
+    }
+
+    Ok(json!({
+        "ok": true,
+        "scanned": scanned,
+        "recovered_fills": recovered_fills,
+        "recovered_open_orders": recovered_open_orders,
+    }))
+}
+
 fn build_client(cfg: &HubConfig) -> Result<HyperliquidClient, HubError> {
     let secrets_path = cfg
         .secrets_path
@@ -1654,6 +1849,18 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
         );
         CREATE INDEX IF NOT EXISTS idx_audit_events_ts_ms ON audit_events(ts_ms);
         CREATE INDEX IF NOT EXISTS idx_audit_events_event_ts_ms ON audit_events(event, ts_ms);
+
+        CREATE TABLE IF NOT EXISTS oms_reconcile_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            symbol TEXT,
+            result TEXT,
+            data_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_ts_ms ON oms_reconcile_events(ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_kind_ts_ms
+            ON oms_reconcile_events(kind, ts_ms);
         ",
     )?;
     tx.commit()?;
@@ -1787,6 +1994,42 @@ fn load_existing_manual_intent_by_dedupe_key(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(HubError::Db(error.to_string())),
     }
+}
+
+fn load_unknown_manual_intents(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<ExistingManualIntent>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT intent_id, created_ts_ms, symbol, action, side, status, requested_size, leverage,
+                dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms, meta_json
+         FROM oms_intents
+         WHERE reason = 'manual_trade' AND status = 'UNKNOWN'
+         ORDER BY created_ts_ms DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([limit as i64], |row| {
+            Ok(ExistingManualIntent {
+                intent_id: row.get(0)?,
+                created_ts_ms: row.get(1)?,
+                symbol: row.get(2)?,
+                action: row.get(3)?,
+                side: row.get(4)?,
+                status: row.get(5)?,
+                requested_size: row.get(6)?,
+                leverage: row.get(7)?,
+                dedupe_key: row.get(8)?,
+                client_order_id: row.get(9)?,
+                exchange_order_id: row.get(10)?,
+                last_error: row.get(11)?,
+                sent_ts_ms: row.get(12)?,
+                meta_json: row.get(13)?,
+            })
+        })?
+        .filter_map(|row| row.ok())
+        .collect();
+    Ok(rows)
 }
 
 fn load_manual_cancel_context_by_intent_id(
@@ -2455,6 +2698,28 @@ fn write_manual_audit_event(
     Ok(())
 }
 
+fn write_manual_reconcile_event(
+    conn: &Connection,
+    kind: &str,
+    symbol: Option<&str>,
+    result: &str,
+    data: Value,
+) -> Result<(), HubError> {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "INSERT INTO oms_reconcile_events (ts_ms, kind, symbol, result, data_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            ts_ms,
+            kind.trim().to_ascii_lowercase(),
+            symbol.map(|value| value.trim().to_ascii_uppercase()),
+            result,
+            data.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
 fn submission_order_type(order_type: ParsedOrderType, reduce_only: bool) -> &'static str {
     match (order_type, reduce_only) {
         (ParsedOrderType::Market, false) => "market_open",
@@ -2909,6 +3174,60 @@ fn submit_close_order(
     Ok(response)
 }
 
+fn fill_matches_manual_intent(
+    fill: &HyperliquidFill,
+    symbol_upper: &str,
+    cloid: &str,
+    exchange_order_id: Option<&str>,
+) -> bool {
+    let raw_symbol = fill
+        .raw
+        .get("coin")
+        .or_else(|| fill.raw.get("symbol"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_uppercase());
+    if raw_symbol.as_deref() != Some(symbol_upper) {
+        return false;
+    }
+    let fill_cloid = fill
+        .raw
+        .get("cloid")
+        .and_then(|value| value.as_str())
+        .map(str::trim);
+    if fill_cloid == Some(cloid) {
+        return true;
+    }
+    if let Some(expected_oid) = exchange_order_id {
+        let fill_oid = fill
+            .raw
+            .get("oid")
+            .map(|value| value.to_string().trim_matches('"').to_string());
+        return fill_oid.as_deref() == Some(expected_oid);
+    }
+    false
+}
+
+fn collect_matching_fills_once(
+    client: &HyperliquidClient,
+    symbol: &str,
+    start_ms: i64,
+    end_ms: i64,
+    cloid: &str,
+    exchange_order_id: Option<&str>,
+) -> Result<Vec<HyperliquidFill>, HubError> {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    let fills = client
+        .user_fills_by_time(start_ms, end_ms)
+        .map_err(|error| HubError::Internal(format!("failed to poll fills: {error}")))?;
+    let mut matched = Vec::<HyperliquidFill>::new();
+    for fill in fills {
+        if fill_matches_manual_intent(&fill, &symbol_upper, cloid, exchange_order_id) {
+            push_unique_fill(&mut matched, fill);
+        }
+    }
+    Ok(matched)
+}
+
 fn poll_fill(
     client: &HyperliquidClient,
     symbol: &str,
@@ -2918,42 +3237,20 @@ fn poll_fill(
 ) -> Result<Vec<HyperliquidFill>, HubError> {
     let deadline = Instant::now() + FILL_POLL_TIMEOUT;
     let mut grace_deadline: Option<Instant> = None;
-    let symbol_upper = symbol.trim().to_ascii_uppercase();
     let mut collected = Vec::<HyperliquidFill>::new();
     while Instant::now() < deadline {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let fills = client
-            .user_fills_by_time(start_ms, now_ms)
-            .map_err(|error| HubError::Internal(format!("failed to poll fills: {error}")))?;
+        let fills = collect_matching_fills_once(
+            client,
+            symbol,
+            start_ms,
+            now_ms,
+            cloid,
+            exchange_order_id,
+        )?;
         let before = collected.len();
         for fill in fills {
-            let raw_symbol = fill
-                .raw
-                .get("coin")
-                .or_else(|| fill.raw.get("symbol"))
-                .and_then(|value| value.as_str())
-                .map(|value| value.trim().to_ascii_uppercase());
-            if raw_symbol.as_deref() != Some(symbol_upper.as_str()) {
-                continue;
-            }
-            let fill_cloid = fill
-                .raw
-                .get("cloid")
-                .and_then(|value| value.as_str())
-                .map(str::trim);
-            if fill_cloid == Some(cloid) {
-                push_unique_fill(&mut collected, fill);
-                continue;
-            }
-            if let Some(expected_oid) = exchange_order_id {
-                let fill_oid = fill
-                    .raw
-                    .get("oid")
-                    .map(|value| value.to_string().trim_matches('"').to_string());
-                if fill_oid.as_deref() == Some(expected_oid) {
-                    push_unique_fill(&mut collected, fill);
-                }
-            }
+            push_unique_fill(&mut collected, fill);
         }
         if !collected.is_empty() {
             if collected.len() > before {
@@ -3893,5 +4190,30 @@ mod tests {
         assert_eq!(row.0, "ETH");
         assert_eq!(row.1, "MANUAL_TEST_EVENT");
         assert_eq!(row.2, "INFO");
+    }
+
+    #[test]
+    fn manual_reconcile_event_helper_persists_structured_row() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        write_manual_reconcile_event(
+            &conn,
+            "manual_unknown_recovery",
+            Some("ETH"),
+            "fills_recovered",
+            json!({ "intent_id": "manual_test", "status": "FILLED" }),
+        )
+        .unwrap();
+
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT kind, symbol, result FROM oms_reconcile_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "manual_unknown_recovery");
+        assert_eq!(row.1, "ETH");
+        assert_eq!(row.2, "fills_recovered");
     }
 }
