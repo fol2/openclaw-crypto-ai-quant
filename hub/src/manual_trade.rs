@@ -210,11 +210,23 @@ pub fn execute_open(
     param_hash: &str,
 ) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, true)?;
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
+        bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
+        return Ok(existing_manual_execution_payload("open", &existing));
+    }
+    validate_manual_confirmation(
+        &conn,
+        confirm_token,
+        MANUAL_CONFIRM_ACTION_OPEN,
+        param_hash,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+
     let client = build_client(cfg)?;
     let prepared = prepare_open(&client, cfg, request)?;
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
     let created_ts_ms = chrono::Utc::now().timestamp_millis();
-    let mut conn = open_manual_trade_db(&cfg.live_db)?;
     let intent_id = manual_intent_id_from_confirm_token(confirm_token);
     let cloid = manual_cloid_from_intent_id(&intent_id);
 
@@ -480,6 +492,19 @@ pub fn execute_close(
     param_hash: &str,
 ) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, true)?;
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
+    if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
+        bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
+        return Ok(existing_manual_execution_payload("close", &existing));
+    }
+    validate_manual_confirmation(
+        &conn,
+        confirm_token,
+        MANUAL_CONFIRM_ACTION_CLOSE,
+        param_hash,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+
     let client = build_client(cfg)?;
     let prepared = prepare_close(&client, request)?;
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
@@ -490,7 +515,6 @@ pub fn execute_close(
     } else {
         "REDUCE"
     };
-    let mut conn = open_manual_trade_db(&cfg.live_db)?;
     let intent_id = manual_intent_id_from_confirm_token(confirm_token);
     let cloid = manual_cloid_from_intent_id(&intent_id);
 
