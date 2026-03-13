@@ -475,6 +475,21 @@ struct DeploymentEvent {
     status: String,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedDeployment {
+    role: String,
+    service: String,
+    source_config_path: PathBuf,
+    promoted_config_path: PathBuf,
+    target_yaml_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct TargetSnapshot {
+    target_yaml_path: PathBuf,
+    original_bytes: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct RunMetadata {
     version: &'static str,
@@ -1716,7 +1731,7 @@ fn deploy_selected_configs(
     selection: &SelectionSettings,
     deployment: &DeploymentSettings,
 ) -> Result<Vec<DeploymentEvent>> {
-    let mut events = Vec::new();
+    let mut plans = Vec::new();
     for role in selected {
         let target = selection
             .paper_targets
@@ -1728,50 +1743,91 @@ fn deploy_selected_configs(
             .find(|item| item.config_id == role.config_id)
             .ok_or_else(|| anyhow!("missing selected candidate for role={}", role.role))?;
         let config_path = PathBuf::from(&source_item.config_path);
-        let target_path = run_dir
+        let promoted_config_path = run_dir
             .join("promoted_configs")
             .join(format!("{}.yaml", target.role));
-        fs::copy(&config_path, &target_path).with_context(|| {
+        fs::copy(&config_path, &promoted_config_path).with_context(|| {
             format!(
                 "copy promoted config {} -> {}",
                 config_path.display(),
-                target_path.display()
+                promoted_config_path.display()
             )
         })?;
-        let live_target_path = resolve_under_project(project_dir, &target.yaml_path);
-        if deployment.apply_to_paper {
-            if let Some(parent) = live_target_path.parent() {
+        plans.push(PreparedDeployment {
+            role: target.role.clone(),
+            service: target.service.clone(),
+            source_config_path: config_path,
+            promoted_config_path,
+            target_yaml_path: resolve_under_project(project_dir, &target.yaml_path),
+        });
+    }
+    if !deployment.apply_to_paper {
+        return Ok(plans
+            .into_iter()
+            .map(|plan| DeploymentEvent {
+                role: plan.role,
+                source_config_path: plan.source_config_path.display().to_string(),
+                promoted_config_path: plan.promoted_config_path.display().to_string(),
+                target_yaml_path: plan.target_yaml_path.display().to_string(),
+                service: plan.service,
+                restarted_service: false,
+                status: "staged_only".to_string(),
+            })
+            .collect());
+    }
+
+    let snapshots = plans
+        .iter()
+        .map(|plan| snapshot_target(plan.target_yaml_path.as_path()))
+        .collect::<Result<Vec<_>>>()?;
+
+    let deployment_result: Result<Vec<DeploymentEvent>> = (|| {
+        for plan in &plans {
+            if let Some(parent) = plan.target_yaml_path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("create {}", parent.display()))?;
             }
-            fs::copy(&config_path, &live_target_path).with_context(|| {
+            fs::copy(&plan.source_config_path, &plan.target_yaml_path).with_context(|| {
                 format!(
                     "copy selected config {} -> {}",
-                    config_path.display(),
-                    live_target_path.display()
+                    plan.source_config_path.display(),
+                    plan.target_yaml_path.display()
                 )
             })?;
         }
-        let restarted_service = if deployment.apply_to_paper && deployment.restart_services {
-            restart_user_service(target.service.as_str())?
-        } else {
-            false
-        };
-        events.push(DeploymentEvent {
-            role: target.role.clone(),
-            source_config_path: config_path.display().to_string(),
-            promoted_config_path: target_path.display().to_string(),
-            target_yaml_path: live_target_path.display().to_string(),
-            service: target.service.clone(),
-            restarted_service,
-            status: if deployment.apply_to_paper {
-                "applied".to_string()
-            } else {
-                "staged_only".to_string()
-            },
-        });
+
+        let mut restarted = HashSet::new();
+        if deployment.restart_services {
+            for plan in &plans {
+                restart_user_service(plan.service.as_str())?;
+                restarted.insert(plan.service.clone());
+            }
+        }
+
+        Ok(plans
+            .iter()
+            .map(|plan| DeploymentEvent {
+                role: plan.role.clone(),
+                source_config_path: plan.source_config_path.display().to_string(),
+                promoted_config_path: plan.promoted_config_path.display().to_string(),
+                target_yaml_path: plan.target_yaml_path.display().to_string(),
+                service: plan.service.clone(),
+                restarted_service: restarted.contains(&plan.service),
+                status: "applied".to_string(),
+            })
+            .collect())
+    })();
+
+    match deployment_result {
+        Ok(events) => Ok(events),
+        Err(err) => {
+            rollback_target_snapshots(&snapshots)?;
+            if deployment.restart_services {
+                restart_user_services(plans.iter().map(|plan| plan.service.as_str()).collect())?;
+            }
+            bail!("paper deployment rolled back after failure: {err}");
+        }
     }
-    Ok(events)
 }
 
 fn build_run_metadata(input: RunMetadataInput<'_>) -> Result<RunMetadata> {
@@ -1938,6 +1994,58 @@ fn restart_user_service(service: &str) -> Result<bool> {
         );
     }
     Ok(true)
+}
+
+fn restart_user_services(services: Vec<&str>) -> Result<()> {
+    let mut attempted = BTreeSet::new();
+    let mut errors = Vec::new();
+    for service in services {
+        if !attempted.insert(service.to_string()) {
+            continue;
+        }
+        if let Err(err) = restart_user_service(service) {
+            errors.push(err.to_string());
+        }
+    }
+    if !errors.is_empty() {
+        bail!("rollback service restart failures: {}", errors.join(" | "));
+    }
+    Ok(())
+}
+
+fn snapshot_target(path: &Path) -> Result<TargetSnapshot> {
+    let original_bytes = if path.is_file() {
+        Some(fs::read(path).with_context(|| format!("read {}", path.display()))?)
+    } else {
+        None
+    };
+    Ok(TargetSnapshot {
+        target_yaml_path: path.to_path_buf(),
+        original_bytes,
+    })
+}
+
+fn rollback_target_snapshots(snapshots: &[TargetSnapshot]) -> Result<()> {
+    for snapshot in snapshots {
+        match &snapshot.original_bytes {
+            Some(bytes) => {
+                if let Some(parent) = snapshot.target_yaml_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create {}", parent.display()))?;
+                }
+                fs::write(&snapshot.target_yaml_path, bytes)
+                    .with_context(|| format!("restore {}", snapshot.target_yaml_path.display()))?;
+            }
+            None => {
+                if snapshot.target_yaml_path.exists() {
+                    fs::remove_file(&snapshot.target_yaml_path).with_context(|| {
+                        format!("remove {}", snapshot.target_yaml_path.display())
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -2116,5 +2224,16 @@ mod tests {
         selection.selected_roles = vec!["typo-primary".to_string()];
         let err = validate_selection_settings(&selection).unwrap_err();
         assert!(err.to_string().contains("unknown selection.selected_roles"));
+    }
+
+    #[test]
+    fn rollback_target_snapshots_restores_original_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paper1.yaml");
+        fs::write(&path, "before: true\n").unwrap();
+        let snapshot = snapshot_target(&path).unwrap();
+        fs::write(&path, "after: true\n").unwrap();
+        rollback_target_snapshots(&[snapshot]).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before: true\n");
     }
 }
