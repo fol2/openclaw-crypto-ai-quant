@@ -3,6 +3,8 @@
 //! This binary is a maintainer utility and requires a working CUDA environment.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::Command;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -113,7 +115,55 @@ fn resolve_from_root(root: &Path, p: &Path) -> PathBuf {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn ensure_wsl_cuda_path() {
+    const WSL_LIB: &str = "/usr/lib/wsl/lib";
+    const MARKER: &str = "__AQC_WSL_CUDA_REEXEC";
+
+    if std::env::var_os(MARKER).is_some() {
+        return;
+    }
+    if !Path::new("/usr/lib/wsl/lib/libcuda.so.1").exists() {
+        return;
+    }
+
+    let current = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    if current.split(':').any(|seg| seg == WSL_LIB) {
+        return;
+    }
+
+    let next = if current.is_empty() {
+        WSL_LIB.to_string()
+    } else {
+        format!("{WSL_LIB}:{current}")
+    };
+
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("[GPU] WSL2 CUDA env fix skipped (current_exe failed: {err})");
+            return;
+        }
+    };
+
+    eprintln!("[GPU] WSL2 detected — re-exec with LD_LIBRARY_PATH={next}");
+    match Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("LD_LIBRARY_PATH", &next)
+        .env(MARKER, "1")
+        .status()
+    {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!("[GPU] WSL2 re-exec failed ({err}), continuing without env fix");
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    ensure_wsl_cuda_path();
+
     let args = Args::parse();
 
     let root = repo_root();
