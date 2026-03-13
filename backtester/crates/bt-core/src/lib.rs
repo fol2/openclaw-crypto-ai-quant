@@ -6,6 +6,7 @@ pub mod candle;
 pub mod config;
 pub mod decision_kernel;
 pub mod engine;
+pub mod execution_contract;
 pub mod exits;
 pub mod indicators;
 pub mod init_state;

@@ -219,9 +219,15 @@ fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
 }
 
 fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
-    let behaviour_plan = cfg
-        .resolve_behaviour_plan(None)
-        .unwrap_or_else(|_| crate::behaviour::ResolvedBehaviourPlan::production());
+    let resolved =
+        crate::execution_contract::resolve_execution_config(cfg, None).unwrap_or_else(|_| {
+            crate::execution_contract::ResolvedExecutionConfig {
+                active_profile: "production".to_string(),
+                effective_cfg: cfg.clone(),
+                behaviour_plan: crate::behaviour::ResolvedBehaviourPlan::production(),
+            }
+        });
+    let cfg = &resolved.effective_cfg;
     decision_kernel::KernelParams {
         allow_pyramid: cfg.trade.enable_pyramiding,
         // Engine entry processing closes the existing position first when a reverse
@@ -232,7 +238,7 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
         // sweep kernel which computes kernel_margin_req = notional / cfg.leverage.
         leverage: cfg.trade.leverage.max(1.0),
         exit_params: Some(build_exit_params(cfg)),
-        behaviour_plan,
+        behaviour_plan: resolved.behaviour_plan,
         ..decision_kernel::KernelParams::default()
     }
 }
@@ -818,11 +824,17 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         from_ts,
         to_ts,
     } = input;
-    let use_stoch_rsi = cfg.filters.use_stoch_rsi_filter;
-    let behaviour_plan = cfg
-        .resolve_behaviour_plan(None)
-        .unwrap_or_else(|_| crate::behaviour::ResolvedBehaviourPlan::production());
-    let effective_cfg = apply_engine_behaviour_overrides(cfg, &behaviour_plan);
+    let resolved =
+        crate::execution_contract::resolve_execution_config(cfg, None).unwrap_or_else(|_| {
+            crate::execution_contract::ResolvedExecutionConfig {
+                active_profile: "production".to_string(),
+                effective_cfg: cfg.clone(),
+                behaviour_plan: crate::behaviour::ResolvedBehaviourPlan::production(),
+            }
+        });
+    let use_stoch_rsi = resolved.effective_cfg.filters.use_stoch_rsi_filter;
+    let behaviour_plan = resolved.behaviour_plan;
+    let effective_cfg = resolved.effective_cfg;
     let cfg = &effective_cfg;
 
     // -- Build sorted timeline of unique timestamps --
@@ -2123,70 +2135,6 @@ fn compute_ema_slow_slope(history: &[f64], window: usize, current_close: f64) ->
     let current = history[history.len() - 1];
     let past = history[history.len() - window];
     (current - past) / current_close
-}
-
-fn apply_engine_behaviour_overrides(
-    cfg: &StrategyConfig,
-    behaviour_plan: &crate::behaviour::ResolvedBehaviourPlan,
-) -> StrategyConfig {
-    let mut cfg = cfg.clone();
-    if !behaviour_plan
-        .entry_progression
-        .is_enabled("entry.progression.pyramiding")
-    {
-        cfg.trade.enable_pyramiding = false;
-    }
-    if !behaviour_plan
-        .entry_progression
-        .is_enabled("entry.progression.add_cooldown")
-    {
-        cfg.trade.add_cooldown_minutes = 0;
-    }
-    if !behaviour_plan.risk.is_enabled("risk.entry_cooldown") {
-        cfg.trade.entry_cooldown_s = 0;
-    }
-    if !behaviour_plan.risk.is_enabled("risk.exit_cooldown") {
-        cfg.trade.exit_cooldown_s = 0;
-    }
-    if !behaviour_plan.risk.is_enabled("risk.pesc") {
-        cfg.trade.reentry_cooldown_minutes = 0;
-    }
-    if !behaviour_plan
-        .entry_sizing
-        .is_enabled("entry.sizing.dynamic")
-    {
-        cfg.trade.enable_dynamic_sizing = false;
-    }
-    if !behaviour_plan
-        .entry_sizing
-        .is_enabled("entry.sizing.confidence_multiplier")
-    {
-        cfg.trade.confidence_mult_high = 1.0;
-        cfg.trade.confidence_mult_medium = 1.0;
-        cfg.trade.confidence_mult_low = 1.0;
-    }
-    if !behaviour_plan
-        .entry_sizing
-        .is_enabled("entry.sizing.adx_multiplier")
-    {
-        cfg.trade.adx_sizing_min_mult = 1.0;
-        cfg.trade.adx_sizing_full_adx = 0.0;
-    }
-    if !behaviour_plan
-        .entry_sizing
-        .is_enabled("entry.sizing.volatility_scalar")
-    {
-        cfg.trade.vol_baseline_pct = 0.0;
-        cfg.trade.vol_scalar_min = 1.0;
-        cfg.trade.vol_scalar_max = 1.0;
-    }
-    if !behaviour_plan
-        .entry_sizing
-        .is_enabled("entry.sizing.min_notional_bump")
-    {
-        cfg.trade.bump_to_min_notional = false;
-    }
-    cfg
 }
 
 // ---------------------------------------------------------------------------

@@ -162,8 +162,8 @@ struct GpuComboConfig {
     float allocation_pct;  float sl_atr_mult;  float tp_atr_mult;  float leverage;
     unsigned int enable_reef_filter;  float reef_long_rsi_block_gt;  float reef_short_rsi_block_lt;
     float reef_adx_threshold;  float reef_long_rsi_extreme_gt;  float reef_short_rsi_extreme_lt;
-    unsigned int _reserved10;  float leverage_low;  float leverage_medium;
-    float leverage_high;  float _reserved14;  float trailing_rsi_floor_default;
+    unsigned int smart_exit_behaviour_mask;  float leverage_low;  float leverage_medium;
+    float leverage_high;  unsigned int exit_behaviour_mask;  float trailing_rsi_floor_default;
     float slippage_bps;  float min_notional_usd;  unsigned int bump_to_min_notional;
     float max_total_margin_pct;  float trailing_rsi_floor_trending;  float trailing_vbts_bb_threshold;
     unsigned int enable_dynamic_sizing;  float confidence_mult_high;  float confidence_mult_medium;
@@ -530,6 +530,9 @@ __device__ bool stop_loss_hit(unsigned int pos_type, double price, double sl_pri
 }
 
 __device__ bool check_stop_loss(const GpuPosition& pos, const GpuSnapshot& snap, const GpuComboConfig* cfg) {
+    if ((cfg->exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u) {
+        return false;
+    }
     double sl = compute_sl_price(pos, snap, cfg);
     return stop_loss_hit(pos.active, (double)snap.close, sl, (double)pos.entry_atr, pos.adds_count);
 }

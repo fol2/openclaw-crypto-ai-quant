@@ -263,14 +263,14 @@ pub struct GpuComboConfig {
     pub reef_long_rsi_extreme_gt: f32,
     pub reef_short_rsi_extreme_lt: f32,
 
-    // Dynamic leverage [10-13]
-    // [10] reserved (was enable_dynamic_leverage, removed — always dynamic now)
-    pub _reserved10: u32,
+    // Dynamic leverage + smart-exit contract [10-13]
+    // [10] smart-exit behaviour mask (bit-per-behaviour, see constants below)
+    pub smart_exit_behaviour_mask: u32,
     pub leverage_low: f32,
     pub leverage_medium: f32,
     pub leverage_high: f32,
-    // [14] reserved (was leverage_max_cap, removed)
-    pub _reserved14: f32,
+    // [14] non-smart exit behaviour mask (bit-per-behaviour, see constants below)
+    pub exit_behaviour_mask: u32,
     // Trailing config (repurposed pad slots) [15]
     pub trailing_rsi_floor_default: f32,
 
@@ -657,6 +657,44 @@ const _: () = assert!(std::mem::size_of::<GpuFundingSpan>() == 8);
 // Conversion helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+pub const GPU_EXIT_MASK_STOP_LOSS_ASE: u32 = 1 << 0;
+pub const GPU_EXIT_MASK_STOP_LOSS_DASE: u32 = 1 << 1;
+pub const GPU_EXIT_MASK_STOP_LOSS_SLB: u32 = 1 << 2;
+pub const GPU_EXIT_MASK_STOP_LOSS_BASE: u32 = 1 << 3;
+pub const GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN: u32 = 1 << 4;
+pub const GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE: u32 = 1 << 5;
+pub const GPU_EXIT_MASK_TRAILING_VOL_BUFFER: u32 = 1 << 6;
+pub const GPU_EXIT_MASK_TRAILING_BASE: u32 = 1 << 7;
+pub const GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL: u32 = 1 << 8;
+pub const GPU_EXIT_MASK_TAKE_PROFIT_FULL: u32 = 1 << 9;
+pub const GPU_EXIT_MASK_ALL: u32 = GPU_EXIT_MASK_STOP_LOSS_ASE
+    | GPU_EXIT_MASK_STOP_LOSS_DASE
+    | GPU_EXIT_MASK_STOP_LOSS_SLB
+    | GPU_EXIT_MASK_STOP_LOSS_BASE
+    | GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN
+    | GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE
+    | GPU_EXIT_MASK_TRAILING_VOL_BUFFER
+    | GPU_EXIT_MASK_TRAILING_BASE
+    | GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL
+    | GPU_EXIT_MASK_TAKE_PROFIT_FULL;
+
+pub const GPU_SMART_EXIT_MASK_TREND_BREAKDOWN: u32 = 1 << 0;
+pub const GPU_SMART_EXIT_MASK_TREND_EXHAUSTION: u32 = 1 << 1;
+pub const GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN: u32 = 1 << 2;
+pub const GPU_SMART_EXIT_MASK_STAGNATION: u32 = 1 << 3;
+pub const GPU_SMART_EXIT_MASK_FUNDING_HEADWIND: u32 = 1 << 4;
+pub const GPU_SMART_EXIT_MASK_TSME: u32 = 1 << 5;
+pub const GPU_SMART_EXIT_MASK_MMDE: u32 = 1 << 6;
+pub const GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION: u32 = 1 << 7;
+pub const GPU_SMART_EXIT_MASK_ALL: u32 = GPU_SMART_EXIT_MASK_TREND_BREAKDOWN
+    | GPU_SMART_EXIT_MASK_TREND_EXHAUSTION
+    | GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN
+    | GPU_SMART_EXIT_MASK_STAGNATION
+    | GPU_SMART_EXIT_MASK_FUNDING_HEADWIND
+    | GPU_SMART_EXIT_MASK_TSME
+    | GPU_SMART_EXIT_MASK_MMDE
+    | GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION;
+
 /// Validate that an f64 value fits in f32 without becoming infinite.
 /// Returns `Err` if a finite f64 overflows to infinity in f32.
 fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
@@ -667,11 +705,60 @@ fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
     Ok(f)
 }
 
+fn build_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -> u32 {
+    let mut mask = GPU_EXIT_MASK_ALL;
+    for item in &plan.exits.items {
+        if item.enabled {
+            continue;
+        }
+        match item.id.as_str() {
+            "exit.stop_loss.ase" => mask &= !GPU_EXIT_MASK_STOP_LOSS_ASE,
+            "exit.stop_loss.dase" => mask &= !GPU_EXIT_MASK_STOP_LOSS_DASE,
+            "exit.stop_loss.slb" => mask &= !GPU_EXIT_MASK_STOP_LOSS_SLB,
+            "exit.stop_loss.base" => mask &= !GPU_EXIT_MASK_STOP_LOSS_BASE,
+            "exit.stop_loss.breakeven" => mask &= !GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
+            "exit.trailing.low_conf_override" => mask &= !GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE,
+            "exit.trailing.vol_buffer" => mask &= !GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+            "exit.trailing.base" => mask &= !GPU_EXIT_MASK_TRAILING_BASE,
+            "exit.take_profit.partial" => mask &= !GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
+            "exit.take_profit.full" => mask &= !GPU_EXIT_MASK_TAKE_PROFIT_FULL,
+            _ => {}
+        }
+    }
+    mask
+}
+
+fn build_smart_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -> u32 {
+    let mut mask = GPU_SMART_EXIT_MASK_ALL;
+    for item in &plan.exits.items {
+        if item.enabled {
+            continue;
+        }
+        match item.id.as_str() {
+            "exit.smart.trend_breakdown" => mask &= !GPU_SMART_EXIT_MASK_TREND_BREAKDOWN,
+            "exit.smart.trend_exhaustion" => mask &= !GPU_SMART_EXIT_MASK_TREND_EXHAUSTION,
+            "exit.smart.ema_macro_breakdown" => mask &= !GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN,
+            "exit.smart.stagnation" => mask &= !GPU_SMART_EXIT_MASK_STAGNATION,
+            "exit.smart.funding_headwind" => mask &= !GPU_SMART_EXIT_MASK_FUNDING_HEADWIND,
+            "exit.smart.tsme" => mask &= !GPU_SMART_EXIT_MASK_TSME,
+            "exit.smart.mmde" => mask &= !GPU_SMART_EXIT_MASK_MMDE,
+            "exit.smart.rsi_overextension" => mask &= !GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION,
+            _ => {}
+        }
+    }
+    mask
+}
+
 impl GpuComboConfig {
     /// Convert a `StrategyConfig` (f64) into a `GpuComboConfig` (f32).
     ///
     /// Returns `Err` if any price, size, or leverage value overflows f32.
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig) -> Result<Self, String> {
+        let resolved = bt_core::execution_contract::resolve_gpu_execution_config(cfg, None)
+            .map_err(|err| format!("execution contract resolution failed: {err}"))?;
+        let exit_behaviour_mask = build_exit_behaviour_mask(&resolved.behaviour_plan);
+        let smart_exit_behaviour_mask = build_smart_exit_behaviour_mask(&resolved.behaviour_plan);
+        let cfg = &resolved.effective_cfg;
         let tc = &cfg.trade;
         let fc = &cfg.filters;
         let mc = &cfg.market_regime;
@@ -698,11 +785,11 @@ impl GpuComboConfig {
             reef_long_rsi_extreme_gt: checked_f32_field!(tc.reef_long_rsi_extreme_gt),
             reef_short_rsi_extreme_lt: checked_f32_field!(tc.reef_short_rsi_extreme_lt),
 
-            _reserved10: 0,
+            smart_exit_behaviour_mask,
             leverage_low: checked_f32("leverage_low", tc.leverage_low)?,
             leverage_medium: checked_f32("leverage_medium", tc.leverage_medium)?,
             leverage_high: checked_f32("leverage_high", tc.leverage_high)?,
-            _reserved14: 0.0,
+            exit_behaviour_mask,
             trailing_rsi_floor_default: 0.5,
 
             slippage_bps: checked_f32("slippage_bps", tc.slippage_bps)?,
@@ -871,9 +958,16 @@ impl GpuComboConfig {
 mod tests {
     use super::{
         GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
+        GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN, GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
+        GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE, GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+        GPU_SMART_EXIT_MASK_ALL,
     };
-    use bt_core::config::StrategyConfig;
+    use bt_core::config::{
+        BehaviourGroupConfig, BehaviourProfileConfig, PipelineConfig, PipelineProfileConfig,
+        RuntimeConfig, StrategyConfig,
+    };
     use bytemuck::{checked, Zeroable};
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_gpu_indicator_config_uses_threshold_ave_window() {
@@ -998,6 +1092,132 @@ mod tests {
             GpuComboConfig::from_strategy_config(&cfg).is_ok(),
             "default config should not overflow"
         );
+    }
+
+    #[test]
+    fn test_gpu_combo_config_uses_resolved_execution_contract() {
+        let profile = "gpu_modular";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime = RuntimeConfig {
+            profile: profile.to_string(),
+            ..RuntimeConfig::default()
+        };
+        cfg.pipeline = PipelineConfig {
+            default_profile: "production".to_string(),
+            profiles: BTreeMap::from([(
+                profile.to_string(),
+                PipelineProfileConfig {
+                    behaviours: BehaviourProfileConfig {
+                        entry_sizing: BehaviourGroupConfig {
+                            disabled: vec![
+                                "entry.sizing.dynamic".to_string(),
+                                "entry.sizing.confidence_multiplier".to_string(),
+                                "entry.sizing.adx_multiplier".to_string(),
+                                "entry.sizing.volatility_scalar".to_string(),
+                                "entry.sizing.min_notional_bump".to_string(),
+                            ],
+                            ..BehaviourGroupConfig::default()
+                        },
+                        entry_progression: BehaviourGroupConfig {
+                            disabled: vec![
+                                "entry.progression.pyramiding".to_string(),
+                                "entry.progression.add_cooldown".to_string(),
+                            ],
+                            ..BehaviourGroupConfig::default()
+                        },
+                        risk: BehaviourGroupConfig {
+                            disabled: vec![
+                                "risk.entry_cooldown".to_string(),
+                                "risk.exit_cooldown".to_string(),
+                                "risk.pesc".to_string(),
+                            ],
+                            ..BehaviourGroupConfig::default()
+                        },
+                        ..BehaviourProfileConfig::default()
+                    },
+                    ..PipelineProfileConfig::default()
+                },
+            )]),
+        };
+
+        let resolved = bt_core::execution_contract::resolve_execution_config(&cfg, None)
+            .expect("execution contract must resolve");
+        let gpu = GpuComboConfig::from_strategy_config(&resolved.effective_cfg)
+            .expect("resolved config must lower into GPU combo config");
+
+        assert_eq!(gpu.enable_dynamic_sizing, 0);
+        assert!((gpu.confidence_mult_high - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.confidence_mult_medium - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.confidence_mult_low - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.adx_sizing_min_mult - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.adx_sizing_full_adx - 0.0).abs() < f32::EPSILON);
+        assert!((gpu.vol_baseline_pct - 0.0).abs() < f32::EPSILON);
+        assert!((gpu.vol_scalar_min - 1.0).abs() < f32::EPSILON);
+        assert!((gpu.vol_scalar_max - 1.0).abs() < f32::EPSILON);
+        assert_eq!(gpu.bump_to_min_notional, 0);
+        assert_eq!(gpu.enable_pyramiding, 0);
+        assert_eq!(gpu.add_cooldown_minutes, 0);
+        assert_eq!(gpu.entry_cooldown_s, 0);
+        assert_eq!(gpu.exit_cooldown_s, 0);
+        assert_eq!(gpu.reentry_cooldown_minutes, 0);
+    }
+
+    #[test]
+    fn test_gpu_combo_config_lowers_builtin_parity_exit_isolation() {
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = "parity_exit_isolation".to_string();
+
+        let gpu = GpuComboConfig::from_strategy_config(&cfg)
+            .expect("parity_exit_isolation should lower into GPU config");
+
+        assert_eq!(gpu.enable_breakeven_stop, 0);
+        assert_eq!(gpu.enable_partial_tp, 0);
+        assert_eq!(gpu.enable_vol_buffered_trailing, 0);
+        assert_eq!(gpu.trailing_start_atr_low_conf, 0.0);
+        assert_eq!(gpu.trailing_distance_atr_low_conf, 0.0);
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
+            0
+        );
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE,
+            0
+        );
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+            0
+        );
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
+            0
+        );
+        assert_eq!(gpu.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_ALL, 0);
+    }
+
+    #[test]
+    fn test_gpu_combo_config_rejects_custom_exit_reorder() {
+        let profile = "gpu_custom_exit_order";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        cfg.pipeline.profiles.insert(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.take_profit.full".to_string(),
+                            "exit.stop_loss.base".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        );
+
+        let err = GpuComboConfig::from_strategy_config(&cfg).unwrap_err();
+        assert!(err.contains("canonical order for `exits`"));
     }
 
     #[test]

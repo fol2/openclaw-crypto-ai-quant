@@ -14,6 +14,26 @@
 
 #pragma once
 
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_ASE = 1u << 0;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_DASE = 1u << 1;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_SLB = 1u << 2;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_BASE = 1u << 3;
+static constexpr unsigned int GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN = 1u << 4;
+static constexpr unsigned int GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE = 1u << 5;
+static constexpr unsigned int GPU_EXIT_MASK_TRAILING_VOL_BUFFER = 1u << 6;
+static constexpr unsigned int GPU_EXIT_MASK_TRAILING_BASE = 1u << 7;
+static constexpr unsigned int GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL = 1u << 8;
+static constexpr unsigned int GPU_EXIT_MASK_TAKE_PROFIT_FULL = 1u << 9;
+
+static constexpr unsigned int GPU_SMART_EXIT_MASK_TREND_BREAKDOWN = 1u << 0;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_TREND_EXHAUSTION = 1u << 1;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN = 1u << 2;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_STAGNATION = 1u << 3;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_FUNDING_HEADWIND = 1u << 4;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_TSME = 1u << 5;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_MMDE = 1u << 6;
+static constexpr unsigned int GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION = 1u << 7;
+
 // SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"6971a3a32cd759a171401243b5f5ba3ec62dde916658a4ebbef39f8cb8a30d02","../bt-core/src/exits/smart_exits.rs":"20c5f62e408df61ad7fb06bebc397b1db98270a1499bd2115f1bfe2b9c44d22f","../bt-core/src/exits/stop_loss.rs":"971bccbf31eb2d304e39674597b050ef4c48400ab687c32e60c44a28ec54ae63","../bt-core/src/exits/take_profit.rs":"97ca65bcebfe3e534f8f3980c227e582541d9a55543011822f9db4c209317b23","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"dbfecf1ff50ea6c72e07f4de644b400a4645c8cd4ab5ca7244c6e26237bc7dca","../bt-signals/src/gates.rs":"1ed3afe9087f941e47894d16c88351ea33c76198ac48894772e9b8d7b236cd19"}
 
 // Derived from bt-signals/src/gates.rs
@@ -487,6 +507,10 @@ __device__ double compute_sl_price_codegen(
     // ATR fallback: legacy positions with no ATR recorded
     double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
 
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u) {
+        return 0.0;
+    }
+
     double sl_mult = (double)cfg.sl_atr_mult;
 
     // ── 1. ASE (ADX Slope-Adjusted Stop) ─────────────────────────────────
@@ -498,7 +522,9 @@ __device__ double compute_sl_price_codegen(
     } else {              // POS_SHORT
         is_underwater = (current_price > entry_price);
     }
-    if (adx_slope < 0.0 && is_underwater) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_ASE) != 0u
+        && adx_slope < 0.0
+        && is_underwater) {
         sl_mult *= 0.8;
     }
 
@@ -507,7 +533,7 @@ __device__ double compute_sl_price_codegen(
 
     // ── 3. DASE (Dynamic ADX Stop Expansion) ─────────────────────────────
     // If ADX > 40 and position is profitable by > 0.5 ATR, widen by 15%.
-    if (adx > 40.0) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_DASE) != 0u && adx > 40.0) {
         double profit_in_atr;
         if (pos_type == 1) {  // POS_LONG
             profit_in_atr = (current_price - entry_price) / eff_atr;
@@ -521,7 +547,7 @@ __device__ double compute_sl_price_codegen(
 
     // ── 4. SLB (Saturation Loyalty Buffer) ───────────────────────────────
     // If ADX > 45 (saturated/strong trend), widen overall SL by 10%.
-    if (adx > 45.0) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB) != 0u && adx > 45.0) {
         sl_mult *= 1.10;
     }
 
@@ -536,7 +562,9 @@ __device__ double compute_sl_price_codegen(
     // ── 5. Breakeven Stop ────────────────────────────────────────────────
     // If profit exceeds breakeven_start_atr ATRs, move SL to
     // entry +/- breakeven_buffer_atr ATRs (protecting at least entry).
-    if (cfg.enable_breakeven_stop != 0u && cfg.breakeven_start_atr > 0.0f) {
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN) != 0u
+        && cfg.enable_breakeven_stop != 0u
+        && cfg.breakeven_start_atr > 0.0f) {
         double be_start = eff_atr * (double)cfg.breakeven_start_atr;
         double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
 
@@ -579,11 +607,16 @@ __device__ double compute_trailing_codegen(
     // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
     double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
 
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_BASE) == 0u) {
+        return current_trailing_sl;
+    }
+
     // ── Per-confidence overrides for trailing start / distance ─────────────
     double trailing_start = (double)cfg.trailing_start_atr;
     double trailing_dist  = (double)cfg.trailing_distance_atr;
 
-    if (confidence == 0) {  // Confidence::Low == 0
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE) != 0u
+        && confidence == 0) {  // Confidence::Low == 0
         if (cfg.trailing_start_atr_low_conf > 0.0f) {
             trailing_start = (double)cfg.trailing_start_atr_low_conf;
         }
@@ -607,7 +640,8 @@ __device__ double compute_trailing_codegen(
     double effective_dist = trailing_dist;
 
     // VBTS (Vol-Buffered Trailing Stop, v5.015): widen when BB expanding.
-    if (cfg.enable_vol_buffered_trailing != 0u
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER) != 0u
+        && cfg.enable_vol_buffered_trailing != 0u
         && bb_width_ratio > (double)cfg.trailing_vbts_bb_threshold) {
         effective_dist *= (double)cfg.trailing_vbts_mult;
     }
@@ -696,6 +730,16 @@ __device__ TpResult check_tp_codegen(
     result.fraction = 0.0;
     result.exit_code = 0;
 
+    bool partial_tp_enabled =
+        (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL) != 0u
+        && cfg.enable_partial_tp != 0u;
+    bool full_tp_enabled =
+        (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TAKE_PROFIT_FULL) != 0u;
+
+    if (!partial_tp_enabled && !full_tp_enabled) {
+        return result;
+    }
+
     // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
     double atr = (entry_atr > 0.0) ? entry_atr : (entry_price * 0.005);
 
@@ -708,7 +752,7 @@ __device__ TpResult check_tp_codegen(
     }
 
     // ── Partial TP path ────────────────────────────────────────────────────
-    if (cfg.enable_partial_tp != 0u) {
+    if (partial_tp_enabled) {
         if (tp1_taken == 0u) {
             // Determine partial TP level: use dedicated mult if set,
             // otherwise same as full TP.
@@ -786,7 +830,7 @@ __device__ TpResult check_tp_codegen(
         tp_hit = (current_price <= tp_price);
     }
 
-    if (!tp_hit) {
+    if (!full_tp_enabled || !tp_hit) {
         return result;  // action=0, hold
     }
 
@@ -875,7 +919,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
         ema_cross_exit = (ema_fast > ema_slow && !is_weak_cross);
     }
 
-    if (ema_cross_exit) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_TREND_BREAKDOWN) != 0u
+        && ema_cross_exit) {
         result.should_exit = true;
         result.exit_code = 1;
         return result;
@@ -884,7 +929,9 @@ __device__ SmartExitResult check_smart_exits_codegen(
     // ══════════════════════════════════════════════════════════════════════
     // 2. Trend Exhaustion (ADX below threshold)
     // ══════════════════════════════════════════════════════════════════════
-    if (adx_exhaustion_lt > 0.0 && adx < adx_exhaustion_lt) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_TREND_EXHAUSTION) != 0u
+        && adx_exhaustion_lt > 0.0
+        && adx < adx_exhaustion_lt) {
         result.should_exit = true;
         result.exit_code = 2;
         return result;
@@ -893,7 +940,9 @@ __device__ SmartExitResult check_smart_exits_codegen(
     // ══════════════════════════════════════════════════════════════════════
     // 3. EMA Macro Breakdown (only if require_macro_alignment enabled)
     // ══════════════════════════════════════════════════════════════════════
-    if (cfg.require_macro_alignment != 0u && ema_macro > 0.0) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN) != 0u
+        && cfg.require_macro_alignment != 0u
+        && ema_macro > 0.0) {
         if (pos_type == POS_LONG && current_price < ema_macro) {
             result.should_exit = true;
             result.exit_code = 3;
@@ -910,7 +959,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
     // 4. Stagnation Exit (low-volatility + underwater)
     //    Note: PAXG exclusion is handled by the caller (symbol check).
     // ══════════════════════════════════════════════════════════════════════
-    if (atr < (eff_atr * 0.70)) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_STAGNATION) != 0u
+        && atr < (eff_atr * 0.70)) {
         bool is_underwater;
         if (pos_type == POS_LONG) {
             is_underwater = (current_price < entry_price);
@@ -936,7 +986,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
     //    ADX > 50, profit >= tsme_min_profit_atr, optional ADX_slope < 0,
     //    MACD momentum contracting (2 consecutive contractions).
     // ══════════════════════════════════════════════════════════════════════
-    if (adx > 50.0) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_TSME) != 0u
+        && adx > 50.0) {
         double tsme_min_profit = (double)cfg.tsme_min_profit_atr;
         bool gate_profit_ok = (profit_atr >= tsme_min_profit);
         bool gate_slope_ok = true;
@@ -967,7 +1018,9 @@ __device__ SmartExitResult check_smart_exits_codegen(
     //    profit > 1.5 ATR AND ADX > 35 AND 3 consecutive MACD histogram
     //    moves against position (4 bars total).
     // ══════════════════════════════════════════════════════════════════════
-    if (profit_atr > 1.5 && adx > 35.0) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_MMDE) != 0u
+        && profit_atr > 1.5
+        && adx > 35.0) {
         bool is_diverging;
         if (pos_type == POS_LONG) {
             is_diverging = (macd_hist < prev_macd_hist
@@ -991,7 +1044,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
     //    Configurable RSI thresholds with profit-regime switch and
     //    low-confidence overrides.
     // ══════════════════════════════════════════════════════════════════════
-    if (cfg.enable_rsi_overextension_exit != 0u) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION) != 0u
+        && cfg.enable_rsi_overextension_exit != 0u) {
         double sw = fmax((double)cfg.rsi_exit_profit_atr_switch, 0.0);
 
         double rsi_ub;
@@ -1085,22 +1139,24 @@ __device__ AllExitResult check_all_exits_codegen(
     result.exit_price = 0.0;
 
     // ── 1. Stop Loss ────────────────────────────────────────────────────
-    double sl_price = compute_sl_price_codegen(
-        cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
-    );
-    if (pos_type == 1) {  // POS_LONG
-        if (current_price <= sl_price) {
-            result.should_exit = true;
-            result.exit_code = 100;
-            result.exit_price = current_price;
-            return result;
-        }
-    } else {              // POS_SHORT
-        if (current_price >= sl_price) {
-            result.should_exit = true;
-            result.exit_code = 100;
-            result.exit_price = current_price;
-            return result;
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) != 0u) {
+        double sl_price = compute_sl_price_codegen(
+            cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
+        );
+        if (pos_type == 1) {  // POS_LONG
+            if (current_price <= sl_price) {
+                result.should_exit = true;
+                result.exit_code = 100;
+                result.exit_price = current_price;
+                return result;
+            }
+        } else {              // POS_SHORT
+            if (current_price >= sl_price) {
+                result.should_exit = true;
+                result.exit_code = 100;
+                result.exit_price = current_price;
+                return result;
+            }
         }
     }
 
