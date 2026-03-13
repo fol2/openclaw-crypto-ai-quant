@@ -227,6 +227,8 @@ pub fn execute_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result
         }
     };
     let exchange_order_id = extract_exchange_order_id(&response);
+    let embedded_reject = response_has_embedded_error(&response);
+    let response_text = response.to_string();
     record_manual_order_submission(
         &conn,
         ManualOrderSubmission {
@@ -239,11 +241,25 @@ pub fn execute_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result
             reduce_only: false,
             client_order_id: &cloid,
             exchange_order_id: exchange_order_id.as_deref(),
-            status: "SENT",
-            last_error: "",
-            raw_json: response.to_string(),
+            status: if embedded_reject { "REJECTED" } else { "SENT" },
+            last_error: if embedded_reject { &response_text } else { "" },
+            raw_json: response_text.clone(),
         },
     )?;
+    if embedded_reject {
+        write_manual_runtime_log(
+            &conn,
+            "ERROR",
+            &format!(
+                "manual_trade submit_rejected intent_id={} symbol={} action=OPEN exchange_order_id={} response={}",
+                intent_id,
+                prepared.symbol,
+                exchange_order_id.as_deref().unwrap_or("unknown"),
+                response_text
+            ),
+        )?;
+        return Err(HubError::BadRequest(response_text));
+    }
     write_manual_runtime_log(
         &conn,
         "INFO",
@@ -474,6 +490,8 @@ pub fn execute_close(
         }
     };
     let exchange_order_id = extract_exchange_order_id(&response);
+    let embedded_reject = response_has_embedded_error(&response);
+    let response_text = response.to_string();
     record_manual_order_submission(
         &conn,
         ManualOrderSubmission {
@@ -486,11 +504,26 @@ pub fn execute_close(
             reduce_only: true,
             client_order_id: &cloid,
             exchange_order_id: exchange_order_id.as_deref(),
-            status: "SENT",
-            last_error: "",
-            raw_json: response.to_string(),
+            status: if embedded_reject { "REJECTED" } else { "SENT" },
+            last_error: if embedded_reject { &response_text } else { "" },
+            raw_json: response_text.clone(),
         },
     )?;
+    if embedded_reject {
+        write_manual_runtime_log(
+            &conn,
+            "ERROR",
+            &format!(
+                "manual_trade submit_rejected intent_id={} symbol={} action={} exchange_order_id={} response={}",
+                intent_id,
+                prepared.symbol,
+                close_action,
+                exchange_order_id.as_deref().unwrap_or("unknown"),
+                response_text
+            ),
+        )?;
+        return Err(HubError::BadRequest(response_text));
+    }
     write_manual_runtime_log(
         &conn,
         "INFO",
@@ -1378,9 +1411,6 @@ fn submit_open_order(
     }
     .map_err(|error| HubError::BadRequest(error.to_string()))?;
 
-    if response_has_embedded_error(&response) {
-        return Err(HubError::BadRequest(response.to_string()));
-    }
     Ok(response)
 }
 
@@ -1423,9 +1453,6 @@ fn submit_close_order(
     }
     .map_err(|error| HubError::BadRequest(error.to_string()))?;
 
-    if response_has_embedded_error(&response) {
-        return Err(HubError::BadRequest(response.to_string()));
-    }
     Ok(response)
 }
 
@@ -1912,5 +1939,83 @@ mod tests {
         assert_eq!(oms_fills_count, 1);
         assert_eq!(trades_count, 0);
         assert_eq!(runtime_logs_count, 1);
+    }
+
+    #[test]
+    fn manual_db_hardening_keeps_rejected_order_raw_json() {
+        let db = NamedTempFile::new().unwrap();
+        let bootstrap = Connection::open(db.path()).unwrap();
+        create_trades_table(&bootstrap);
+        drop(bootstrap);
+
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let intent_id = "manual_test_reject";
+        let cloid = manual_cloid_from_intent_id(intent_id);
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: 1_773_439_600_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "NEW",
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        let rejected_raw = json!({
+            "status": "ok",
+            "response": {
+                "data": {
+                    "statuses": [
+                        { "error": "Order has invalid price." }
+                    ]
+                }
+            }
+        })
+        .to_string();
+        record_manual_order_submission(
+            &conn,
+            ManualOrderSubmission {
+                intent_id,
+                sent_ts_ms: 1_773_439_600_123,
+                symbol: "ETH",
+                side: "SELL",
+                order_type: "market_open",
+                requested_size: 0.0515,
+                reduce_only: false,
+                client_order_id: &cloid,
+                exchange_order_id: None,
+                status: "REJECTED",
+                last_error: &rejected_raw,
+                raw_json: rejected_raw.clone(),
+            },
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM oms_intents WHERE intent_id = ?1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let raw_json: String = conn
+            .query_row(
+                "SELECT raw_json FROM oms_orders WHERE intent_id = ?1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(status, "REJECTED");
+        assert!(raw_json.contains("Order has invalid price."));
     }
 }
