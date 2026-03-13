@@ -657,6 +657,44 @@ const _: () = assert!(std::mem::size_of::<GpuFundingSpan>() == 8);
 // Conversion helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+pub const GPU_EXIT_MASK_STOP_LOSS_ASE: u32 = 1 << 0;
+pub const GPU_EXIT_MASK_STOP_LOSS_DASE: u32 = 1 << 1;
+pub const GPU_EXIT_MASK_STOP_LOSS_SLB: u32 = 1 << 2;
+pub const GPU_EXIT_MASK_STOP_LOSS_BASE: u32 = 1 << 3;
+pub const GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN: u32 = 1 << 4;
+pub const GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE: u32 = 1 << 5;
+pub const GPU_EXIT_MASK_TRAILING_VOL_BUFFER: u32 = 1 << 6;
+pub const GPU_EXIT_MASK_TRAILING_BASE: u32 = 1 << 7;
+pub const GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL: u32 = 1 << 8;
+pub const GPU_EXIT_MASK_TAKE_PROFIT_FULL: u32 = 1 << 9;
+pub const GPU_EXIT_MASK_ALL: u32 = GPU_EXIT_MASK_STOP_LOSS_ASE
+    | GPU_EXIT_MASK_STOP_LOSS_DASE
+    | GPU_EXIT_MASK_STOP_LOSS_SLB
+    | GPU_EXIT_MASK_STOP_LOSS_BASE
+    | GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN
+    | GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE
+    | GPU_EXIT_MASK_TRAILING_VOL_BUFFER
+    | GPU_EXIT_MASK_TRAILING_BASE
+    | GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL
+    | GPU_EXIT_MASK_TAKE_PROFIT_FULL;
+
+pub const GPU_SMART_EXIT_MASK_TREND_BREAKDOWN: u32 = 1 << 0;
+pub const GPU_SMART_EXIT_MASK_TREND_EXHAUSTION: u32 = 1 << 1;
+pub const GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN: u32 = 1 << 2;
+pub const GPU_SMART_EXIT_MASK_STAGNATION: u32 = 1 << 3;
+pub const GPU_SMART_EXIT_MASK_FUNDING_HEADWIND: u32 = 1 << 4;
+pub const GPU_SMART_EXIT_MASK_TSME: u32 = 1 << 5;
+pub const GPU_SMART_EXIT_MASK_MMDE: u32 = 1 << 6;
+pub const GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION: u32 = 1 << 7;
+pub const GPU_SMART_EXIT_MASK_ALL: u32 = GPU_SMART_EXIT_MASK_TREND_BREAKDOWN
+    | GPU_SMART_EXIT_MASK_TREND_EXHAUSTION
+    | GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN
+    | GPU_SMART_EXIT_MASK_STAGNATION
+    | GPU_SMART_EXIT_MASK_FUNDING_HEADWIND
+    | GPU_SMART_EXIT_MASK_TSME
+    | GPU_SMART_EXIT_MASK_MMDE
+    | GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION;
+
 /// Validate that an f64 value fits in f32 without becoming infinite.
 /// Returns `Err` if a finite f64 overflows to infinity in f32.
 fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
@@ -667,11 +705,185 @@ fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
     Ok(f)
 }
 
+fn ensure_default_group_order(
+    group: &str,
+    actual: &bt_signals::behaviour::BehaviourGroupPlan,
+    expected: &bt_signals::behaviour::BehaviourGroupPlan,
+) -> Result<(), String> {
+    let actual_ids = actual.ordered_ids().collect::<Vec<_>>();
+    let expected_ids = expected.ordered_ids().collect::<Vec<_>>();
+    if actual_ids != expected_ids {
+        return Err(format!(
+            "GPU path only supports the default `{group}` behaviour order; got {:?}, expected {:?}",
+            actual_ids, expected_ids
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_supported_disabled_behaviours(
+    group: &str,
+    plan: &bt_signals::behaviour::BehaviourGroupPlan,
+    supported: &[&str],
+) -> Result<(), String> {
+    for item in &plan.items {
+        if !item.enabled && !supported.contains(&item.id.as_str()) {
+            return Err(format!(
+                "GPU path does not yet support disabling behaviour `{}` in group `{group}`",
+                item.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_gpu_behaviour_plan_supported(
+    plan: &bt_core::behaviour::ResolvedBehaviourPlan,
+) -> Result<(), String> {
+    let production = bt_core::behaviour::ResolvedBehaviourPlan::production();
+    ensure_default_group_order("gates", &plan.gates, &production.gates)?;
+    ensure_default_group_order(
+        "signal_modes",
+        &plan.signal_modes,
+        &production.signal_modes,
+    )?;
+    ensure_default_group_order("engine", &plan.engine, &production.engine)?;
+    ensure_default_group_order("exits", &plan.exits, &production.exits)?;
+
+    ensure_supported_disabled_behaviours(
+        "gates",
+        &plan.gates,
+        &[
+            "gate.ranging_vote",
+            "gate.anomaly_filter",
+            "gate.extension_filter",
+            "gate.volume_confirmation",
+            "gate.adx_rising",
+            "gate.adx_floor",
+            "gate.alignment.macro",
+            "gate.alignment.btc",
+        ],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "signal_modes",
+        &plan.signal_modes,
+        &["signal.mode.pullback", "signal.mode.slow_drift"],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "signal_confidence",
+        &plan.signal_confidence,
+        &["signal.confidence.high_volume_upgrade"],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "engine",
+        &plan.engine,
+        &["engine.atr_floor", "engine.reverse_signal", "engine.regime_filter"],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "entry_sizing",
+        &plan.entry_sizing,
+        &[
+            "entry.sizing.dynamic",
+            "entry.sizing.confidence_multiplier",
+            "entry.sizing.adx_multiplier",
+            "entry.sizing.volatility_scalar",
+            "entry.sizing.min_notional_bump",
+        ],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "entry_progression",
+        &plan.entry_progression,
+        &["entry.progression.pyramiding", "entry.progression.add_cooldown"],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "risk",
+        &plan.risk,
+        &["risk.entry_cooldown", "risk.exit_cooldown", "risk.pesc"],
+    )?;
+    ensure_supported_disabled_behaviours(
+        "exits",
+        &plan.exits,
+        &[
+            "exit.stop_loss.ase",
+            "exit.stop_loss.dase",
+            "exit.stop_loss.slb",
+            "exit.stop_loss.base",
+            "exit.stop_loss.breakeven",
+            "exit.trailing.low_conf_override",
+            "exit.trailing.vol_buffer",
+            "exit.trailing.base",
+            "exit.take_profit.partial",
+            "exit.take_profit.full",
+            "exit.smart.trend_breakdown",
+            "exit.smart.trend_exhaustion",
+            "exit.smart.ema_macro_breakdown",
+            "exit.smart.stagnation",
+            "exit.smart.funding_headwind",
+            "exit.smart.tsme",
+            "exit.smart.mmde",
+            "exit.smart.rsi_overextension",
+        ],
+    )?;
+    Ok(())
+}
+
+fn build_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -> u32 {
+    let mut mask = GPU_EXIT_MASK_ALL;
+    for item in &plan.exits.items {
+        if item.enabled {
+            continue;
+        }
+        match item.id.as_str() {
+            "exit.stop_loss.ase" => mask &= !GPU_EXIT_MASK_STOP_LOSS_ASE,
+            "exit.stop_loss.dase" => mask &= !GPU_EXIT_MASK_STOP_LOSS_DASE,
+            "exit.stop_loss.slb" => mask &= !GPU_EXIT_MASK_STOP_LOSS_SLB,
+            "exit.stop_loss.base" => mask &= !GPU_EXIT_MASK_STOP_LOSS_BASE,
+            "exit.stop_loss.breakeven" => mask &= !GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
+            "exit.trailing.low_conf_override" => {
+                mask &= !GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE
+            }
+            "exit.trailing.vol_buffer" => mask &= !GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+            "exit.trailing.base" => mask &= !GPU_EXIT_MASK_TRAILING_BASE,
+            "exit.take_profit.partial" => mask &= !GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
+            "exit.take_profit.full" => mask &= !GPU_EXIT_MASK_TAKE_PROFIT_FULL,
+            _ => {}
+        }
+    }
+    mask
+}
+
+fn build_smart_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -> u32 {
+    let mut mask = GPU_SMART_EXIT_MASK_ALL;
+    for item in &plan.exits.items {
+        if item.enabled {
+            continue;
+        }
+        match item.id.as_str() {
+            "exit.smart.trend_breakdown" => mask &= !GPU_SMART_EXIT_MASK_TREND_BREAKDOWN,
+            "exit.smart.trend_exhaustion" => mask &= !GPU_SMART_EXIT_MASK_TREND_EXHAUSTION,
+            "exit.smart.ema_macro_breakdown" => mask &= !GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN,
+            "exit.smart.stagnation" => mask &= !GPU_SMART_EXIT_MASK_STAGNATION,
+            "exit.smart.funding_headwind" => mask &= !GPU_SMART_EXIT_MASK_FUNDING_HEADWIND,
+            "exit.smart.tsme" => mask &= !GPU_SMART_EXIT_MASK_TSME,
+            "exit.smart.mmde" => mask &= !GPU_SMART_EXIT_MASK_MMDE,
+            "exit.smart.rsi_overextension" => mask &= !GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION,
+            _ => {}
+        }
+    }
+    mask
+}
+
 impl GpuComboConfig {
     /// Convert a `StrategyConfig` (f64) into a `GpuComboConfig` (f32).
     ///
     /// Returns `Err` if any price, size, or leverage value overflows f32.
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig) -> Result<Self, String> {
+        let resolved = bt_core::execution_contract::resolve_execution_config(cfg, None)
+            .map_err(|err| format!("execution contract resolution failed: {err}"))?;
+        ensure_gpu_behaviour_plan_supported(&resolved.behaviour_plan)?;
+        let exit_behaviour_mask = build_exit_behaviour_mask(&resolved.behaviour_plan);
+        let smart_exit_behaviour_mask = build_smart_exit_behaviour_mask(&resolved.behaviour_plan);
+        let cfg = &resolved.effective_cfg;
         let tc = &cfg.trade;
         let fc = &cfg.filters;
         let mc = &cfg.market_regime;
@@ -698,11 +910,11 @@ impl GpuComboConfig {
             reef_long_rsi_extreme_gt: checked_f32_field!(tc.reef_long_rsi_extreme_gt),
             reef_short_rsi_extreme_lt: checked_f32_field!(tc.reef_short_rsi_extreme_lt),
 
-            _reserved10: 0,
+            smart_exit_behaviour_mask,
             leverage_low: checked_f32("leverage_low", tc.leverage_low)?,
             leverage_medium: checked_f32("leverage_medium", tc.leverage_medium)?,
             leverage_high: checked_f32("leverage_high", tc.leverage_high)?,
-            _reserved14: 0.0,
+            exit_behaviour_mask,
             trailing_rsi_floor_default: 0.5,
 
             slippage_bps: checked_f32("slippage_bps", tc.slippage_bps)?,
@@ -871,6 +1083,9 @@ impl GpuComboConfig {
 mod tests {
     use super::{
         GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
+        GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL, GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
+        GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE, GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+        GPU_SMART_EXIT_MASK_ALL,
     };
     use bt_core::config::{
         BehaviourGroupConfig, BehaviourProfileConfig, PipelineConfig, PipelineProfileConfig,
@@ -1070,6 +1285,64 @@ mod tests {
         assert_eq!(gpu.entry_cooldown_s, 0);
         assert_eq!(gpu.exit_cooldown_s, 0);
         assert_eq!(gpu.reentry_cooldown_minutes, 0);
+    }
+
+    #[test]
+    fn test_gpu_combo_config_lowers_builtin_parity_exit_isolation() {
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = "parity_exit_isolation".to_string();
+
+        let gpu = GpuComboConfig::from_strategy_config(&cfg)
+            .expect("parity_exit_isolation should lower into GPU config");
+
+        assert_eq!(gpu.enable_breakeven_stop, 0);
+        assert_eq!(gpu.enable_partial_tp, 0);
+        assert_eq!(gpu.enable_vol_buffered_trailing, 0);
+        assert_eq!(gpu.trailing_start_atr_low_conf, 0.0);
+        assert_eq!(gpu.trailing_distance_atr_low_conf, 0.0);
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN,
+            0
+        );
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE,
+            0
+        );
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER,
+            0
+        );
+        assert_eq!(
+            gpu.exit_behaviour_mask & GPU_EXIT_MASK_TAKE_PROFIT_PARTIAL,
+            0
+        );
+        assert_eq!(gpu.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_ALL, 0);
+    }
+
+    #[test]
+    fn test_gpu_combo_config_rejects_custom_exit_reorder() {
+        let profile = "gpu_custom_exit_order";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        cfg.pipeline.profiles.insert(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.take_profit.full".to_string(),
+                            "exit.stop_loss.base".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        );
+
+        let err = GpuComboConfig::from_strategy_config(&cfg).unwrap_err();
+        assert!(err.contains("default `exits` behaviour order"));
     }
 
     #[test]
