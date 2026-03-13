@@ -2124,6 +2124,25 @@ fn recover_existing_new_manual_execution(
                 status
             ),
         )?;
+        write_manual_audit_event(
+            conn,
+            Some(&existing.symbol),
+            "MANUAL_FILLS_RECORDED",
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            json!({
+                "intent_id": &existing.intent_id,
+                "action": &existing.action,
+                "status": status,
+                "observed_fills": fill_summary.observed_fills,
+                "parsed_trade_rows": fill_summary.parsed_trade_rows,
+                "filled_size": fill_summary.filled_size,
+                "source": "recovery",
+            }),
+        )?;
         return load_existing_manual_intent_by_dedupe_key(
             conn,
             existing.dedupe_key.as_deref().ok_or_else(|| {
@@ -2169,6 +2188,20 @@ fn recover_existing_new_manual_execution(
                 existing.symbol,
                 exchange_order_id.as_deref().unwrap_or("unknown")
             ),
+        )?;
+        write_manual_audit_event(
+            conn,
+            Some(&existing.symbol),
+            "MANUAL_ORDER_SUBMITTED",
+            "INFO",
+            json!({
+                "intent_id": &existing.intent_id,
+                "action": &existing.action,
+                "exchange_order_id": &exchange_order_id,
+                "client_order_id": &cloid,
+                "order_type": "recovered_open_order",
+                "source": "recovery",
+            }),
         )?;
         return load_existing_manual_intent_by_dedupe_key(
             conn,
