@@ -52,6 +52,9 @@ async fn main() {
     // Start background HL balance poller (live mode only).
     spawn_hl_poller(Arc::clone(&state));
 
+    // Start background manual-trade recovery poller.
+    spawn_manual_trade_recovery_poller(Arc::clone(&state));
+
     // Build router.
     let api = routes::api_router();
 
@@ -280,6 +283,45 @@ fn spawn_hl_poller(state: Arc<AppState>) {
                     // Keep stale data rather than clearing — better to show slightly
                     // old values than nothing.
                     tracing::debug!("HL snapshot fetch failed, keeping previous value");
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    });
+}
+
+fn spawn_manual_trade_recovery_poller(state: Arc<AppState>) {
+    if !state.config.manual_trade_enabled {
+        return;
+    }
+    let cfg = state.config.clone();
+    tokio::spawn(async move {
+        let poll_interval = std::time::Duration::from_secs(30);
+        loop {
+            match tokio::task::spawn_blocking({
+                let cfg = cfg.clone();
+                move || manual_trade::recover_unknown_manual_intents(&cfg, 20)
+            })
+            .await
+            {
+                Ok(Ok(summary)) => {
+                    let recovered = summary
+                        .get("recovered_fills")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                        + summary
+                            .get("recovered_open_orders")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0);
+                    if recovered > 0 {
+                        tracing::info!(summary = %summary, "manual unknown recovery applied");
+                    }
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "manual unknown recovery failed");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "manual unknown recovery task failed");
                 }
             }
             tokio::time::sleep(poll_interval).await;
