@@ -272,3 +272,93 @@ fn cpu_gpu_parity_respects_modular_entry_sizing_profile() {
         pnl_rel_err
     );
 }
+
+#[test]
+fn cpu_gpu_parity_respects_builtin_parity_exit_isolation_profile() {
+    if let Err(e) = CudaDevice::new(0) {
+        eprintln!("Skipping: CUDA unavailable: {:?}", e);
+        return;
+    }
+
+    let hour = 3_600_000i64;
+    let mut bars_1h = Vec::new();
+    for i in 0..240 {
+        let close = 100.0 + i as f64 * 0.8 + (i as f64 * 0.2).sin() * 3.0;
+        bars_1h.push(bar_1h(i as i64 * hour, close));
+    }
+    let mut candles: CandleData = FxHashMap::default();
+    candles.insert("BTC".to_string(), bars_1h);
+
+    let mut cfg = StrategyConfig::default();
+    cfg.filters.enable_ranging_filter = false;
+    cfg.filters.enable_anomaly_filter = false;
+    cfg.filters.enable_extension_filter = false;
+    cfg.filters.require_adx_rising = false;
+    cfg.filters.require_btc_alignment = false;
+    cfg.filters.use_stoch_rsi_filter = false;
+    cfg.filters.require_macro_alignment = false;
+    cfg.thresholds.entry.min_adx = -1.0;
+    cfg.thresholds.entry.macd_hist_entry_mode = MacdMode::None;
+    cfg.trade.entry_min_confidence = Confidence::Low;
+    cfg.trade.enable_ssf_filter = false;
+    cfg.trade.enable_reef_filter = false;
+    cfg.trade.leverage = 1.0;
+    cfg.trade.allocation_pct = 0.10;
+    cfg.trade.slippage_bps = 0.0;
+    cfg.trade.enable_pyramiding = false;
+    cfg.trade.min_atr_pct = 0.0;
+    cfg.runtime = RuntimeConfig {
+        profile: "parity_exit_isolation".to_string(),
+        ..RuntimeConfig::default()
+    };
+
+    let spec = SweepSpec {
+        axes: vec![],
+        initial_balance: 1_000.0,
+        lookback: 0,
+    };
+
+    let cpu = bt_core::sweep::run_sweep(bt_core::sweep::RunSweepInput {
+        base_cfg: &cfg,
+        spec: &spec,
+        candles: &candles,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        from_ts: None,
+        to_ts: None,
+    });
+    assert_eq!(cpu.len(), 1);
+    let cpu_rpt = &cpu[0].report;
+    assert!(
+        cpu_rpt.total_trades > 0,
+        "Fixture should produce at least one trade on CPU (got 0)"
+    );
+
+    let gpu = run_gpu_sweep(&candles, &cfg, &spec, None, None, None, None);
+    assert_eq!(gpu.len(), 1);
+    let gpu_rpt = &gpu[0];
+    assert!(
+        gpu_rpt.total_trades > 0,
+        "Fixture should produce at least one trade on GPU (got 0)"
+    );
+
+    let trade_ratio = gpu_rpt.total_trades as f64 / cpu_rpt.total_trades.max(1) as f64;
+    assert!(
+        (0.5..=2.0).contains(&trade_ratio),
+        "parity_exit_isolation trade-count mismatch (cpu={}, gpu={}, ratio={:.2})",
+        cpu_rpt.total_trades,
+        gpu_rpt.total_trades,
+        trade_ratio
+    );
+
+    let balance_rel_err =
+        (cpu_rpt.final_balance - gpu_rpt.final_balance).abs() / spec.initial_balance;
+    assert!(
+        balance_rel_err <= 0.05,
+        "parity_exit_isolation balance drift too large (cpu={:.2}, gpu={:.2}, rel_err={:.4})",
+        cpu_rpt.final_balance,
+        gpu_rpt.final_balance,
+        balance_rel_err
+    );
+}
