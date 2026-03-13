@@ -7,6 +7,10 @@ edition = "2021"
 name = "aiq-hub"
 path = "src/main.rs"
 
+[features]
+default = []
+factory = []
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }

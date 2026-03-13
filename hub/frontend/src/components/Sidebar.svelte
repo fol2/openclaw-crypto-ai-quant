@@ -1,6 +1,7 @@
 <script lang="ts">
-  let { currentPage, open = false, collapsed = false, onNavigate, onToggleCollapse }: {
+  let { currentPage, showFactory = false, open = false, collapsed = false, onNavigate, onToggleCollapse }: {
     currentPage: string;
+    showFactory?: boolean;
     open?: boolean;
     collapsed?: boolean;
     onNavigate?: () => void;
@@ -28,6 +29,18 @@
   function handleClick() {
     onNavigate?.();
   }
+
+  function visibleLinks() {
+    if (showFactory) {
+      return [
+        ...links.slice(0, 4),
+        { id: 'factory', label: 'Factory',
+          icon: 'M3 21h18M5 21V7l7-4 7 4v14M9 10h6M9 14h6M9 18h6' },
+        ...links.slice(4),
+      ];
+    }
+    return links;
+  }
 </script>
 
 <nav class="sidebar" class:open class:collapsed>
@@ -45,7 +58,7 @@
   </div>
 
   <ul>
-    {#each links as link}
+    {#each visibleLinks() as link}
       <li>
         <a
           href="#{link.id}"

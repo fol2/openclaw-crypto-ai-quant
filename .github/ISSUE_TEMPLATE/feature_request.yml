@@ -13,16 +13,14 @@ body:
       label: Component
       options:
         - Rust Runtime (runtime/)
-        - Python Compatibility Runtime (engine/)
-        - Strategy (strategy/)
-        - Live Trader (live/, archival)
+        - Legacy Compatibility Surface (archival)
         - Rust Backtester (backtester/)
         - WS Sidecar (ws_sidecar/)
         - Hub Dashboard (hub/)
         - Monitor Dashboard (monitor/)
         - Tools (tools/)
         - Configuration (config/)
-        - Strategy Factory (factory)
+        - Factory Contract (dormant / reactivation)
         - Other
     validations:
       required: true

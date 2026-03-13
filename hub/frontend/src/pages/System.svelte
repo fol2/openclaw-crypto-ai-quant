@@ -83,24 +83,31 @@
   {:else if tab === 'services'}
     <div class="services-grid">
       {#each services as svc (svc.name)}
-        <div class="service-card" class:svc-active={svc.active === 'active'} class:svc-failed={svc.active === 'failed'}>
+        <div class="service-card" class:svc-active={svc.active === 'active'} class:svc-failed={svc.active === 'failed'} class:svc-dormant={svc.dormant}>
           <div class="svc-header">
-            <div class="svc-status-dot" class:alive={svc.active === 'active'} class:dead={svc.active === 'failed'}></div>
+            <div class="svc-status-dot" class:alive={svc.active === 'active'} class:dead={svc.active === 'failed'} class:dormant={svc.dormant}></div>
             <span class="svc-name">{svc.name}</span>
+            {#if svc.dormant}
+              <span class="status-chip dormant">dormant</span>
+            {/if}
           </div>
           <div class="svc-meta">
             <span>PID: <strong>{svc.pid || '—'}</strong></span>
             <span>State: <strong>{svc.sub}</strong></span>
           </div>
           <div class="svc-actions">
-            <button class="btn-sm" onclick={() => doAction(svc.name, 'restart')}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
-              Restart
-            </button>
-            {#if svc.active !== 'active'}
-              <button class="btn-sm btn-start" onclick={() => doAction(svc.name, 'start')}>Start</button>
+            {#if svc.dormant}
+              <span class="dormant-note">Managed by capability gate</span>
             {:else}
-              <button class="btn-sm btn-stop" onclick={() => doAction(svc.name, 'stop')}>Stop</button>
+              <button class="btn-sm" onclick={() => doAction(svc.name, 'restart')}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+                Restart
+              </button>
+              {#if svc.active !== 'active'}
+                <button class="btn-sm btn-start" onclick={() => doAction(svc.name, 'start')}>Start</button>
+              {:else}
+                <button class="btn-sm btn-stop" onclick={() => doAction(svc.name, 'stop')}>Stop</button>
+              {/if}
             {/if}
           </div>
         </div>
@@ -205,6 +212,7 @@
   }
   .service-card.svc-active { border-color: rgba(81,207,102,0.2); }
   .service-card.svc-failed { border-color: rgba(255,107,107,0.2); }
+  .service-card.svc-dormant { border-color: rgba(58,134,255,0.2); }
 
   .svc-header {
     display: flex; align-items: center; gap: 10px;
@@ -220,12 +228,22 @@
     animation: pulse 2s ease-in-out infinite;
   }
   .svc-status-dot.dead { background: var(--red); }
+  .svc-status-dot.dormant { background: var(--accent); box-shadow: 0 0 6px rgba(58,134,255,0.35); }
 
   .svc-name {
     font-size: 12px; font-weight: 600;
     font-family: 'IBM Plex Mono', monospace;
     word-break: break-all;
   }
+  .status-chip {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .status-chip.dormant { background: var(--accent-bg); color: var(--accent); }
   .svc-meta {
     font-size: 11px; color: var(--text-muted);
     display: flex; gap: 16px; margin-bottom: 10px;
@@ -233,6 +251,11 @@
   }
   .svc-meta strong { color: var(--text); font-weight: 500; }
   .svc-actions { display: flex; gap: 6px; }
+  .dormant-note {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+  }
 
   .btn-sm {
     display: inline-flex; align-items: center; gap: 5px;
