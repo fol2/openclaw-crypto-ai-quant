@@ -1,8 +1,19 @@
 # Rust Full-Runtime Cutover Programme
 
 **Date:** 2026-03-07  
-**Status:** Draft programme for the next migration phase  
+**Status:** Delivered programme checkpoint after the Rust paper and live runtime cutovers on `master`; remaining work is compatibility cleanup and deletion follow-through
 **Primary goal:** Retire Python as a production runtime language and converge on one Rust-owned end-to-end engine for live, paper, backtest, CPU sweep, and the future GPU parity path.
+
+**Current ownership index:** `docs/current_authoritative_paths.md`
+
+This document now serves two purposes:
+
+1. the delivered record of the cutover programme
+2. the remaining cleanup backlog for archival Python compatibility surfaces
+
+Unless a section explicitly says otherwise, future-tense delivery language below
+should be read as the historical plan that led to the current Rust-owned
+runtime state.
 
 Short operational companion:
 `docs/rust_full_runtime_cutover_exec_summary.md`
@@ -39,7 +50,8 @@ This changes the migration framing:
 ## 3.1 What is already true
 
 1. The Rust decision/kernel/backtester SSOT work is broadly complete.
-2. A Rust runtime foundation already exists in the active runtime worktree:
+2. `master` now contains the Rust runtime control plane and production service wrappers.
+3. The Rust runtime owns the production paper and live service paths:
    - snapshot export/seed
    - paper doctor
    - paper run-once
@@ -51,7 +63,15 @@ This changes the migration framing:
    - paper service
    - paper service apply
    - paper daemon
-3. `aiq-runtime-core` already contains the right architectural seed for the future engine:
+   - live effective-config
+   - live manifest
+   - live status
+   - live service
+   - live service apply
+   - live daemon
+4. Rust owns effective-config resolution for paper, live, and factory materialisation.
+5. Python daemon entrypoints are retired behind explicit archival overrides and are no longer production owners.
+6. `aiq-runtime-core` already contains the right architectural seed for the future engine:
    - stable stage registry
    - explicit `StageId`
    - per-profile `stage_order`
@@ -62,11 +82,10 @@ This changes the migration framing:
 
 ## 3.2 What is not yet true
 
-1. Python is still the active production daemon/runtime on `master`.
-2. The current Rust runtime foundation is still described as an opt-in wrapper, not the cutover path.
-3. Python still owns live execution, OMS/risk orchestration, and most replay/parity tooling.
-4. `master` does not yet contain the current `runtime/` tree, so the newer Rust runtime control-plane work is not yet the production baseline.
-5. The repo still mixes active, frozen, compatibility, and transitional surfaces without a strict retirement ledger enforced by delivery.
+1. Frozen Python replay/parity orchestration is still present as non-authoritative compatibility tooling.
+2. Some Python runtime-era helper modules still exist for tests, archival recovery, and non-runtime tools.
+3. `bt-runtime` remains as a transitional PyO3 bridge until the final compatibility cleanup no longer needs it.
+4. The repo still contains historical plans, validation artefacts, and compatibility surfaces that require archival labelling or deletion follow-through.
 
 ## 4. Target Architecture
 
@@ -345,6 +364,8 @@ Cumulative budget: **22 / 30**
 
 Goal:
 make Rust the active paper runtime and retire Python paper execution.
+This goal is now delivered on `master`; the remaining work is deletion and
+compatibility cleanup.
 
 Target PR themes:
 
@@ -377,6 +398,8 @@ Cumulative budget: **30 / 30**
 
 Goal:
 make Rust the end-to-end production runtime and remove Python runtime ownership.
+This goal is now delivered on `master`; the remaining work is compatibility
+cleanup, helper extraction, and deletion follow-through.
 
 Target PR themes:
 

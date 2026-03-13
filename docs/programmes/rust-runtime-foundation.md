@@ -1,5 +1,11 @@
 # Rust Runtime Foundation Programme
 
+> Historical note: this document records the foundation tranche before the full
+> Rust paper/live cutovers landed on `master`. It is retained as delivery
+> history, not as the current production contract. See
+> `docs/current_authoritative_paths.md` and `runtime/README.md` for the current
+> runtime ownership map.
+
 ## Objective
 
 Create the first Rust-owned runtime foundation that can evolve into the single execution path for:
@@ -39,7 +45,7 @@ The current delivered slice extends that further with a repeatable Rust paper or
 - `paper cycle`
 - explicit `--step-close-ts-ms` cycle identity and rerun guard
 - multi-symbol cycle execution across explicit symbols plus open paper positions
-- still no daemon/systemd cutover
+- daemon/systemd cutover had not landed yet at this foundation stage
 
 The current delivered slice extends that again with a bounded Rust paper catch-up shell:
 
@@ -48,7 +54,7 @@ The current delivered slice extends that again with a bounded Rust paper catch-u
 - requires `--start-step-close-ts-ms` only for the first bootstrap run on a fresh paper DB
 - executes up to `--max-steps` unapplied cycle steps and exits
 - optional `--follow` mode keeps polling after catch-up instead of exiting immediately idle
-- still no daemon/systemd cutover
+- daemon/systemd cutover had not landed yet at this foundation stage
 
 The current delivered slice extends that again with an opt-in Rust paper
 daemon orchestration surface:
@@ -58,7 +64,7 @@ daemon orchestration surface:
 - reuses the same `paper cycle` step identity and rerun guard through `runtime_cycle_steps`
 - optional `--watch-symbols-file` reloads a symbols manifest without restarting, while retaining the last good manifest on invalid or runtime-invalid malformed reloads
 - active symbols remain `manifest ∪ open paper positions`, so exit lanes are not dropped during watchlist changes
-- long-running orchestration only; still no paper/systemd cutover
+- long-running orchestration only in this slice; paper/systemd cutover landed later
 
 The current delivered slice extends that again with a small daemon/watchlist
 ownership step:
@@ -67,7 +73,7 @@ ownership step:
 - `paper daemon --watch-symbols-file` owns the later file-refresh path without changing step identity
 - an initially empty daemon watchlist is treated as an idle lane in follow mode rather than a hard startup failure
 - explicit `--symbols` are still unioned with the watched file contents
-- still no paper/systemd cutover
+- paper/systemd cutover had not landed yet in this slice
 
 The current delivered slice extends that again with a read-only Rust paper
 service manifest surface:
@@ -136,11 +142,12 @@ paper lane presets and launch examples:
 - lane presets resolve the conventional per-lane config path, promoted-role, default strategy-mode, watched symbols file path, candle DB directory, DB path, lock path, and status path inside Rust instead of requiring hand-written env duplication
 - the daemon now tolerates a missing lane-default watched symbols file at start-up, so a lane can launch idle and wait for later watchlist materialisation
 - `scripts/run_paper_lane.sh` plus the v8 paper systemd example units now point at the Rust lane runner instead of the Python daemon entrypoint
-- still no production cutover is claimed; this is repo-owned launch/orchestration convergence only
+- at the time of this slice, no production cutover was yet claimed; this was
+  repo-owned launch/orchestration convergence only
 
-Python paper execution is still the active runtime path, and the opt-in Rust
-paper daemon wrapper does not change that. Python paper bootstrap is no longer
-the only continuity surface.
+At the time of this foundation slice, Python paper execution was still the
+then-current runtime path and the opt-in Rust paper daemon wrapper did not yet
+claim production ownership. That is no longer the current production status.
 
 ## Runtime Contract
 
@@ -169,7 +176,7 @@ Built-in profiles reserved by the Rust runtime:
 
 ## Non-Goals For This Slice
 
-- No production cutover yet.
+- No production cutover yet in this foundation tranche.
 - No CUDA parity rewrite yet.
 - No DB v2 migration yet.
 - No Python deletion yet.

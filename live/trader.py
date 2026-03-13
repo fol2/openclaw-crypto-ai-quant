@@ -1,9 +1,12 @@
 """Live trading adapter.
 
-Used by the unified daemon (`python -m engine.daemon`) when
-`AI_QUANT_MODE` is `live` or `dry_live`.
+This module is archival compatibility code only. Production live and dry-live
+execution now run through the Rust `aiq-runtime`, and `engine.daemon` itself is
+retired behind an explicit archival override.
 
-This module is intentionally NOT a standalone daemon entrypoint.
+This module is intentionally NOT a standalone daemon entrypoint and should be
+treated as a legacy helper surface until the remaining Python cleanup tranche
+removes it.
 """
 
 import datetime
@@ -4113,4 +4116,8 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
 
 
 def run_trader():
-    raise SystemExit("Deprecated: use `python -m engine.daemon` with AI_QUANT_MODE=live or AI_QUANT_MODE=dry_live.")
+    raise SystemExit(
+        "Python live trader is retired. Use `aiq-runtime live daemon` or "
+        "`scripts/run_live.sh`. Set AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 and "
+        "run `python -m engine.daemon` only for archival recovery."
+    )

@@ -1,3 +1,10 @@
+"""Legacy Python OMS helpers retained for archival tooling and tests.
+
+Production OMS ownership now lives in the Rust runtime. This module remains for
+compatibility helpers and non-runtime workflows until the remaining Python OMS
+cleanup tranche is finished.
+"""
+
 from __future__ import annotations
 
 import datetime

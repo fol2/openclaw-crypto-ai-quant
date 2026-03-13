@@ -7,14 +7,19 @@ body:
     attributes:
       value: |
         Thanks for reporting. Please fill in as much detail as possible.
+
+        Production paper and live services now run through the Rust `aiq-runtime`.
+        If you reproduced the issue through an archival Python recovery path,
+        please say so explicitly.
   - type: dropdown
     id: component
     attributes:
       label: Component
       options:
-        - Trading Engine (engine/)
+        - Rust Runtime (runtime/)
+        - Python Compatibility Runtime (engine/)
         - Strategy (strategy/)
-        - Live Trader (live/)
+        - Live Trader (live/, archival)
         - Exchange Adapter (exchange/)
         - Rust Backtester (backtester/)
         - WS Sidecar (ws_sidecar/)
@@ -51,7 +56,12 @@ body:
       description: Minimal steps to trigger the bug
       placeholder: |
         1. Set config X to Y
-        2. Run `AI_QUANT_MODE=paper python -m engine.daemon`
+        2. Run `cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"`
+        3. Observe ...
+
+        Or, for an archival Python recovery path:
+        1. Set config X to Y
+        2. Run `AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon`
         3. Observe ...
     validations:
       required: true

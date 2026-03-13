@@ -1515,8 +1515,10 @@ def estimate_locked_margin_usd(
 # --------------------------------------------------------------------------------------
 # Developer Notes (READ ME FIRST)
 #
-# This file provides the core strategy + PaperTrader implementation used by the unified daemon:
-#   engine/daemon.py
+# This file retains strategy defaults, indicator helpers, and legacy PaperTrader
+# compatibility code from the old Python runtime. Production paper/live runtime
+# ownership now lives in Rust `aiq-runtime`; the Python trader classes remain
+# only for archival recovery paths, helper imports, and parity-oriented tests.
 #
 # - Strategy tuning should be done via YAML overrides (hot-reloads by file mtime).
 # - Python code changes require restarting the systemd service(s).

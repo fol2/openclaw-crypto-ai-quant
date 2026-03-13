@@ -1,19 +1,22 @@
-# Unified Trading Engine
+# Python Runtime Compatibility
 
-The core Python daemon now owns `dry_live` and `live`, while `paper` mode is a
-legacy recovery-only path after the Rust paper cutover.
+The Python daemon is no longer a production runtime owner. Production paper and
+live services now run through the Rust `aiq-runtime`; this directory remains for
+archival recovery/debug workflows, compatibility helpers, and test coverage.
 
 ## Running
 
 ```bash
-# Paper trading legacy recovery/debug only
-AI_QUANT_MODE=paper python -m engine.daemon
+# Production paper lane
+./scripts/run_paper_lane.sh paper1
 
-# Dry live (real data, no real orders)
-AI_QUANT_MODE=dry_live python -m engine.daemon
+# Production live lane
+./scripts/run_live.sh
 
-# Live trading (requires safety gates)
-AI_QUANT_MODE=live python -m engine.daemon
+# Archival Python recovery/debug only
+AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
+AI_QUANT_MODE=dry_live AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
+AI_QUANT_MODE=live AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 python -m engine.daemon
 ```
 
 File lock prevents duplicate daemons: `ai_quant_paper.lock` / `ai_quant_live.lock` (configurable via `AI_QUANT_LOCK_PATH`).
@@ -22,12 +25,12 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` / `ai_quant_live.loc
 
 | Module | Purpose |
 |--------|---------|
-| `daemon.py` | Entrypoint for live/dry_live plus the legacy paper recovery path |
-| `core.py` | `UnifiedEngine` — main trading loop, two-phase collect-rank-execute |
-| `strategy_manager.py` | Hot-reloads the resolver-selected strategy YAML path via mtime polling for the active Python daemon compatibility path |
+| `daemon.py` | Archived Python runtime entrypoint; all modes require an explicit archival override |
+| `core.py` | `UnifiedEngine` compatibility loop plus shared helper types kept for tests and parity tooling |
+| `strategy_manager.py` | Hot-reloads the resolver-selected strategy YAML path for Python compatibility paths and helper consumers |
 | `market_data.py` | `MarketDataHub` — candle + mid data from WS sidecar / SQLite / REST fallback |
-| `risk.py` | `RiskManager` — rate limits, drawdown kill-switch, exposure caps, slippage guard |
-| `oms.py` | `LiveOms` — durable intent/order/fill ledger for live trading |
+| `risk.py` | Legacy Python `RiskManager` helpers retained for archival tooling and tests |
+| `oms.py` | Legacy Python OMS helpers retained for archival tooling and tests |
 | `oms_reconciler.py` | OMS state reconciliation against exchange positions/fills |
 | `alerting.py` | Discord / Telegram notifications via `openclaw message send` |
 | `event_logger.py` | Decision + trade event logging for audit trail |
@@ -62,7 +65,7 @@ Durable OMS for live trading:
 ### Configuration Hot-Reload
 
 `StrategyManager` watches the resolver-selected strategy YAML path via mtime
-polling. In the active Python compatibility path this remains the hot-reload
+polling. In the remaining Python compatibility paths this remains the hot-reload
 surface, but the effective-config owner is now Rust:
 `aiq-runtime paper effective-config` and `aiq-runtime live effective-config`
 resolve the shared Rust-owned startup contract for paper and live-facing
@@ -78,7 +81,8 @@ restart).
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `AI_QUANT_MODE` | `paper` / `dry_live` / `live` | Trading mode |
+| `AI_QUANT_MODE` | `paper` / `dry_live` / `live` | Mode selector for the archival Python entrypoint |
+| `AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME` | `1` | Required to run any Python archival runtime mode |
 | `AI_QUANT_SIGNAL_ON_CANDLE_CLOSE` | `1` (default) / `0` | Signal timing |
 
 ### Live Safety Gates
@@ -101,6 +105,7 @@ restart).
 | `AI_QUANT_STRATEGY_MODE` | Strategy-mode selector; env wins over `AI_QUANT_STRATEGY_MODE_FILE` |
 | `AI_QUANT_STRATEGY_MODE_FILE` | File-backed strategy-mode fallback when the env var is unset |
 | `AI_QUANT_RUNTIME_BIN` | Optional absolute path to the `aiq-runtime` binary for paper/live start-up and factory control-plane resolution |
+| `AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE` | Deprecated legacy live-only override; prefer `AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1` |
 | `AI_QUANT_WS_ENABLE_BBO` | Enable BBO subscription (`0` to disable) |
 
 See `.env.example` for the full list.

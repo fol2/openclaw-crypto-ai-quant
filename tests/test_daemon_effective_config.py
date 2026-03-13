@@ -93,6 +93,7 @@ def test_main_resolves_rust_effective_config_before_strategy_manager(tmp_path, m
         pass
 
     monkeypatch.setenv("AI_QUANT_MODE", "paper")
+    monkeypatch.setenv("AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME", "1")
     monkeypatch.setenv("AI_QUANT_DB_PATH", str(tmp_path / "paper.db"))
     monkeypatch.setenv("AI_QUANT_LOCK_PATH", str(tmp_path / "paper.lock"))
     monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
@@ -192,6 +193,7 @@ def test_main_aborts_when_rust_resolver_fails(monkeypatch: pytest.MonkeyPatch) -
     strategy_manager_called = False
 
     monkeypatch.setenv("AI_QUANT_MODE", "paper")
+    monkeypatch.setenv("AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME", "1")
     monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
     monkeypatch.setattr(
         "engine.promoted_config.apply_paper_effective_config",
@@ -235,8 +237,18 @@ def test_main_aborts_when_live_rust_resolver_fails(monkeypatch: pytest.MonkeyPat
     assert strategy_manager_called is False
 
 
+def test_main_blocks_paper_python_runtime_without_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_QUANT_MODE", "paper")
+    monkeypatch.delenv("AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME", raising=False)
+    monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
+
+    with pytest.raises(SystemExit, match="Python paper runtime is retired"):
+        daemon.main()
+
+
 def test_main_blocks_live_python_runtime_without_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AI_QUANT_MODE", "live")
+    monkeypatch.delenv("AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME", raising=False)
     monkeypatch.delenv("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", raising=False)
     monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
 

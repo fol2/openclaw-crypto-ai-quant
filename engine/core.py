@@ -1,3 +1,10 @@
+"""Legacy Python execution-loop helpers retained for compatibility only.
+
+Production paper and live execution now run through the Rust `aiq-runtime`.
+This module remains in the tree for archival tests, helper types, and parity
+debugging during the final Python-runtime cleanup period.
+"""
+
 from __future__ import annotations
 
 import math

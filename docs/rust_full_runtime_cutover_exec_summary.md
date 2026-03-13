@@ -1,10 +1,11 @@
 # Rust Full-Runtime Cutover: Exec Summary and Checkpoint Checklist
 
 **Date:** 2026-03-07  
-**Status:** Working summary for phase execution and every-5-PR checkpoint reviews  
+**Status:** Delivered checkpoint after the Rust paper and live runtime cutovers on `master`; remaining work is compatibility cleanup and deletion follow-through
 **Companion document:** `docs/rust_full_runtime_cutover_programme.md`
 **Execution checklist:** `docs/programmes/rust_runtime_phase0_cutover_checklist.md`
 **Phase 2 checklist:** `docs/programmes/rust_runtime_phase2_cutover_checklist.md`
+**Current ownership index:** `docs/current_authoritative_paths.md`
 
 ## 1. North Star
 
@@ -40,59 +41,49 @@ The sequence is fixed unless a phase-reset PR says otherwise:
 5. retire Python runtime ownership
 6. only then focus on the larger Rust↔CUDA realignment tranche
 
-## 4. Bounded Roadmap
+## 4. Delivered Phase Snapshot
 
 Core Python-retirement path budget: **30 PRs maximum**
 
 ### Phase 0. Reset and Foundation Landing
 
-- Budget: `6 PRs`
-- Cumulative: `6 / 30`
-- Exit:
-  - `runtime/` exists on `master` via approved PR merges
-  - runtime ledger exists on `master` via approved PR merges
-  - all subsequent PRs map to a checklist item
+- Status: Delivered on `master`
+- Outcome:
+  - `runtime/` landed on `master`
+  - runtime ledger and programme docs landed on `master`
+  - later PRs used the bounded phase/checklist framing captured in this execution record
 
 ### Phase 1. Modular Pipeline and Config SSOT
 
-- Budget: `8 PRs`
-- Cumulative: `14 / 30`
-- Exit:
-  - stage ordering is config-driven
-  - ranker selection is config-driven
-  - Rust owns effective config for paper-facing execution
+- Status: Delivered on `master`
+- Outcome:
+  - stage ordering and runtime profiles are Rust-owned
+  - ranker selection is config-driven in the Rust runtime
+  - Rust owns effective-config resolution for paper and live start-up
 
 ### Phase 2. Rust Paper Cutover
 
-- Budget: `8 PRs`
-- Cumulative: `22 / 30`
-- Exit:
-  - production paper lane runs on Rust
-  - Python paper execution is no longer authoritative
-  - paper gate meets the current quantitative threshold:
-    - at least 1 full trading day or 20 trades
-    - profit factor >= 1.2
-    - max drawdown < 10%
-    - net positive under 20 bps slippage stress
-    - zero kill-switch triggers
-  - replay alignment gate is green and release blocker status is clear by default
-  - paper deletion tranche is merged
+- Status: Delivered on `master`
+- Repo-owned outcome:
+  - production paper service path runs through `aiq-runtime paper daemon`
+  - Python paper execution is archival/recovery only
+  - replay-gate, ledger, runbook, and service wrappers all point to the Rust paper path
+- External evidence:
+  - lane-specific paper-gate metrics and rollback notes remain operational artefacts outside git
 
 ### Phase 3. Rust Live/OMS/Risk Cutover and Python Retirement
 
-- Budget: `8 PRs`
-- Cumulative: `30 / 30`
-- Exit:
-  - live and paper both run through the Rust runtime
-  - live ramp follows the current staged policy:
-    - 25% size for 1 day with zero kill-switch triggers
-    - 50% size for 1 day with zero kill-switch triggers
-    - 100% only after the ramp gate is green
-  - replay alignment gate remains green and release blocker status stays clear by default during cutover
-  - Python is no longer a production runtime dependency
-  - remaining Python is archival or explicitly non-runtime
+- Status: Delivered on `master`, with compatibility cleanup still open
+- Repo-owned outcome:
+  - live and paper both run through Rust-owned production service paths
+  - Python runtime entrypoints are retired behind explicit archival overrides
+  - remaining Python runtime-era modules are now compatibility/helpers only, not production owners
+  - replay alignment gate remains the fail-closed default during the Rust-owned runtime era
+- Remaining cleanup:
+  - remove frozen Python parity orchestration once the Rust-native harness fully replaces it
+  - delete archival compatibility surfaces that no longer serve rollback or tooling needs
 
-## 5. Budget Enforcement
+## 5. Historical Budget Enforcement
 
 1. No phase may exceed budget by more than `2 PRs` without a programme-level replan.
 2. No phase may spend more than `2` hardening-only PRs in a row.

@@ -2,57 +2,22 @@
 
 AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https://hyperliquid.xyz), with a high-performance Rust backtester featuring CPU and CUDA GPU acceleration.
 
-The repository is now also shipping the first `aiq-runtime` foundation slice for
-the long-term Rust-only daemon migration. See
-[docs/programmes/rust-runtime-foundation.md](docs/programmes/rust-runtime-foundation.md)
-for the active programme contract.
+The repository now runs both production paper and live services through the
+Rust `aiq-runtime`. Python runtime surfaces remain in the tree only as archival
+recovery/debug compatibility code; they are no longer authoritative production
+paths.
 
-Rust now also has a first paper bootstrap/restore shell via
-`aiq-runtime paper doctor`, while Python paper execution remains frozen as the
-legacy runtime path until full Rust paper execution lands. Rust currently owns
-four paper-facing shells (`paper doctor`, `paper run-once`, `paper cycle`, and
-`paper loop`), with one paired opt-in orchestration wrapper tracked alongside
-them: `paper daemon`. `paper cycle` still runs one explicit multi-symbol cycle
-with `--step-close-ts-ms` and a rerun guard, `paper loop` still resumes from
-`runtime_cycle_steps` to catch up unapplied bar-close steps, and `paper daemon`
-now owns the long-running outer scheduler for the same `paper cycle` write
-contract. `paper loop` only loads an optional `--symbols-file` once at
-start-up; `paper daemon --watch-symbols-file` is the opt-in Rust surface that
-can watch for later symbols-file changes, retain the last good manifest on bad
-or runtime-invalid malformed reloads, and keep running without a restart.
-Rust also now ships a read-only `paper manifest` surface that resolves the
-current daemon service/env contract into a deterministic Rust launch plan
-before any systemd cutover. The manifest now also reports whether the current
-lane would cold-bootstrap, resume from prior `runtime_cycle_steps`, idle
-caught up, or fail closed until a bootstrap step is supplied, and it resolves
-the daemon `status_path` that later service supervision can watch, together
-with the effective config selected by `AI_QUANT_PROMOTED_ROLE` and
-`AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE`. Python paper
-execution remains the active production path, so this does not claim paper
-cutover.
-The shared Rust effective-config resolver now also drives Python paper
-start-up and factory paper-config materialisation through
-`aiq-runtime paper effective-config`, so promoted-role and strategy-mode
-selection no longer depend on Python merge ownership.
-Rust now also ships a read-only `paper status` surface that combines that
-launch contract with the persisted daemon status JSON so operators can see
-whether the current Rust lane is merely launch-ready, actively running, stale,
-stopped, or in need of a restart because the live daemon contract drifted from
-the current config/env plan.
-Rust now also ships a split paper supervision surface: `paper service` remains
-read-only and tells operators whether the lane should be held, started,
-restarted, or simply monitored, while `paper service apply` is the new opt-in
-side-effecting supervisor that can enact that recommendation against the Rust
-`paper daemon` only. The apply surface reuses the same manifest/status
-contract, fails closed on unhealthy or drifted lanes, and still does not claim
-any Python paper or systemd cutover.
-Rust now also owns the conventional paper lane presets for `paper1`, `paper2`,
-`paper3`, and `livepaper`. `paper effective-config`, `paper manifest`, and
-`paper daemon` can all resolve those presets with `--lane` plus optional
-`--project-dir`, including the
-default config path, promoted-role / strategy-mode contract, per-lane DB and
-lock paths, and the watched symbols file that later lane launch scripts and
-systemd examples now share.
+Use these documents as the current ownership map:
+
+- [docs/current_authoritative_paths.md](docs/current_authoritative_paths.md)
+- [runtime/README.md](runtime/README.md)
+- [docs/runbook.md](docs/runbook.md)
+
+The Rust runtime owns the paper and live daemon contracts, effective-config
+resolution, service manifests, service status, supervision actions, and the
+production systemd wrappers. The cutover programme record remains available in
+[docs/rust_full_runtime_cutover_programme.md](docs/rust_full_runtime_cutover_programme.md),
+while the foundation-slice documents are retained as historical references.
 
 ## Screenshots
 
@@ -107,10 +72,10 @@ cd openclaw-crypto-ai-quant
 uv sync --dev
 source .venv/bin/activate
 
-# Configure (paper mode needs no secrets)
+# Configure core env (paper lanes usually need no exchange secrets)
 cp .env.example .env
 
-# Run paper trader
+# Run the Rust paper lane
 cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
 ```
 

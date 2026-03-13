@@ -1,9 +1,9 @@
 # Phase C — Paper Daemon Promoted Config Integration
 
-> Historical note: this document records the original Python-only promoted-config
-> loader. Active paper start-up and factory config resolution now use the Rust
-> effective-config resolver; `engine/promoted_config.py` remains as a
-> compatibility shim.
+> Historical note: this document records the original Python promoted-config
+> integration step. Production paper start-up now runs through the Rust
+> `aiq-runtime paper daemon`, and `engine/promoted_config.py` remains only as a
+> compatibility shim for non-runtime consumers.
 
 **Date:** 2026-02-14  
 **Task:** C1-daemon-integration  
@@ -116,18 +116,21 @@ All tests pass. The 5 skips are pre-existing (optional dependencies: jsonschema,
 | `tests/test_promoted_config_loading.py` | **New** — 21 tests |
 | `docs/validation/phaseC_daemon_integration.md` | **New** — this document |
 
-## Usage Example
+## Current Equivalent
 
 ```bash
-# Paper daemon 1 → primary role
-AI_QUANT_MODE=paper AI_QUANT_PROMOTED_ROLE=primary python -m engine.daemon
+# Paper lane 1 → primary role
+AI_QUANT_PROMOTED_ROLE=primary cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
 
-# Paper daemon 2 → fallback role  
-AI_QUANT_MODE=paper AI_QUANT_PROMOTED_ROLE=fallback python -m engine.daemon
+# Paper lane 2 → fallback role
+AI_QUANT_PROMOTED_ROLE=fallback cargo run -p aiq-runtime -- paper daemon --lane paper2 --project-dir "$PWD"
 
-# Paper daemon 3 → conservative role
-AI_QUANT_MODE=paper AI_QUANT_PROMOTED_ROLE=conservative python -m engine.daemon
+# Paper lane 3 → conservative role
+AI_QUANT_PROMOTED_ROLE=conservative cargo run -p aiq-runtime -- paper daemon --lane paper3 --project-dir "$PWD"
+```
 
-# Live paper → no promotion (unchanged)
-AI_QUANT_MODE=paper python -m engine.daemon
+## Historical Python Compatibility Example
+
+```bash
+AI_QUANT_MODE=paper AI_QUANT_ALLOW_LEGACY_PYTHON_RUNTIME=1 AI_QUANT_PROMOTED_ROLE=primary python -m engine.daemon
 ```

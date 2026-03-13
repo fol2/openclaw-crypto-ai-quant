@@ -1,5 +1,10 @@
 # Rust Runtime Foundation Validation
 
+> Historical note: this validation matrix records the original foundation and
+> paper-control-plane landing slice. It remains useful for regression coverage,
+> but it is not the current cutover contract. Current production ownership lives
+> in `docs/current_authoritative_paths.md`.
+
 ## Objective
 
 Provide one compact validation matrix for the Rust runtime foundation slice.
