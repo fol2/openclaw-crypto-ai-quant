@@ -561,6 +561,7 @@ __device__ double compute_sl_price_codegen(
     }
 
     double sl_mult = (double)cfg.sl_atr_mult;
+    bool breakeven_active = false;
     bool is_underwater;
     if (pos_type == 1) {  // POS_LONG
         is_underwater = (current_price < entry_price);
@@ -584,6 +585,21 @@ __device__ double compute_sl_price_codegen(
                 && adx_slope < 0.0
                 && is_underwater) {
                 sl_mult *= 0.8;
+                if (sl_price > 0.0) {
+                    if (pos_type == 1) {
+                        sl_price = entry_price - (eff_atr * sl_mult);
+                    } else {
+                        sl_price = entry_price + (eff_atr * sl_mult);
+                    }
+                    if (breakeven_active) {
+                        double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+                        if (pos_type == 1) {
+                            sl_price = fmax(sl_price, entry_price + be_buffer);
+                        } else {
+                            sl_price = fmin(sl_price, entry_price - be_buffer);
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -598,6 +614,21 @@ __device__ double compute_sl_price_codegen(
                 }
                 if (profit_in_atr > 0.5) {
                     sl_mult *= 1.15;
+                    if (sl_price > 0.0) {
+                        if (pos_type == 1) {
+                            sl_price = entry_price - (eff_atr * sl_mult);
+                        } else {
+                            sl_price = entry_price + (eff_atr * sl_mult);
+                        }
+                        if (breakeven_active) {
+                            double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+                            if (pos_type == 1) {
+                                sl_price = fmax(sl_price, entry_price + be_buffer);
+                            } else {
+                                sl_price = fmin(sl_price, entry_price - be_buffer);
+                            }
+                        }
+                    }
                 }
             }
             continue;
@@ -606,6 +637,21 @@ __device__ double compute_sl_price_codegen(
         if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_SLB) {
             if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB) != 0u && adx > 45.0) {
                 sl_mult *= 1.10;
+                if (sl_price > 0.0) {
+                    if (pos_type == 1) {
+                        sl_price = entry_price - (eff_atr * sl_mult);
+                    } else {
+                        sl_price = entry_price + (eff_atr * sl_mult);
+                    }
+                    if (breakeven_active) {
+                        double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+                        if (pos_type == 1) {
+                            sl_price = fmax(sl_price, entry_price + be_buffer);
+                        } else {
+                            sl_price = fmin(sl_price, entry_price - be_buffer);
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -631,10 +677,12 @@ __device__ double compute_sl_price_codegen(
 
                 if (pos_type == 1) {
                     if ((current_price - entry_price) >= be_start) {
+                        breakeven_active = true;
                         sl_price = fmax(sl_price, entry_price + be_buffer);
                     }
                 } else {
                     if ((entry_price - current_price) >= be_start) {
+                        breakeven_active = true;
                         sl_price = fmin(sl_price, entry_price - be_buffer);
                     }
                 }
@@ -1226,18 +1274,18 @@ __device__ AllExitResult check_all_exits_codegen(
 
         switch (exit_id) {
             case GPU_EXIT_ORDER_ID_STOP_LOSS_ASE:
-                active_stop_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_ASE);
-                break;
             case GPU_EXIT_ORDER_ID_STOP_LOSS_DASE:
-                active_stop_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_DASE);
-                break;
             case GPU_EXIT_ORDER_ID_STOP_LOSS_SLB:
-                active_stop_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB);
-                break;
             case GPU_EXIT_ORDER_ID_STOP_LOSS_BASE:
             case GPU_EXIT_ORDER_ID_STOP_LOSS_BREAKEVEN: {
                 unsigned int next_bit =
-                    (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BASE)
+                    (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_ASE)
+                        ? GPU_EXIT_MASK_STOP_LOSS_ASE
+                    : (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_DASE)
+                        ? GPU_EXIT_MASK_STOP_LOSS_DASE
+                    : (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_SLB)
+                        ? GPU_EXIT_MASK_STOP_LOSS_SLB
+                    : (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_BASE)
                         ? GPU_EXIT_MASK_STOP_LOSS_BASE
                         : GPU_EXIT_MASK_STOP_LOSS_BREAKEVEN;
                 active_stop_mask |= (cfg.exit_behaviour_mask & next_bit);
@@ -1262,15 +1310,15 @@ __device__ AllExitResult check_all_exits_codegen(
                 break;
             }
             case GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE:
-                active_trailing_mask |=
-                    (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE);
-                break;
             case GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER:
-                active_trailing_mask |=
-                    (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_VOL_BUFFER);
-                break;
             case GPU_EXIT_ORDER_ID_TRAILING_BASE: {
-                active_trailing_mask |= (cfg.exit_behaviour_mask & GPU_EXIT_MASK_TRAILING_BASE);
+                unsigned int next_bit =
+                    (exit_id == GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE)
+                        ? GPU_EXIT_MASK_TRAILING_LOW_CONF_OVERRIDE
+                    : (exit_id == GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER)
+                        ? GPU_EXIT_MASK_TRAILING_VOL_BUFFER
+                        : GPU_EXIT_MASK_TRAILING_BASE;
+                active_trailing_mask |= (cfg.exit_behaviour_mask & next_bit);
                 if ((active_trailing_mask & GPU_EXIT_MASK_TRAILING_BASE) == 0u) {
                     break;
                 }
