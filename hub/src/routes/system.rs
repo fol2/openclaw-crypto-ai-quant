@@ -23,15 +23,16 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 /// Known service names (allow-list for safety).
 const ALLOWED_SERVICES: &[&str] = &[
+    "openclaw-ai-quant-hub",
     "openclaw-ai-quant-live-v8",
+    "openclaw-ai-quant-trader-v8-livepaper",
     "openclaw-ai-quant-trader-v8-paper1",
     "openclaw-ai-quant-trader-v8-paper2",
     "openclaw-ai-quant-trader-v8-paper3",
-    "openclaw-ai-quant-monitor-v8",
-    "openclaw-ai-quant-factory-v8",
-    "openclaw-ai-quant-factory-v8-deep",
     "openclaw-ai-quant-funding",
+    "openclaw-ai-quant-funding-v8",
     "openclaw-ai-quant-ws-sidecar",
+    "openclaw-ai-quant-ws-sidecar-v8",
     "openclaw-ai-quant-prune-runtime-logs-v8",
     "openclaw-gateway",
 ];

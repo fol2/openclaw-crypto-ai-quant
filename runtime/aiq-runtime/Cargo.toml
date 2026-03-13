@@ -7,6 +7,10 @@ edition = "2021"
 name = "aiq-runtime"
 path = "src/main.rs"
 
+[[bin]]
+name = "aiq-maintenance"
+path = "src/bin/aiq-maintenance.rs"
+
 [dependencies]
 aiq-runtime-core = { path = "../aiq-runtime-core" }
 anyhow = { workspace = true }
