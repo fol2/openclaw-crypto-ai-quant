@@ -1046,7 +1046,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
         ema_cross_exit = (ema_fast > ema_slow && !is_weak_cross);
     }
 
-    if (ema_cross_exit) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_TREND_BREAKDOWN) != 0u
+        && ema_cross_exit) {
         result.should_exit = true;
         result.exit_code = 1;
         return result;
@@ -1055,7 +1056,9 @@ __device__ SmartExitResult check_smart_exits_codegen(
     // ══════════════════════════════════════════════════════════════════════
     // 2. Trend Exhaustion (ADX below threshold)
     // ══════════════════════════════════════════════════════════════════════
-    if (adx_exhaustion_lt > 0.0 && adx < adx_exhaustion_lt) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_TREND_EXHAUSTION) != 0u
+        && adx_exhaustion_lt > 0.0
+        && adx < adx_exhaustion_lt) {
         result.should_exit = true;
         result.exit_code = 2;
         return result;
@@ -1064,7 +1067,9 @@ __device__ SmartExitResult check_smart_exits_codegen(
     // ══════════════════════════════════════════════════════════════════════
     // 3. EMA Macro Breakdown (only if require_macro_alignment enabled)
     // ══════════════════════════════════════════════════════════════════════
-    if (cfg.require_macro_alignment != 0u && ema_macro > 0.0) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_EMA_MACRO_BREAKDOWN) != 0u
+        && cfg.require_macro_alignment != 0u
+        && ema_macro > 0.0) {
         if (pos_type == POS_LONG && current_price < ema_macro) {
             result.should_exit = true;
             result.exit_code = 3;
@@ -1081,7 +1086,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
     // 4. Stagnation Exit (low-volatility + underwater)
     //    Note: PAXG exclusion is handled by the caller (symbol check).
     // ══════════════════════════════════════════════════════════════════════
-    if (atr < (eff_atr * 0.70)) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_STAGNATION) != 0u
+        && atr < (eff_atr * 0.70)) {
         bool is_underwater;
         if (pos_type == POS_LONG) {
             is_underwater = (current_price < entry_price);
@@ -1107,7 +1113,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
     //    ADX > 50, profit >= tsme_min_profit_atr, optional ADX_slope < 0,
     //    MACD momentum contracting (2 consecutive contractions).
     // ══════════════════════════════════════════════════════════════════════
-    if (adx > 50.0) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_TSME) != 0u
+        && adx > 50.0) {
         double tsme_min_profit = (double)cfg.tsme_min_profit_atr;
         bool gate_profit_ok = (profit_atr >= tsme_min_profit);
         bool gate_slope_ok = true;
@@ -1138,7 +1145,9 @@ __device__ SmartExitResult check_smart_exits_codegen(
     //    profit > 1.5 ATR AND ADX > 35 AND 3 consecutive MACD histogram
     //    moves against position (4 bars total).
     // ══════════════════════════════════════════════════════════════════════
-    if (profit_atr > 1.5 && adx > 35.0) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_MMDE) != 0u
+        && profit_atr > 1.5
+        && adx > 35.0) {
         bool is_diverging;
         if (pos_type == POS_LONG) {
             is_diverging = (macd_hist < prev_macd_hist
@@ -1162,7 +1171,8 @@ __device__ SmartExitResult check_smart_exits_codegen(
     //    Configurable RSI thresholds with profit-regime switch and
     //    low-confidence overrides.
     // ══════════════════════════════════════════════════════════════════════
-    if (cfg.enable_rsi_overextension_exit != 0u) {
+    if ((cfg.smart_exit_behaviour_mask & GPU_SMART_EXIT_MASK_RSI_OVEREXTENSION) != 0u
+        && cfg.enable_rsi_overextension_exit != 0u) {
         double sw = fmax((double)cfg.rsi_exit_profit_atr_switch, 0.0);
 
         double rsi_ub;
@@ -1276,22 +1286,24 @@ __device__ AllExitResult check_all_exits_codegen(
     result.exit_price = 0.0;
 
     // ── 1. Stop Loss ────────────────────────────────────────────────────
-    double sl_price = compute_sl_price_codegen(
-        cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
-    );
-    if (pos_type == 1) {  // POS_LONG
-        if (current_price <= sl_price) {
-            result.should_exit = true;
-            result.exit_code = 100;
-            result.exit_price = current_price;
-            return result;
-        }
-    } else {              // POS_SHORT
-        if (current_price >= sl_price) {
-            result.should_exit = true;
-            result.exit_code = 100;
-            result.exit_price = current_price;
-            return result;
+    if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) != 0u) {
+        double sl_price = compute_sl_price_codegen(
+            cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
+        );
+        if (pos_type == 1) {  // POS_LONG
+            if (current_price <= sl_price) {
+                result.should_exit = true;
+                result.exit_code = 100;
+                result.exit_price = current_price;
+                return result;
+            }
+        } else {              // POS_SHORT
+            if (current_price >= sl_price) {
+                result.should_exit = true;
+                result.exit_code = 100;
+                result.exit_price = current_price;
+                return result;
+            }
         }
     }
 

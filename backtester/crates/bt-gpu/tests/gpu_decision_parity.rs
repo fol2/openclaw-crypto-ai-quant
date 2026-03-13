@@ -741,7 +741,11 @@ fn test_sl_codegen_branch_coverage() {
 
     // Branch 3: ASE activation (adx_slope < 0 AND underwater)
     assert!(
-        src.contains("adx_slope < 0.0 && is_underwater"),
+        src.contains("GPU_EXIT_MASK_STOP_LOSS_ASE"),
+        "SL codegen must guard ASE behind the exit behaviour mask"
+    );
+    assert!(
+        src.contains("adx_slope < 0.0") && src.contains("is_underwater"),
         "SL codegen must combine adx_slope < 0 with underwater for ASE"
     );
 

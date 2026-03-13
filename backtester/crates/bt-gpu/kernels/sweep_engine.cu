@@ -530,6 +530,9 @@ __device__ bool stop_loss_hit(unsigned int pos_type, double price, double sl_pri
 }
 
 __device__ bool check_stop_loss(const GpuPosition& pos, const GpuSnapshot& snap, const GpuComboConfig* cfg) {
+    if ((cfg->exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u) {
+        return false;
+    }
     double sl = compute_sl_price(pos, snap, cfg);
     return stop_loss_hit(pos.active, (double)snap.close, sl, (double)pos.entry_atr, pos.adds_count);
 }
