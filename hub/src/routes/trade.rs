@@ -84,46 +84,25 @@ fn close_param_hash(body: &TradeCloseBody) -> String {
     format!("{:x}", hasher.finish())
 }
 
-async fn generate_confirm_token(state: &AppState, param_hash: String) -> String {
-    let token = uuid::Uuid::new_v4().to_string();
-    let mut tokens = state.trade_confirm_tokens.lock().await;
-    tokens.retain(|_, (_, created)| created.elapsed().as_secs() < 300);
-    tokens.insert(token.clone(), (param_hash, Instant::now()));
-    token
-}
-
-async fn validate_confirm_token(
+async fn check_rate_limit(
     state: &AppState,
-    token: &str,
-    expected_hash: &str,
+    symbol: &str,
+    confirm_token: Option<&str>,
 ) -> Result<(), HubError> {
-    let mut tokens = state.trade_confirm_tokens.lock().await;
-    let (hash, created) = tokens
-        .remove(token)
-        .ok_or_else(|| HubError::BadRequest("invalid or expired confirm token".into()))?;
-    if created.elapsed().as_secs() > 60 {
-        return Err(HubError::BadRequest("confirm token expired".into()));
-    }
-    if hash != expected_hash {
-        return Err(HubError::BadRequest(
-            "confirm token does not match parameters".into(),
-        ));
-    }
-    Ok(())
-}
-
-async fn check_rate_limit(state: &AppState, symbol: &str) -> Result<(), HubError> {
     let symbol = symbol.trim().to_ascii_uppercase();
     let mut limits = state.trade_rate_limits.lock().await;
-    limits.retain(|_, created| created.elapsed().as_secs() < 60);
-    if let Some(last) = limits.get(&symbol) {
-        if last.elapsed().as_secs() < 5 {
+    limits.retain(|_, (_, created)| created.elapsed().as_secs() < 60);
+    if let Some((last_token, last_created)) = limits.get(&symbol) {
+        let same_token = confirm_token.is_some() && confirm_token == Some(last_token.as_str());
+        if last_created.elapsed().as_secs() < 5 && !same_token {
             return Err(HubError::BadRequest(format!(
                 "rate limited: wait before trading {symbol} again"
             )));
         }
     }
-    limits.insert(symbol, Instant::now());
+    if let Some(token) = confirm_token {
+        limits.insert(symbol, (token.to_string(), Instant::now()));
+    }
     Ok(())
 }
 
@@ -141,6 +120,7 @@ async fn trade_preview(
     require_trade_enabled(&state)?;
     let param_hash = open_param_hash(&body);
     let config = state.config.clone();
+    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
         side: body.side,
@@ -149,15 +129,24 @@ async fn trade_preview(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
-    let preview =
-        tokio::task::spawn_blocking(move || manual_trade::preview_open(&config, &request))
-            .await
-            .map_err(|error| HubError::Internal(format!("preview task failed: {error}")))??;
+    let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
+        let preview = manual_trade::preview_open(&config, &request)?;
+        let confirm_token = manual_trade::issue_confirm_token(
+            &config,
+            "OPEN",
+            &param_hash,
+            &symbol,
+            &preview,
+        )?;
+        Ok::<_, HubError>((preview, confirm_token))
+    })
+    .await
+    .map_err(|error| HubError::Internal(format!("preview task failed: {error}")))??;
     let mut payload = preview;
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "confirm_token".to_string(),
-            Value::String(generate_confirm_token(&state, param_hash).await),
+            Value::String(confirm_token),
         );
     }
     Ok(Json(payload))
@@ -172,8 +161,8 @@ async fn trade_execute(
         .confirm_token
         .as_deref()
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
-    check_rate_limit(&state, &body.symbol).await?;
-    validate_confirm_token(&state, token, &open_param_hash(&body)).await?;
+    check_rate_limit(&state, &body.symbol, Some(token)).await?;
+    let param_hash = open_param_hash(&body);
 
     let config = state.config.clone();
     let request = manual_trade::ManualTradeOpenRequest {
@@ -184,9 +173,12 @@ async fn trade_execute(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
-    let result = tokio::task::spawn_blocking(move || manual_trade::execute_open(&config, &request))
-        .await
-        .map_err(|error| HubError::Internal(format!("execute task failed: {error}")))??;
+    let token = token.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        manual_trade::execute_open(&config, &request, &token, &param_hash)
+    })
+    .await
+    .map_err(|error| HubError::Internal(format!("execute task failed: {error}")))??;
     Ok(Json(result))
 }
 
@@ -199,36 +191,36 @@ async fn trade_close(
 
     if body.confirm_token.is_none() {
         let config = state.config.clone();
+        let symbol = body.symbol.clone();
+        let hash_for_preview = hash.clone();
         let request = manual_trade::ManualTradeCloseRequest {
             symbol: body.symbol,
             close_pct: body.close_pct,
             order_type: body.order_type,
             limit_price: body.limit_price,
         };
-        let preview =
-            tokio::task::spawn_blocking(move || manual_trade::preview_close(&config, &request))
-                .await
-                .map_err(|error| {
-                    HubError::Internal(format!("close preview task failed: {error}"))
-                })??;
+        let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
+            let preview = manual_trade::preview_close(&config, &request)?;
+            let confirm_token = manual_trade::issue_confirm_token(
+                &config,
+                "CLOSE",
+                &hash_for_preview,
+                &symbol,
+                &preview,
+            )?;
+            Ok::<_, HubError>((preview, confirm_token))
+        })
+        .await
+        .map_err(|error| HubError::Internal(format!("close preview task failed: {error}")))??;
         let mut payload = preview;
         if let Some(object) = payload.as_object_mut() {
             object.insert(
                 "confirm_token".to_string(),
-                Value::String(generate_confirm_token(&state, hash).await),
+                Value::String(confirm_token),
             );
         }
         return Ok(Json(payload));
     }
-
-    validate_confirm_token(
-        &state,
-        body.confirm_token
-            .as_deref()
-            .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?,
-        &hash,
-    )
-    .await?;
 
     let config = state.config.clone();
     let request = manual_trade::ManualTradeCloseRequest {
@@ -237,10 +229,16 @@ async fn trade_close(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
-    let result =
-        tokio::task::spawn_blocking(move || manual_trade::execute_close(&config, &request))
-            .await
-            .map_err(|error| HubError::Internal(format!("close task failed: {error}")))??;
+    let token = body
+        .confirm_token
+        .as_deref()
+        .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?
+        .to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        manual_trade::execute_close(&config, &request, &token, &hash)
+    })
+    .await
+    .map_err(|error| HubError::Internal(format!("close task failed: {error}")))??;
     Ok(Json(result))
 }
 
