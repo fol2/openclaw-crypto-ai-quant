@@ -1,0 +1,58 @@
+version: 1
+
+backtester_bin: backtester/target/release/mei-backtester
+artifacts_dir: artifacts
+candles_db_dir: candles_dbs
+funding_db: candles_dbs/funding_rates.db
+
+validation:
+  min_trades: 30
+  slippage_bps: 20.0
+  max_top1_pnl_pct: 0.50
+  walk_forward_splits: 3
+  parity_abs_eps: 0.001
+  parity_rel_eps: 0.000001
+  parity_trade_delta_max: 0
+  parity_enforce: false
+
+selection:
+  selected_roles:
+    - primary
+    - fallback
+    - conservative
+  paper_targets:
+    - role: primary
+      slot: 1
+      service: openclaw-ai-quant-trader-v8-paper1
+      yaml_path: config/strategy_overrides.paper1.yaml
+    - role: fallback
+      slot: 2
+      service: openclaw-ai-quant-trader-v8-paper2
+      yaml_path: config/strategy_overrides.paper2.yaml
+    - role: conservative
+      slot: 3
+      service: openclaw-ai-quant-trader-v8-paper3
+      yaml_path: config/strategy_overrides.paper3.yaml
+
+profiles:
+  daily:
+    sweep_spec: backtester/sweeps/full_144v.yaml
+    initial_balance: 10000.0
+    gpu: true
+    tpe: true
+    tpe_trials: 1000000
+    tpe_batch: 256
+    tpe_seed: 42
+    sweep_top_k: 50000
+    shortlist_per_mode: 5
+
+  deep:
+    sweep_spec: backtester/sweeps/full_144v.yaml
+    initial_balance: 10000.0
+    gpu: true
+    tpe: true
+    tpe_trials: 10000000
+    tpe_batch: 256
+    tpe_seed: 42
+    sweep_top_k: 50000
+    shortlist_per_mode: 8

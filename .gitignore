@@ -62,6 +62,7 @@ config/*.yml
 !config/*.example.yaml
 !config/*.example.yml
 !config/ensemble.example.yaml
+!config/factory_defaults.yaml
 !config/secrets.json.example
 
 # Candle databases (large, fetched at runtime)

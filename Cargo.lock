@@ -18,6 +18,7 @@ dependencies = [
  "aiq-runtime-core",
  "anyhow",
  "bt-core",
+ "bt-data",
  "chrono",
  "clap",
  "fs2",
@@ -172,6 +173,14 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+]
+
+[[package]]
+name = "bt-data"
+version = "0.1.0"
+dependencies = [
+ "bt-core",
+ "rusqlite",
 ]
 
 [[package]]
