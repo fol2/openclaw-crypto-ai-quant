@@ -144,6 +144,7 @@ struct FillWriteSummary {
 #[derive(Clone)]
 struct ManualCancelContext {
     intent_id: Option<String>,
+    symbol: String,
     side: Option<String>,
     current_status: Option<String>,
     requested_size: Option<f64>,
@@ -1046,6 +1047,7 @@ pub fn cancel_order(
         let cancel_context = load_manual_cancel_context_by_intent_id(&conn, intent_id)?
             .unwrap_or_else(|| ManualCancelContext {
                 intent_id: Some(intent_id.to_string()),
+                symbol: symbol.clone(),
                 side: None,
                 current_status: None,
                 requested_size: None,
@@ -1053,16 +1055,17 @@ pub fn cancel_order(
                 client_order_id: Some(cloid.clone()),
                 exchange_order_id: None,
             });
+        let effective_symbol = cancel_context.symbol.clone();
         write_manual_runtime_log(
             &conn,
             "INFO",
             &format!(
                 "manual_trade cancel_requested symbol={} intent_id={} client_order_id={}",
-                symbol, intent_id, cloid
+                effective_symbol, intent_id, cloid
             ),
         )?;
         let client = build_client(cfg)?;
-        let response = match client.cancel_order_by_cloid(&symbol, &cloid) {
+        let response = match client.cancel_order_by_cloid(&effective_symbol, &cloid) {
             Ok(response) => response,
             Err(error) => {
                 let error_text = error.to_string();
@@ -1071,7 +1074,7 @@ pub fn cancel_order(
                     Some(&cancel_context),
                     ManualCancelAudit {
                         intent_id: cancel_context.intent_id.as_deref(),
-                        symbol: &symbol,
+                        symbol: &effective_symbol,
                         side: cancel_context.side.as_deref(),
                         order_type: "cancel_by_cloid",
                         requested_size: cancel_context.requested_size,
@@ -1087,7 +1090,7 @@ pub fn cancel_order(
                     "ERROR",
                     &format!(
                         "manual_trade cancel_failed symbol={} intent_id={} error={}",
-                        symbol, intent_id, error_text
+                        effective_symbol, intent_id, error_text
                     ),
                 )?;
                 return Err(HubError::BadRequest(error_text));
@@ -1100,7 +1103,7 @@ pub fn cancel_order(
                 Some(&cancel_context),
                 ManualCancelAudit {
                     intent_id: cancel_context.intent_id.as_deref(),
-                    symbol: &symbol,
+                    symbol: &effective_symbol,
                     side: cancel_context.side.as_deref(),
                     order_type: "cancel_by_cloid",
                     requested_size: cancel_context.requested_size,
@@ -1116,7 +1119,7 @@ pub fn cancel_order(
                 "ERROR",
                 &format!(
                     "manual_trade cancel_rejected symbol={} intent_id={} response={}",
-                    symbol, intent_id, response_text
+                    effective_symbol, intent_id, response_text
                 ),
             )?;
             return Err(HubError::BadRequest(response_text));
@@ -1126,7 +1129,7 @@ pub fn cancel_order(
             Some(&cancel_context),
             ManualCancelAudit {
                 intent_id: cancel_context.intent_id.as_deref(),
-                symbol: &symbol,
+                symbol: &effective_symbol,
                 side: cancel_context.side.as_deref(),
                 order_type: "cancel_by_cloid",
                 requested_size: cancel_context.requested_size,
@@ -1142,12 +1145,12 @@ pub fn cancel_order(
             "INFO",
             &format!(
                 "manual_trade cancelled symbol={} intent_id={} client_order_id={}",
-                symbol, intent_id, cloid
+                effective_symbol, intent_id, cloid
             ),
         )?;
         return Ok(json!({
             "ok": true,
-            "symbol": symbol,
+            "symbol": effective_symbol,
             "intent_id": intent_id,
             "cloid": cloid,
             "response": response,
@@ -1449,6 +1452,10 @@ fn load_manual_cancel_context_by_intent_id(
         let action = row.get::<_, Option<String>>(4)?;
         Ok(ManualCancelContext {
             intent_id: Some(intent_id.to_string()),
+            symbol: row
+                .get::<_, String>(0)?
+                .trim()
+                .to_ascii_uppercase(),
             side: row.get(1)?,
             current_status: row.get(2)?,
             requested_size: row.get(3)?,
@@ -1482,6 +1489,7 @@ fn load_manual_cancel_context_by_exchange_order_id(
         let action = row.get::<_, Option<String>>(4)?;
         Ok(ManualCancelContext {
             intent_id: row.get(0)?,
+            symbol: symbol.to_string(),
             side: row.get(1)?,
             current_status: row.get(2)?,
             requested_size: row.get(3)?,
@@ -3359,5 +3367,37 @@ mod tests {
 
         assert_eq!(row.0, "SENT");
         assert!(row.1.contains("already gone"));
+    }
+
+    #[test]
+    fn cancel_context_by_intent_id_uses_persisted_symbol() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let intent_id = "manual_cancel_symbol";
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: 1_773_500_300_000,
+                symbol: "HYPE",
+                action: "OPEN",
+                side: "BUY",
+                requested_size: 2.82,
+                requested_notional: 102.39138,
+                leverage: Some(4.0),
+                status: "SENT",
+                dedupe_key: None,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+
+        let context = load_manual_cancel_context_by_intent_id(&conn, intent_id)
+            .unwrap()
+            .expect("cancel context should exist");
+        assert_eq!(context.symbol, "HYPE");
     }
 }
