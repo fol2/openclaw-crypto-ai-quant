@@ -562,6 +562,7 @@ __device__ double compute_sl_price_codegen(
 
     double sl_mult = (double)cfg.sl_atr_mult;
     bool breakeven_active = false;
+    bool sl_price_set = false;
     bool is_underwater;
     if (pos_type == 1) {  // POS_LONG
         is_underwater = (current_price < entry_price);
@@ -585,7 +586,7 @@ __device__ double compute_sl_price_codegen(
                 && adx_slope < 0.0
                 && is_underwater) {
                 sl_mult *= 0.8;
-                if (sl_price > 0.0) {
+                if (sl_price_set) {
                     if (pos_type == 1) {
                         sl_price = entry_price - (eff_atr * sl_mult);
                     } else {
@@ -614,7 +615,7 @@ __device__ double compute_sl_price_codegen(
                 }
                 if (profit_in_atr > 0.5) {
                     sl_mult *= 1.15;
-                    if (sl_price > 0.0) {
+                    if (sl_price_set) {
                         if (pos_type == 1) {
                             sl_price = entry_price - (eff_atr * sl_mult);
                         } else {
@@ -637,7 +638,7 @@ __device__ double compute_sl_price_codegen(
         if (exit_id == GPU_EXIT_ORDER_ID_STOP_LOSS_SLB) {
             if ((cfg.exit_behaviour_mask & GPU_EXIT_MASK_STOP_LOSS_SLB) != 0u && adx > 45.0) {
                 sl_mult *= 1.10;
-                if (sl_price > 0.0) {
+                if (sl_price_set) {
                     if (pos_type == 1) {
                         sl_price = entry_price - (eff_atr * sl_mult);
                     } else {
@@ -663,6 +664,7 @@ __device__ double compute_sl_price_codegen(
                 } else {
                     sl_price = entry_price + (eff_atr * sl_mult);
                 }
+                sl_price_set = true;
                 if (breakeven_active) {
                     double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
                     if (pos_type == 1) {
@@ -685,14 +687,14 @@ __device__ double compute_sl_price_codegen(
                 if (pos_type == 1) {
                     if ((current_price - entry_price) >= be_start) {
                         breakeven_active = true;
-                        if (sl_price > 0.0) {
+                        if (sl_price_set) {
                             sl_price = fmax(sl_price, entry_price + be_buffer);
                         }
                     }
                 } else {
                     if ((entry_price - current_price) >= be_start) {
                         breakeven_active = true;
-                        if (sl_price > 0.0) {
+                        if (sl_price_set) {
                             sl_price = fmin(sl_price, entry_price - be_buffer);
                         }
                     }

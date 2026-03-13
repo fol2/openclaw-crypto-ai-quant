@@ -840,10 +840,11 @@ fn test_sl_codegen_modifier_ordering() {
 fn test_sl_codegen_reapplies_breakeven_when_base_appears_later() {
     let src = get_sl_cuda_source();
     assert!(
+        src.contains("bool sl_price_set = false;") &&
         src.contains("if (breakeven_active)") &&
         src.contains("sl_price = fmax(sl_price, entry_price + be_buffer)") &&
         src.contains("sl_price = fmin(sl_price, entry_price - be_buffer)"),
-        "SL codegen must carry a pre-activated breakeven state into later raw-SL recomputes"
+        "SL codegen must carry a pre-activated breakeven state into later raw-SL recomputes without relying on sl_price > 0"
     );
 }
 
