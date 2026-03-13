@@ -5,6 +5,7 @@ pub mod factory;
 pub mod monitor;
 pub mod sweep;
 pub mod system;
+pub mod trade;
 
 use axum::Router;
 use std::sync::Arc;
@@ -21,4 +22,5 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .merge(sweep::routes())
         .merge(factory::routes())
         .merge(system::routes())
+        .merge(trade::routes())
 }

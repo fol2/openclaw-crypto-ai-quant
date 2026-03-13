@@ -5,6 +5,11 @@ mod error;
 mod factory_capability;
 mod heartbeat;
 mod hyperliquid;
+#[path = "../../runtime/aiq-runtime/src/live_hyperliquid.rs"]
+mod live_hyperliquid;
+#[path = "../../runtime/aiq-runtime/src/live_secrets.rs"]
+mod live_secrets;
+mod manual_trade;
 mod routes;
 mod sidecar;
 mod state;

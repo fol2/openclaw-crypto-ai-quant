@@ -492,8 +492,8 @@ export class TradePanel extends LitElement {
     try {
       const res = await tradePreview(this._openBody());
       this.openTok = res?.confirm_token || '';
-      // Poll for subprocess result (server-side estimates)
       if (res?.job_id) {
+        // Poll for subprocess result (server-side estimates)
         const result = await this._awaitJobResult(res.job_id);
         if (result && result.ok) {
           this.openPrev = result;
@@ -505,6 +505,8 @@ export class TradePanel extends LitElement {
           this.openErr = 'Preview timed out, please retry';
           this.openTok = '';
         }
+      } else if (res?.ok) {
+        this.openPrev = res;
       }
     } catch (e: any) {
       this.openErr = e?.message || 'Preview failed';
@@ -548,7 +550,7 @@ export class TradePanel extends LitElement {
           this.openOk = 'Order submitted (result pending)';
         }
       } else {
-        this.openOk = 'Order submitted';
+        this.openOk = `Order submitted: ${res?.intent_id || ''} ${res?.order_type || ''}`.trim() || 'Order submitted';
       }
       this.openTok = '';
       this.openPrev = null;
@@ -615,7 +617,7 @@ export class TradePanel extends LitElement {
           this.closeOk = 'Close submitted (result pending)';
         }
       } else {
-        this.closeOk = 'Close submitted';
+        this.closeOk = `Close submitted: ${res?.close_size ?? ''} ${res?.symbol ?? ''}`.trim() || 'Close submitted';
       }
       this.closeTok = '';
       this.closePrev = null;
