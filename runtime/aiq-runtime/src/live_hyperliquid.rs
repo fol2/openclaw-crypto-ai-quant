@@ -265,8 +265,15 @@ impl HyperliquidClient {
         if reference_price <= 0.0 {
             anyhow::bail!("market_open requires a valid reference price for {symbol}");
         }
-        let limit_px = local_slippage_limit_px(reference_price, is_buy, slippage_pct)
-            .context("failed to derive market_open slippage price")?;
+        let meta = self.asset_meta(symbol)?;
+        let limit_px = market_order_limit_px(
+            reference_price,
+            is_buy,
+            slippage_pct,
+            meta.sz_decimals,
+            meta.asset >= 10_000,
+        )
+        .context("failed to derive market_open slippage price")?;
         self.order(OrderRequest {
             symbol: symbol.trim().to_ascii_uppercase(),
             is_buy,
@@ -291,8 +298,15 @@ impl HyperliquidClient {
             Some(value) if value > 0.0 => value,
             _ => self.mid_for_symbol(symbol)?,
         };
-        let limit_px = local_slippage_limit_px(reference_price, is_buy, slippage_pct)
-            .context("failed to derive market_close limit price")?;
+        let meta = self.asset_meta(symbol)?;
+        let limit_px = market_order_limit_px(
+            reference_price,
+            is_buy,
+            slippage_pct,
+            meta.sz_decimals,
+            meta.asset >= 10_000,
+        )
+        .context("failed to derive market_close limit price")?;
         self.order(OrderRequest {
             symbol: symbol.trim().to_ascii_uppercase(),
             is_buy,
@@ -602,7 +616,18 @@ pub fn float_to_wire(value: f64) -> Result<String> {
     })
 }
 
+#[cfg(test)]
 pub fn local_slippage_limit_px(px: f64, is_buy: bool, slippage_pct: f64) -> Option<f64> {
+    market_order_limit_px(px, is_buy, slippage_pct, 0, false)
+}
+
+pub fn market_order_limit_px(
+    px: f64,
+    is_buy: bool,
+    slippage_pct: f64,
+    sz_decimals: u32,
+    is_spot: bool,
+) -> Option<f64> {
     if !px.is_finite() || px <= 0.0 {
         return None;
     }
@@ -612,7 +637,7 @@ pub fn local_slippage_limit_px(px: f64, is_buy: bool, slippage_pct: f64) -> Opti
     } else {
         px * (1.0 - slip)
     };
-    normalise_limit_px_for_wire(adjusted, is_buy)
+    sdk_slippage_price(adjusted, sz_decimals, is_spot)
 }
 
 pub fn normalise_limit_px_for_wire(px: f64, is_buy: bool) -> Option<f64> {
@@ -625,6 +650,47 @@ pub fn normalise_limit_px_for_wire(px: f64, is_buy: bool) -> Option<f64> {
     } else {
         scaled.floor()
     } / 100_000_000.0;
+    if rounded.is_finite() && rounded > 0.0 {
+        Some(rounded)
+    } else {
+        None
+    }
+}
+
+fn sdk_slippage_price(px: f64, sz_decimals: u32, is_spot: bool) -> Option<f64> {
+    if !px.is_finite() || px <= 0.0 {
+        return None;
+    }
+    let sigfig_px = round_to_significant_figures(px, 5)?;
+    let decimals = (if is_spot { 8_i32 } else { 6_i32 }) - sz_decimals as i32;
+    round_to_decimal_places(sigfig_px, decimals)
+}
+
+fn round_to_significant_figures(value: f64, sig_figs: u32) -> Option<f64> {
+    if !value.is_finite() || value <= 0.0 || sig_figs == 0 {
+        return None;
+    }
+    let exponent = value.abs().log10().floor() as i32;
+    let scale = 10f64.powi(sig_figs as i32 - 1 - exponent);
+    let rounded = (value * scale).round() / scale;
+    if rounded.is_finite() && rounded > 0.0 {
+        Some(rounded)
+    } else {
+        None
+    }
+}
+
+fn round_to_decimal_places(value: f64, decimals: i32) -> Option<f64> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let rounded = if decimals >= 0 {
+        let factor = 10f64.powi(decimals);
+        (value * factor).round() / factor
+    } else {
+        let factor = 10f64.powi(-decimals);
+        (value / factor).round() * factor
+    };
     if rounded.is_finite() && rounded > 0.0 {
         Some(rounded)
     } else {
@@ -968,6 +1034,20 @@ mod tests {
     fn local_slippage_uses_buy_round_up_and_sell_round_down() {
         assert_eq!(local_slippage_limit_px(100.0, true, 0.01), Some(101.0));
         assert_eq!(local_slippage_limit_px(100.0, false, 0.01), Some(99.0));
+    }
+
+    #[test]
+    fn market_order_limit_px_matches_python_sdk_for_eth_perp() {
+        let price = market_order_limit_px(2105.65, false, 0.01, 4, false).unwrap();
+        assert!((price - 2084.6).abs() < 1e-9);
+        assert_eq!(float_to_wire(price).unwrap(), "2084.6");
+    }
+
+    #[test]
+    fn market_order_limit_px_matches_python_sdk_for_hype_perp() {
+        let price = market_order_limit_px(36.5525, false, 0.01, 2, false).unwrap();
+        assert!((price - 36.187).abs() < 1e-9);
+        assert_eq!(float_to_wire(price).unwrap(), "36.187");
     }
 
     #[test]
