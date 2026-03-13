@@ -297,6 +297,18 @@ async fn run_factory(
     if !cap.execution_enabled {
         return disabled_response(&cap, "run");
     }
+    {
+        let jobs = state.jobs.jobs.lock().await;
+        if jobs
+            .values()
+            .any(|job| job.kind == "factory" && job.status == JobStatus::Running)
+        {
+            return HubError::BadRequest(
+                "a factory job is already running; wait for it to finish or cancel it first".into(),
+            )
+            .into_response();
+        }
+    }
     let profile = body
         .profile
         .unwrap_or_else(|| "daily".to_string())
@@ -403,8 +415,15 @@ async fn cancel_job(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     job.finished_at = Some(chrono::Utc::now().to_rfc3339());
 
     let mut handles = state.jobs.handles.lock().await;
-    if let Some(mut child) = handles.remove(&id) {
-        let _ = child.kill().await;
+    if let Some(pid) = handles.remove(&id) {
+        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return HubError::Internal(format!("failed to signal pid {pid}: {err}"))
+                    .into_response();
+            }
+        }
     }
 
     Json(json!({ "ok": true, "cancelled": id })).into_response()

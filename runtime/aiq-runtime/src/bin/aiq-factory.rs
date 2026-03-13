@@ -648,7 +648,8 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
 
     let now = Utc::now();
     let run_stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let run_id = format!("{}_{}", args.profile.run_prefix(), run_stamp);
+    let unique_stamp = format!("{run_stamp}_{:03}", now.timestamp_subsec_millis());
+    let run_id = format!("{}_{}", args.profile.run_prefix(), unique_stamp);
     let run_dir = paths
         .artifacts_root
         .join(now.format("%Y-%m-%d").to_string())
@@ -667,7 +668,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
     let effective_config_path = write_effective_config(
         &paths.artifacts_root,
         args.profile,
-        &run_stamp,
+        &unique_stamp,
         &paths.config_path,
         &base_cfg,
     )?;

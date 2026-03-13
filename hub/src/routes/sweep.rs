@@ -165,8 +165,16 @@ async fn cancel_job(
     job.finished_at = Some(chrono::Utc::now().to_rfc3339());
 
     let mut handles = state.jobs.handles.lock().await;
-    if let Some(mut child) = handles.remove(&id) {
-        let _ = child.kill().await;
+    if let Some(pid) = handles.remove(&id) {
+        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(HubError::Internal(format!(
+                    "failed to signal pid {pid}: {err}"
+                )));
+            }
+        }
     }
 
     Ok(Json(json!({ "ok": true, "cancelled": id })))
