@@ -5,17 +5,20 @@
   import Config from './pages/Config.svelte';
   import Backtest from './pages/Backtest.svelte';
   import Sweep from './pages/Sweep.svelte';
-  import Factory from './pages/Factory.svelte';
   import GridView from './pages/GridView.svelte';
   import Statements from './pages/Statements.svelte';
   import System from './pages/System.svelte';
 
-  let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
+  function normalisePage(page: string): string {
+    return page === 'factory' ? 'dashboard' : page;
+  }
+
+  let currentPage = $state(normalisePage(window.location.hash.slice(1) || 'dashboard'));
   let sidebarOpen = $state(false);
   let sidebarCollapsed = $state(true);
 
   function handleHashChange() {
-    currentPage = window.location.hash.slice(1) || 'dashboard';
+    currentPage = normalisePage(window.location.hash.slice(1) || 'dashboard');
     sidebarOpen = false;
   }
 
@@ -52,8 +55,6 @@
     <Backtest />
   {:else if currentPage === 'sweep'}
     <Sweep />
-  {:else if currentPage === 'factory'}
-    <Factory />
   {:else if currentPage === 'grid'}
     <GridView />
   {:else if currentPage === 'statements'}
