@@ -48,6 +48,18 @@ deployment:
   live_yaml_path: config/strategy_overrides.live.yaml
   live_service: openclaw-ai-quant-live-v8
 
+live_governance:
+  live_db_path: trading_engine_v8_live.db
+  state_path: artifacts/state/factory_live_primary.json
+  stage1_exposure_factor: 0.25
+  stage2_exposure_factor: 0.50
+  stage3_exposure_factor: 1.00
+  min_stage_hours: 24.0
+  rotation_trade_window: 30
+  min_live_profit_factor: 1.0
+  max_live_drawdown_pct: 15.0
+  max_config_age_days: 14.0
+
 profiles:
   daily:
     sweep_spec: backtester/sweeps/full_144v.yaml

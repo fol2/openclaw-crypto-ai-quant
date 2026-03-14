@@ -45,6 +45,9 @@ All must be met:
 | 2 | 50% of target | 1 day | No kill-switch triggers |
 | 3 | 100% of target | — | Steady state |
 
+The factory enforces the ramp by generating stage-specific live manifests rather
+than editing the steady-state config in place.
+
 Step down or pause immediately if any kill-switch fires during ramp.
 
 ## Rotation Criteria (When to Retire a Config)
@@ -55,8 +58,7 @@ Trigger rotation if **any** condition is met:
 |---------|-----------|--------|
 | Rolling profit factor | PF < 1.0 over last 30 trades | Pause config, fall back to safety mode |
 | Live drawdown warning | DD > 15% from config-start HWM | Pause config, queue a replacement from the latest validation run |
-| Latest validation fail | Config no longer passes the current OOS validation suite | Schedule rotation at the next deployment window |
-| Max config age | 14 days since deployment | Re-validate; retire if no longer passing |
+| Max config age | 14 days since deployment | Pause config, queue a replacement from the latest validation run |
 
 When a config is rotated out, record: config hash, start/stop timestamps, reason for rotation, and final performance summary.
 
