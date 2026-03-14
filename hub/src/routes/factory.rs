@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -21,7 +22,7 @@ use crate::subprocess::JobStatus;
 
 /// Build factory sub-router.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let read_routes = Router::new()
         .route("/api/factory/capability", get(get_capability))
         // Existing read-only artifact routes
         .route("/api/factory/runs", get(list_runs))
@@ -32,15 +33,20 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(run_candidates),
         )
         // Job control routes
-        .route("/api/factory/run", post(run_factory))
         .route("/api/factory/jobs", get(list_jobs))
         .route("/api/factory/jobs/{id}/status", get(job_status))
-        .route("/api/factory/jobs/{id}", delete(cancel_job))
         // Settings routes
-        .route("/api/factory/settings", get(get_settings).put(put_settings))
+        .route("/api/factory/settings", get(get_settings))
         // Timer routes
-        .route("/api/factory/timer", get(get_timer))
+        .route("/api/factory/timer", get(get_timer));
+    let mutation_routes = Router::new()
+        .route("/api/factory/run", post(run_factory))
+        .route("/api/factory/jobs/{id}", delete(cancel_job))
+        .route("/api/factory/settings", axum::routing::put(put_settings))
         .route("/api/factory/timer/{action}", post(timer_action))
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 fn capability(state: &AppState) -> FactoryCapability {

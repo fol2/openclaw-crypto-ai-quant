@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    middleware,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -25,12 +26,16 @@ pub struct RunSweepBody {
 
 /// Build sweep sub-router.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/sweep/run", post(run_sweep))
+    let read_routes = Router::new()
         .route("/api/sweep/jobs", get(list_jobs))
         .route("/api/sweep/{id}/status", get(job_status))
-        .route("/api/sweep/{id}/results", get(job_results))
+        .route("/api/sweep/{id}/results", get(job_results));
+    let mutation_routes = Router::new()
+        .route("/api/sweep/run", post(run_sweep))
         .route("/api/sweep/{id}", delete(cancel_job))
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 /// POST /api/sweep/run — launch a new sweep.

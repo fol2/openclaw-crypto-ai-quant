@@ -1,5 +1,6 @@
 use axum::{
     extract::{Query, State},
+    middleware,
     routing::{get, post},
     Json, Router,
 };
@@ -14,12 +15,16 @@ use crate::state::AppState;
 
 /// Build system sub-router.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let read_routes = Router::new()
         .route("/api/system/services", get(list_services))
-        .route("/api/system/services/{name}/{action}", post(service_action))
         .route("/api/system/db-stats", get(db_stats))
         .route("/api/system/disk", get(disk_usage))
-        .route("/api/system/logs", get(service_logs))
+        .route("/api/system/logs", get(service_logs));
+    let mutation_routes = Router::new()
+        .route("/api/system/services/{name}/{action}", post(service_action))
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 /// Known service names (allow-list for safety).

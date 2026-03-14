@@ -1,5 +1,6 @@
 use axum::extract::{Query, State};
 use axum::http::header;
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -169,13 +170,12 @@ fn default_tunnel_limit() -> u32 {
 // ── Route definitions ────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let read_routes = Router::new()
         .route("/api/health", get(api_health))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/mids", get(api_mids))
         .route("/api/candles", get(api_candles))
         .route("/api/marks", get(api_marks))
-        .route("/api/flash-debug", post(api_flash_debug))
         .route("/api/sparkline", get(api_sparkline))
         .route("/api/journeys", get(api_journeys))
         .route("/api/candles/range", get(api_candles_range))
@@ -185,7 +185,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/metrics", get(api_metrics))
         .route("/api/tunnel", get(api_tunnel))
         .route("/api/trades", get(api_trades))
-        .route("/metrics", get(api_prometheus))
+        .route("/metrics", get(api_prometheus));
+    let mutation_routes = Router::new()
+        .route("/api/flash-debug", post(api_flash_debug))
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 fn live_position_overrides(

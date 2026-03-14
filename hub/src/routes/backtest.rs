@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    middleware,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -25,12 +26,16 @@ pub struct RunBacktestBody {
 
 /// Build backtest sub-router.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/backtest/run", post(run_backtest))
+    let read_routes = Router::new()
         .route("/api/backtest/jobs", get(list_jobs))
         .route("/api/backtest/{id}/status", get(job_status))
-        .route("/api/backtest/{id}/result", get(job_result))
+        .route("/api/backtest/{id}/result", get(job_result));
+    let mutation_routes = Router::new()
+        .route("/api/backtest/run", post(run_backtest))
         .route("/api/backtest/{id}", delete(cancel_job))
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 /// POST /api/backtest/run — launch a new backtest.
