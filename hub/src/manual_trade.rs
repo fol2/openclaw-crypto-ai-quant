@@ -1609,7 +1609,12 @@ pub fn cancel_order(
         )? {
             ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
             ManualCancelRequestClaim::Existing(existing) => {
-                return existing_manual_cancel_request_payload(&existing, "dedupe_key", true);
+                if let Some(recovered) =
+                    recover_existing_pending_cancel_request(cfg, &conn, request, &existing)?
+                {
+                    return Ok(recovered);
+                }
+                existing.request_id
             }
         };
         write_manual_runtime_log(
@@ -1837,7 +1842,12 @@ pub fn cancel_order(
         )? {
             ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
             ManualCancelRequestClaim::Existing(existing) => {
-                return existing_manual_cancel_request_payload(&existing, "dedupe_key", true);
+                if let Some(recovered) =
+                    recover_existing_pending_cancel_request(cfg, &conn, request, &existing)?
+                {
+                    return Ok(recovered);
+                }
+                existing.request_id
             }
         };
         write_manual_runtime_log(
@@ -3203,9 +3213,7 @@ fn initialise_manual_cancel_request(
             return Ok(ManualCancelRequestClaim::Existing(Box::new(existing)));
         }
         if status == "NEW" {
-            return Ok(ManualCancelRequestClaim::Submit {
-                request_id: existing.request_id,
-            });
+            return Ok(ManualCancelRequestClaim::Existing(Box::new(existing)));
         }
         if matches!(status.as_str(), "ERROR" | "REJECTED") {
             conn.execute(
@@ -3252,6 +3260,135 @@ fn initialise_manual_cancel_request(
         ],
     )?;
     Ok(ManualCancelRequestClaim::Submit { request_id })
+}
+
+fn manual_cancel_target_is_still_open(
+    orders: &[Value],
+    symbol: &str,
+    client_order_id: Option<&str>,
+    exchange_order_id: Option<&str>,
+) -> bool {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    orders.iter().any(|order| {
+        let order_symbol = order
+            .get("coin")
+            .or_else(|| order.get("symbol"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_ascii_uppercase());
+        if order_symbol.as_deref() != Some(symbol_upper.as_str()) {
+            return false;
+        }
+        let order_cloid = order
+            .get("cloid")
+            .or_else(|| order.get("clientOrderId"))
+            .or_else(|| order.get("client_order_id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim);
+        if client_order_id.is_some() && order_cloid == client_order_id {
+            return true;
+        }
+        let order_exchange_id = order
+            .get("oid")
+            .and_then(parse_json_integer)
+            .map(|value| value.to_string());
+        exchange_order_id.is_some() && order_exchange_id.as_deref() == exchange_order_id
+    })
+}
+
+fn recover_existing_pending_cancel_request(
+    cfg: &HubConfig,
+    conn: &Connection,
+    request: &ManualTradeCancelRequest,
+    existing: &ExistingManualCancelRequest,
+) -> Result<Option<Value>, HubError> {
+    if !existing.status.eq_ignore_ascii_case("NEW") {
+        return Ok(None);
+    }
+
+    let symbol = existing.symbol.trim().to_ascii_uppercase();
+    let client = build_client(cfg)?;
+    let open_orders = client
+        .open_orders()
+        .map_err(|error| HubError::Internal(format!("failed to inspect open orders: {error}")))?;
+
+    let target_still_open = if let Some(intent_id) = request
+        .intent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(context) = load_manual_cancel_context_by_intent_id(conn, intent_id)? {
+            if is_terminal_cancelled_status(context.current_status.as_deref()) {
+                update_manual_cancel_request(
+                    conn,
+                    &existing.request_id,
+                    "CANCELLED",
+                    None,
+                    Some(&json!({
+                        "status": "ok",
+                        "reason": "intent_already_cancelled_on_retry",
+                    })),
+                )?;
+                return Ok(Some(existing_manual_cancel_request_payload(
+                    &ExistingManualCancelRequest {
+                        status: "CANCELLED".to_string(),
+                        response_json: Some(
+                            json!({
+                                "status": "ok",
+                                "reason": "intent_already_cancelled_on_retry",
+                            })
+                            .to_string(),
+                        ),
+                        last_error: None,
+                        ..existing.clone()
+                    },
+                    "request_id",
+                    true,
+                )?));
+            }
+            manual_cancel_target_is_still_open(
+                &open_orders,
+                &context.symbol,
+                context.client_order_id.as_deref(),
+                context.exchange_order_id.as_deref(),
+            )
+        } else {
+            false
+        }
+    } else {
+        manual_cancel_target_is_still_open(
+            &open_orders,
+            &symbol,
+            existing.client_order_id.as_deref(),
+            existing.exchange_order_id.as_deref(),
+        )
+    };
+
+    if target_still_open {
+        return Ok(None);
+    }
+
+    let recovered_response = json!({
+        "status": "ok",
+        "reason": "target_not_open_on_retry",
+    });
+    update_manual_cancel_request(
+        conn,
+        &existing.request_id,
+        "CANCELLED",
+        None,
+        Some(&recovered_response),
+    )?;
+    Ok(Some(existing_manual_cancel_request_payload(
+        &ExistingManualCancelRequest {
+            status: "CANCELLED".to_string(),
+            response_json: Some(recovered_response.to_string()),
+            last_error: None,
+            ..existing.clone()
+        },
+        "request_id",
+        true,
+    )?))
 }
 
 fn update_manual_cancel_request(
