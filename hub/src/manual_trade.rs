@@ -501,7 +501,8 @@ pub fn execute_open(
         }),
     )?;
 
-    let leverage_effect = match set_manual_open_leverage(&conn, &client, &prepared, &intent_id) {
+    let leverage_effect = match set_manual_open_leverage(&mut conn, &client, &prepared, &intent_id)
+    {
         Ok(effect) => effect,
         Err(error) => {
             let error_text = error.to_string();
@@ -540,7 +541,7 @@ pub fn execute_open(
             let error_text = error.to_string();
             let error_status = failure_status_for_error(&error_text);
             let leverage_note = handle_manual_open_leverage_failure(
-                &conn,
+                &mut conn,
                 &client,
                 &prepared,
                 &intent_id,
@@ -577,7 +578,7 @@ pub fn execute_open(
     let embedded_reject = response_has_embedded_error(&response);
     let response_text = response.to_string();
     record_manual_order_submission(
-        &conn,
+        &mut conn,
         ManualOrderSubmission {
             intent_id: &intent_id,
             sent_ts_ms: chrono::Utc::now().timestamp_millis(),
@@ -609,7 +610,7 @@ pub fn execute_open(
     }
     if embedded_reject {
         let leverage_note = handle_manual_open_leverage_failure(
-            &conn,
+            &mut conn,
             &client,
             &prepared,
             &intent_id,
@@ -1232,7 +1233,7 @@ pub fn execute_close(
     let embedded_reject = response_has_embedded_error(&response);
     let response_text = response.to_string();
     record_manual_order_submission(
-        &conn,
+        &mut conn,
         ManualOrderSubmission {
             intent_id: &intent_id,
             sent_ts_ms: chrono::Utc::now().timestamp_millis(),
@@ -1531,7 +1532,7 @@ pub fn cancel_order(
 ) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, true)?;
     let symbol = request.symbol.trim().to_ascii_uppercase();
-    let conn = open_manual_trade_db(&cfg.live_db)?;
+    let mut conn = open_manual_trade_db(&cfg.live_db)?;
 
     if let Some(oid) = request
         .oid
@@ -1576,7 +1577,7 @@ pub fn cancel_order(
             Err(error) => {
                 let error_text = error.to_string();
                 record_manual_cancel_audit(
-                    &conn,
+                    &mut conn,
                     cancel_context.as_ref(),
                     ManualCancelAudit {
                         intent_id: cancel_context
@@ -1626,7 +1627,7 @@ pub fn cancel_order(
         let response_text = response.to_string();
         if response_has_embedded_error(&response) {
             record_manual_cancel_audit(
-                &conn,
+                &mut conn,
                 cancel_context.as_ref(),
                 ManualCancelAudit {
                     intent_id: cancel_context
@@ -1671,7 +1672,7 @@ pub fn cancel_order(
             return Err(HubError::BadRequest(response_text));
         }
         record_manual_cancel_audit(
-            &conn,
+            &mut conn,
             cancel_context.as_ref(),
             ManualCancelAudit {
                 intent_id: cancel_context
@@ -1770,7 +1771,7 @@ pub fn cancel_order(
             Err(error) => {
                 let error_text = error.to_string();
                 record_manual_cancel_audit(
-                    &conn,
+                    &mut conn,
                     Some(&cancel_context),
                     ManualCancelAudit {
                         intent_id: cancel_context.intent_id.as_deref(),
@@ -1810,7 +1811,7 @@ pub fn cancel_order(
         let response_text = response.to_string();
         if response_has_embedded_error(&response) {
             record_manual_cancel_audit(
-                &conn,
+                &mut conn,
                 Some(&cancel_context),
                 ManualCancelAudit {
                     intent_id: cancel_context.intent_id.as_deref(),
@@ -1847,7 +1848,7 @@ pub fn cancel_order(
             return Err(HubError::BadRequest(response_text));
         }
         record_manual_cancel_audit(
-            &conn,
+            &mut conn,
             Some(&cancel_context),
             ManualCancelAudit {
                 intent_id: cancel_context.intent_id.as_deref(),
@@ -2028,7 +2029,7 @@ pub fn reconcile_manual_intents(cfg: &HubConfig, limit: usize) -> Result<Value, 
             if intent.sent_ts_ms.is_none() || intent.status.eq_ignore_ascii_case("UNKNOWN") {
                 let order = matching_open_order.expect("open order presence already checked");
                 record_manual_order_submission(
-                    &conn,
+                    &mut conn,
                     ManualOrderSubmission {
                         intent_id: &intent.intent_id,
                         sent_ts_ms: now_ms,
@@ -3607,10 +3608,11 @@ fn update_manual_intent_status(
 }
 
 fn record_manual_order_submission(
-    conn: &Connection,
+    conn: &mut Connection,
     submission: ManualOrderSubmission<'_>,
 ) -> Result<(), HubError> {
-    let changed = conn.execute(
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
         "UPDATE oms_intents
          SET status = ?1, sent_ts_ms = ?2, exchange_order_id = ?3, last_error = ?4
          WHERE intent_id = ?5",
@@ -3629,7 +3631,7 @@ fn record_manual_order_submission(
         )));
     }
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO oms_orders (
             intent_id, created_ts_ms, symbol, side, order_type, requested_size,
             reduce_only, client_order_id, exchange_order_id, status, raw_json
@@ -3648,16 +3650,18 @@ fn record_manual_order_submission(
             submission.raw_json,
         ],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
 fn record_manual_cancel_audit(
-    conn: &Connection,
+    conn: &mut Connection,
     context: Option<&ManualCancelContext>,
     audit: ManualCancelAudit<'_>,
 ) -> Result<(), HubError> {
     let ts_ms = chrono::Utc::now().timestamp_millis();
     let can_update_intent = context.map(|item| item.intent_exists).unwrap_or(false);
+    let tx = conn.transaction()?;
     if can_update_intent {
         let intent_id = audit.intent_id.ok_or_else(|| {
             HubError::Internal("cancel audit expected an intent_id for a persisted context".into())
@@ -3667,17 +3671,17 @@ fn record_manual_cancel_audit(
                 if let Some(next_status) =
                     cancelled_intent_status(context.and_then(|item| item.current_status.as_deref()))
                 {
-                    update_manual_intent_status(conn, intent_id, next_status, "")?;
+                    update_manual_intent_status(&tx, intent_id, next_status, "")?;
                 }
             }
             "REJECTED" | "ERROR" => {
-                update_manual_intent_last_error(conn, intent_id, &audit.raw_json)?;
+                update_manual_intent_last_error(&tx, intent_id, &audit.raw_json)?;
             }
             _ => {}
         }
     }
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO oms_orders (
             intent_id, created_ts_ms, symbol, side, order_type, requested_size,
             reduce_only, client_order_id, exchange_order_id, status, raw_json
@@ -3696,15 +3700,17 @@ fn record_manual_cancel_audit(
             audit.raw_json,
         ],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
 fn record_manual_leverage_audit(
-    conn: &Connection,
+    conn: &mut Connection,
     audit: ManualLeverageAudit<'_>,
 ) -> Result<(), HubError> {
     let ts_ms = chrono::Utc::now().timestamp_millis();
-    conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute(
         "INSERT INTO oms_orders (
             intent_id, created_ts_ms, symbol, side, order_type, requested_size,
             reduce_only, client_order_id, exchange_order_id, status, raw_json
@@ -3724,7 +3730,7 @@ fn record_manual_leverage_audit(
         "INFO"
     };
     write_manual_runtime_log(
-        conn,
+        &tx,
         level,
         &format!(
             "manual_trade leverage_{} intent_id={} symbol={} leverage={} order_type={} status={}",
@@ -3737,7 +3743,7 @@ fn record_manual_leverage_audit(
         ),
     )?;
     write_manual_audit_event(
-        conn,
+        &tx,
         Some(audit.symbol),
         manual_leverage_event_name(audit.order_type, audit.status),
         level,
@@ -3750,6 +3756,7 @@ fn record_manual_leverage_audit(
             "raw_json": audit.raw_json,
         }),
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -4520,7 +4527,7 @@ fn submit_open_order(
 }
 
 fn set_manual_open_leverage(
-    conn: &Connection,
+    conn: &mut Connection,
     client: &HyperliquidClient,
     prepared: &PreparedOpen,
     intent_id: &str,
@@ -4638,7 +4645,7 @@ fn set_manual_open_leverage(
 }
 
 fn handle_manual_open_leverage_failure(
-    conn: &Connection,
+    conn: &mut Connection,
     client: &HyperliquidClient,
     prepared: &PreparedOpen,
     intent_id: &str,
@@ -5299,7 +5306,7 @@ mod tests {
         )
         .unwrap();
         record_manual_order_submission(
-            &conn,
+            &mut conn,
             ManualOrderSubmission {
                 intent_id,
                 sent_ts_ms: 1_773_417_718_266,
@@ -5443,11 +5450,11 @@ mod tests {
         create_trades_table(&bootstrap);
         drop(bootstrap);
 
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         let intent_id = "manual_test_reject";
         let cloid = manual_cloid_from_intent_id(intent_id);
         insert_manual_intent(
-            &conn,
+            &mut conn,
             ManualIntentRecord {
                 intent_id,
                 created_ts_ms: 1_773_439_600_000,
@@ -5478,7 +5485,7 @@ mod tests {
         })
         .to_string();
         record_manual_order_submission(
-            &conn,
+            &mut conn,
             ManualOrderSubmission {
                 intent_id,
                 sent_ts_ms: 1_773_439_600_123,
@@ -5627,7 +5634,7 @@ mod tests {
     #[test]
     fn manual_execution_claim_reuses_existing_intent_for_same_confirm_token() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let confirm_token = "confirm-execute-token";
         let param_hash = "open_hash";
@@ -5665,7 +5672,7 @@ mod tests {
             meta_json: "{}".to_string(),
         };
         let first = initialise_manual_execution(
-            &conn,
+            &mut conn,
             confirm_token,
             MANUAL_CONFIRM_ACTION_OPEN,
             param_hash,
@@ -5738,9 +5745,9 @@ mod tests {
             manual_trade_enabled: true,
             ..HubConfig::from_env()
         };
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         insert_manual_intent(
-            &conn,
+            &mut conn,
             ManualIntentRecord {
                 intent_id: "manual_retry_open",
                 created_ts_ms: 1_773_500_000_000,
@@ -5893,9 +5900,9 @@ mod tests {
             manual_trade_enabled: true,
             ..HubConfig::from_env()
         };
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         insert_manual_intent(
-            &conn,
+            &mut conn,
             ManualIntentRecord {
                 intent_id: "manual_cancelled_intent",
                 created_ts_ms: 1_773_500_100_000,
@@ -6091,10 +6098,10 @@ mod tests {
     #[test]
     fn manual_cancel_audit_updates_intent_and_persists_order_row() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         let intent_id = "manual_cancel_ok";
         insert_manual_intent(
-            &conn,
+            &mut conn,
             ManualIntentRecord {
                 intent_id,
                 created_ts_ms: 1_773_500_100_000,
@@ -6117,7 +6124,7 @@ mod tests {
             .unwrap()
             .expect("cancel context should exist");
         record_manual_cancel_audit(
-            &conn,
+            &mut conn,
             Some(&context),
             ManualCancelAudit {
                 intent_id: Some(intent_id),
@@ -6156,10 +6163,10 @@ mod tests {
     #[test]
     fn manual_cancel_audit_preserves_status_on_reject() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         let intent_id = "manual_cancel_reject";
         insert_manual_intent(
-            &conn,
+            &mut conn,
             ManualIntentRecord {
                 intent_id,
                 created_ts_ms: 1_773_500_200_000,
@@ -6182,7 +6189,7 @@ mod tests {
             .unwrap()
             .expect("cancel context should exist");
         record_manual_cancel_audit(
-            &conn,
+            &mut conn,
             Some(&context),
             ManualCancelAudit {
                 intent_id: Some(intent_id),
@@ -6214,10 +6221,10 @@ mod tests {
     #[test]
     fn cancel_context_by_intent_id_uses_persisted_symbol() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         let intent_id = "manual_cancel_symbol";
         insert_manual_intent(
-            &conn,
+            &mut conn,
             ManualIntentRecord {
                 intent_id,
                 created_ts_ms: 1_773_500_300_000,
@@ -6246,7 +6253,7 @@ mod tests {
     #[test]
     fn manual_cancel_audit_allows_missing_intent_fallback_on_reject() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         let fallback = ManualCancelContext {
             intent_exists: false,
             intent_id: Some("missing_intent".to_string()),
@@ -6260,7 +6267,7 @@ mod tests {
         };
 
         record_manual_cancel_audit(
-            &conn,
+            &mut conn,
             Some(&fallback),
             ManualCancelAudit {
                 intent_id: fallback.intent_id.as_deref(),
@@ -6290,9 +6297,9 @@ mod tests {
     #[test]
     fn manual_audit_event_helper_persists_structured_row() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
         write_manual_audit_event(
-            &conn,
+            &mut conn,
             Some("ETH"),
             "manual_test_event",
             "info",
@@ -6371,10 +6378,10 @@ mod tests {
     #[test]
     fn manual_leverage_audit_persists_requested_and_result_rows() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
 
         record_manual_leverage_audit(
-            &conn,
+            &mut conn,
             ManualLeverageAudit {
                 intent_id: "manual_leverage_intent",
                 symbol: "ETH",
@@ -6386,7 +6393,7 @@ mod tests {
         )
         .unwrap();
         record_manual_leverage_audit(
-            &conn,
+            &mut conn,
             ManualLeverageAudit {
                 intent_id: "manual_leverage_intent",
                 symbol: "ETH",
@@ -6434,10 +6441,10 @@ mod tests {
     #[test]
     fn manual_leverage_audit_supports_restore_rows() {
         let db = NamedTempFile::new().unwrap();
-        let conn = open_manual_trade_db(db.path()).unwrap();
+        let mut conn = open_manual_trade_db(db.path()).unwrap();
 
         record_manual_leverage_audit(
-            &conn,
+            &mut conn,
             ManualLeverageAudit {
                 intent_id: "manual_restore_intent",
                 symbol: "ETH",
@@ -6449,7 +6456,7 @@ mod tests {
         )
         .unwrap();
         record_manual_leverage_audit(
-            &conn,
+            &mut conn,
             ManualLeverageAudit {
                 intent_id: "manual_restore_intent",
                 symbol: "ETH",
