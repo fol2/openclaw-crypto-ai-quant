@@ -278,6 +278,12 @@ struct ExistingManualCancelRequest {
     response_json: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ExistingManualOrder {
+    status: String,
+    response_json: Option<String>,
+}
+
 pub enum ManualCancelPreflight {
     NewSubmission,
     ExistingPendingRequest,
@@ -397,13 +403,15 @@ pub fn execute_open(
                 recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
             {
                 bind_manual_confirmation_to_intent(&conn, confirm_token, &recovered.intent_id)?;
-                return Ok(existing_manual_execution_payload("open", &recovered));
+                return Ok(existing_manual_execution_payload(
+                    &conn, "open", &recovered,
+                )?);
             }
             early_retry_claim =
                 Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
         } else {
             bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
-            return Ok(existing_manual_execution_payload("open", &existing));
+            return Ok(existing_manual_execution_payload(&conn, "open", &existing)?);
         }
     }
     if early_retry_claim.is_none() {
@@ -483,7 +491,7 @@ pub fn execute_open(
                 resumed_existing,
             } => (intent_id, cloid, resumed_existing),
             ManualExecutionClaim::Existing(existing) => {
-                return Ok(existing_manual_execution_payload("open", &existing));
+                return Ok(existing_manual_execution_payload(&conn, "open", &existing)?);
             }
         }
     };
@@ -922,7 +930,7 @@ pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubEr
     if let Some(confirmation) = load_manual_confirmation_lookup(&conn, lookup_id)? {
         let mut payload = if let Some(intent_id) = confirmation.intent_id.as_deref() {
             if let Some(intent) = load_existing_manual_intent_by_intent_id(&conn, intent_id)? {
-                existing_manual_execution_payload("result", &intent)
+                existing_manual_execution_payload(&conn, "result", &intent)?
             } else {
                 json!({
                     "ok": true,
@@ -999,7 +1007,7 @@ pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubEr
     }
 
     if let Some(intent) = load_existing_manual_intent_by_intent_id(&conn, lookup_id)? {
-        let mut payload = existing_manual_execution_payload("result", &intent);
+        let mut payload = existing_manual_execution_payload(&conn, "result", &intent)?;
         if let Some(object) = payload.as_object_mut() {
             object.insert("lookup".to_string(), Value::String("intent_id".to_string()));
         }
@@ -1119,13 +1127,17 @@ pub fn execute_close(
                 recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
             {
                 bind_manual_confirmation_to_intent(&conn, confirm_token, &recovered.intent_id)?;
-                return Ok(existing_manual_execution_payload("close", &recovered));
+                return Ok(existing_manual_execution_payload(
+                    &conn, "close", &recovered,
+                )?);
             }
             early_retry_claim =
                 Some((existing.intent_id.clone(), existing_intent_cloid(&existing)));
         } else {
             bind_manual_confirmation_to_intent(&conn, confirm_token, &existing.intent_id)?;
-            return Ok(existing_manual_execution_payload("close", &existing));
+            return Ok(existing_manual_execution_payload(
+                &conn, "close", &existing,
+            )?);
         }
     }
     if early_retry_claim.is_none() {
@@ -1208,7 +1220,9 @@ pub fn execute_close(
                 resumed_existing,
             } => (intent_id, cloid, resumed_existing),
             ManualExecutionClaim::Existing(existing) => {
-                return Ok(existing_manual_execution_payload("close", &existing));
+                return Ok(existing_manual_execution_payload(
+                    &conn, "close", &existing,
+                )?);
             }
         }
     };
@@ -3174,9 +3188,36 @@ fn load_manual_cancel_request_by_id(
     }
 }
 
-fn parse_manual_cancel_response(raw: Option<&str>) -> Result<Value, HubError> {
+fn load_latest_manual_order_by_intent_id(
+    conn: &Connection,
+    intent_id: &str,
+) -> Result<Option<ExistingManualOrder>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT status, raw_json
+         FROM oms_orders
+         WHERE intent_id = ?1
+         ORDER BY id DESC
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([intent_id], |row| {
+        Ok(ExistingManualOrder {
+            status: row.get(0)?,
+            response_json: row.get(1)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn parse_optional_manual_response(raw: Option<&str>) -> Result<Value, HubError> {
     match raw.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => serde_json::from_str(raw).map_err(HubError::from),
+        Some(raw) => match serde_json::from_str(raw) {
+            Ok(value) => Ok(value),
+            Err(_) => Ok(Value::String(raw.to_string())),
+        },
         None => Ok(Value::Null),
     }
 }
@@ -3199,7 +3240,7 @@ fn existing_manual_cancel_request_payload(
         "exchange_order_id": existing.exchange_order_id,
         "cloid": existing.client_order_id,
         "last_error": existing.last_error,
-        "response": parse_manual_cancel_response(existing.response_json.as_deref())?,
+        "response": parse_optional_manual_response(existing.response_json.as_deref())?,
     }))
 }
 
@@ -3514,8 +3555,13 @@ fn update_manual_intent_last_error(
     Ok(())
 }
 
-fn existing_manual_execution_payload(kind: &str, existing: &ExistingManualIntent) -> Value {
-    json!({
+fn existing_manual_execution_payload(
+    conn: &Connection,
+    kind: &str,
+    existing: &ExistingManualIntent,
+) -> Result<Value, HubError> {
+    let latest_order = load_latest_manual_order_by_intent_id(conn, &existing.intent_id)?;
+    let mut payload = json!({
         "ok": true,
         "status": if should_resume_existing_manual_submission(existing) {
             "pending"
@@ -3535,7 +3581,17 @@ fn existing_manual_execution_payload(kind: &str, existing: &ExistingManualIntent
         "exchange_order_id": existing.exchange_order_id,
         "last_error": existing.last_error,
         "sent_ts_ms": existing.sent_ts_ms,
-    })
+    });
+    if let Some(object) = payload.as_object_mut() {
+        if let Some(order) = latest_order {
+            object.insert("order_status".to_string(), Value::String(order.status));
+            object.insert(
+                "response".to_string(),
+                parse_optional_manual_response(order.response_json.as_deref())?,
+            );
+        }
+    }
+    Ok(payload)
 }
 
 fn confirmation_lookup_status(confirmation: &ManualConfirmationLookup) -> &'static str {
@@ -7378,6 +7434,30 @@ mod tests {
             ],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO oms_orders (
+                intent_id, created_ts_ms, symbol, side, order_type, requested_size, reduce_only,
+                client_order_id, exchange_order_id, status, raw_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                intent_id,
+                now_ms,
+                "ETH",
+                "SELL",
+                "market_open",
+                0.0515,
+                0,
+                "0x6d616e5f1234567890abcdef12345678",
+                "348262211344",
+                "SENT",
+                json!({
+                    "status":"ok",
+                    "response":{"data":{"statuses":[{"resting":{"oid":348262211344_i64}}]}}
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
         drop(conn);
 
         let by_token = execution_result(&cfg, "confirm-result-bound").unwrap();
@@ -7401,6 +7481,25 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("SENT")
         );
+        assert_eq!(
+            by_token
+                .get("order_status")
+                .and_then(|value| value.as_str()),
+            Some("SENT")
+        );
+        assert_eq!(
+            by_token
+                .get("response")
+                .and_then(|value| value.get("response"))
+                .and_then(|value| value.get("data"))
+                .and_then(|value| value.get("statuses"))
+                .and_then(|value| value.as_array())
+                .and_then(|value| value.first())
+                .and_then(|value| value.get("resting"))
+                .and_then(|value| value.get("oid"))
+                .and_then(parse_json_integer),
+            Some(348262211344)
+        );
 
         let by_intent = execution_result(&cfg, intent_id).unwrap();
         assert_eq!(
@@ -7416,6 +7515,75 @@ mod tests {
                 .get("intent_status")
                 .and_then(|value| value.as_str()),
             Some("SENT")
+        );
+        assert_eq!(
+            by_intent
+                .get("order_status")
+                .and_then(|value| value.as_str()),
+            Some("SENT")
+        );
+    }
+
+    #[test]
+    fn execution_result_preserves_plain_text_order_response() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let intent_id = "manual_result_plain_text";
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: now_ms,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "REJECTED",
+                dedupe_key: None,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oms_orders (
+                intent_id, created_ts_ms, symbol, side, order_type, requested_size, reduce_only,
+                client_order_id, exchange_order_id, status, raw_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                intent_id,
+                now_ms,
+                "ETH",
+                "SELL",
+                "market_open",
+                0.0515,
+                0,
+                "0x6d616e5f1234567890abcdef12345678",
+                Option::<&str>::None,
+                "REJECTED",
+                "plain text exchange error body",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = execution_result(&cfg, intent_id).unwrap();
+        assert_eq!(
+            result.get("order_status").and_then(|value| value.as_str()),
+            Some("REJECTED")
+        );
+        assert_eq!(
+            result.get("response").and_then(|value| value.as_str()),
+            Some("plain text exchange error body")
         );
     }
 
