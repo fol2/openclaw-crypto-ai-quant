@@ -10,6 +10,18 @@ balance:
 
 comparison:
   require_challenger_win: true
+  primary:
+    min_total_pnl_uplift: 50.0
+    min_profit_factor_uplift: 0.0
+    max_drawdown_slack: 0.50
+  fallback:
+    min_total_pnl_uplift: 0.0
+    min_profit_factor_uplift: 0.05
+    max_drawdown_slack: 0.50
+  conservative:
+    min_total_pnl_uplift: 0.0
+    min_profit_factor_uplift: 0.0
+    max_drawdown_slack: 0.25
 
 validation:
   min_trades: 30

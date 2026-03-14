@@ -19,9 +19,10 @@ Progress as of 2026-03-14:
   - PR 5 via PR #998: manifest-driven `live_small` / `live_full` governance
     with persisted live governance state.
 - In progress:
-  - PR 2 via PR #1000: deterministic role-governed selection and challenger
-    materiality thresholds. Implementation and local tests are complete; reviewer
-    flow and merge are still pending.
+  - PR 2 via PR #1000: deterministic role-governed selection, role materiality
+    thresholds, and truthful partial-advancement reporting. Implementation,
+    local tests, and documentation refresh are complete; reviewer flow and
+    merge are still pending.
 - Pending:
   - PR 3.
   - PR 6.

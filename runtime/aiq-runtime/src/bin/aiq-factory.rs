@@ -223,12 +223,48 @@ impl Default for BalanceSettings {
 #[serde(default)]
 struct ComparisonSettings {
     require_challenger_win: bool,
+    primary: RoleMaterialitySettings,
+    fallback: RoleMaterialitySettings,
+    conservative: RoleMaterialitySettings,
 }
 
 impl Default for ComparisonSettings {
     fn default() -> Self {
         Self {
             require_challenger_win: true,
+            primary: RoleMaterialitySettings {
+                min_total_pnl_uplift: 50.0,
+                min_profit_factor_uplift: 0.0,
+                max_drawdown_slack: 0.50,
+            },
+            fallback: RoleMaterialitySettings {
+                min_total_pnl_uplift: 0.0,
+                min_profit_factor_uplift: 0.05,
+                max_drawdown_slack: 0.50,
+            },
+            conservative: RoleMaterialitySettings {
+                min_total_pnl_uplift: 0.0,
+                min_profit_factor_uplift: 0.0,
+                max_drawdown_slack: 0.25,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct RoleMaterialitySettings {
+    min_total_pnl_uplift: f64,
+    min_profit_factor_uplift: f64,
+    max_drawdown_slack: f64,
+}
+
+impl Default for RoleMaterialitySettings {
+    fn default() -> Self {
+        Self {
+            min_total_pnl_uplift: 0.0,
+            min_profit_factor_uplift: 0.0,
+            max_drawdown_slack: 0.0,
         }
     }
 }
@@ -2208,6 +2244,14 @@ fn compare_challenger_to_incumbent(
             "challenger_wins".to_string(),
             "comparison gate disabled; challenger allowed".to_string(),
         ),
+        Some(current)
+            if !meets_role_materiality(target.role.as_str(), comparison, &challenger, current) =>
+        {
+            (
+                "incumbent_holds".to_string(),
+                "challenger uplift does not clear the role materiality thresholds".to_string(),
+            )
+        }
         Some(current) if role_prefers_candidate(target.role.as_str(), &challenger, current) => (
             "challenger_wins".to_string(),
             "challenger outranks current deployed config on the role comparator".to_string(),
@@ -2228,6 +2272,32 @@ fn compare_challenger_to_incumbent(
         incumbent,
         challenger,
     }
+}
+
+fn role_materiality_settings<'a>(
+    role: &str,
+    comparison: &'a ComparisonSettings,
+) -> &'a RoleMaterialitySettings {
+    match role {
+        "fallback" => &comparison.fallback,
+        "conservative" => &comparison.conservative,
+        _ => &comparison.primary,
+    }
+}
+
+fn meets_role_materiality(
+    role: &str,
+    comparison: &ComparisonSettings,
+    challenger: &PerformanceSummary,
+    incumbent: &PerformanceSummary,
+) -> bool {
+    let thresholds = role_materiality_settings(role, comparison);
+    let total_pnl_uplift = challenger.total_pnl - incumbent.total_pnl;
+    let profit_factor_uplift = challenger.profit_factor - incumbent.profit_factor;
+    let drawdown_delta = challenger.max_drawdown_pct - incumbent.max_drawdown_pct;
+    total_pnl_uplift >= thresholds.min_total_pnl_uplift
+        && profit_factor_uplift >= thresholds.min_profit_factor_uplift
+        && drawdown_delta <= thresholds.max_drawdown_slack
 }
 
 fn role_prefers_candidate(
@@ -2485,30 +2555,12 @@ fn select_roles(
     if active_targets.is_empty() {
         return Vec::new();
     }
-    let by_mode = deployable.iter().fold(
-        HashMap::<String, Vec<ValidationItem>>::new(),
-        |mut acc, item| {
-            acc.entry(item.sort_by.clone())
-                .or_default()
-                .push(item.clone());
-            acc
-        },
-    );
     let mut used = BTreeSet::new();
     let mut selected = Vec::new();
     for target in active_targets {
-        let preferred_mode = match target.role.as_str() {
-            "primary" => "efficient",
-            "fallback" => "growth",
-            "conservative" => "conservative",
-            _ => "efficient",
-        };
-        let choice = by_mode
-            .get(preferred_mode)
-            .and_then(|items| first_unused(items, &used))
-            .or_else(|| first_unused(&deployable, &used));
+        let choice = first_unused_for_role(&deployable, &used, target.role.as_str());
         let Some(choice) = choice else {
-            break;
+            continue;
         };
         used.insert(choice.config_id.clone());
         selected.push(SelectionCandidate {
@@ -2523,31 +2575,58 @@ fn select_roles(
     selected
 }
 
-fn first_unused(items: &[ValidationItem], used: &BTreeSet<String>) -> Option<ValidationItem> {
+fn preferred_mode_for_role(role: &str) -> &'static str {
+    match role {
+        "primary" => "efficient",
+        "fallback" => "growth",
+        "conservative" => "conservative",
+        _ => "efficient",
+    }
+}
+
+fn first_unused_for_role(
+    items: &[ValidationItem],
+    used: &BTreeSet<String>,
+    role: &str,
+) -> Option<ValidationItem> {
     let mut sorted = items.to_vec();
-    sorted.sort_by(role_candidate_order);
+    sorted.sort_by(|left, right| role_candidate_order(role, left, right));
     sorted
         .into_iter()
         .find(|item| !used.contains(&item.config_id))
 }
 
-fn role_candidate_order(a: &ValidationItem, b: &ValidationItem) -> Ordering {
-    match a.sort_by.as_str() {
+fn role_candidate_order(role: &str, a: &ValidationItem, b: &ValidationItem) -> Ordering {
+    let preferred_mode = preferred_mode_for_role(role);
+    let preferred_order = b
+        .sort_by
+        .eq(preferred_mode)
+        .cmp(&a.sort_by.eq(preferred_mode));
+    if !preferred_order.is_eq() {
+        return preferred_order;
+    }
+    match role {
         "conservative" => a
             .max_drawdown_pct
             .total_cmp(&b.max_drawdown_pct)
             .then_with(|| b.profit_factor.total_cmp(&a.profit_factor))
-            .then_with(|| b.total_pnl.total_cmp(&a.total_pnl)),
-        "growth" => b
+            .then_with(|| b.total_pnl.total_cmp(&a.total_pnl))
+            .then_with(|| a.rank.cmp(&b.rank))
+            .then_with(|| a.config_id.cmp(&b.config_id)),
+        "fallback" => b
             .profit_factor
             .total_cmp(&a.profit_factor)
             .then_with(|| b.total_pnl.total_cmp(&a.total_pnl))
-            .then_with(|| a.max_drawdown_pct.total_cmp(&b.max_drawdown_pct)),
+            .then_with(|| a.max_drawdown_pct.total_cmp(&b.max_drawdown_pct))
+            .then_with(|| a.rank.cmp(&b.rank))
+            .then_with(|| a.config_id.cmp(&b.config_id)),
         _ => b
             .total_pnl
             .total_cmp(&a.total_pnl)
             .then_with(|| b.profit_factor.total_cmp(&a.profit_factor))
-            .then_with(|| a.max_drawdown_pct.total_cmp(&b.max_drawdown_pct)),
+            .then_with(|| a.max_drawdown_pct.total_cmp(&b.max_drawdown_pct))
+            .then_with(|| a.rank.cmp(&b.rank))
+            .then_with(|| a.config_id.cmp(&b.config_id)),
     }
 }
 
@@ -2559,16 +2638,12 @@ fn build_gate_report(
 ) -> GateReport {
     let active_targets = active_paper_targets(selection);
     let deployable_count = validated.iter().filter(|item| !item.rejected).count();
-    let blocked = deployable_count < active_targets.len();
+    let blocked = selected.is_empty();
     let blocked_reason = if blocked {
         if deployable_count == 0 {
             "no deployable candidates passed factory validation".to_string()
         } else {
-            format!(
-                "only {} deployable candidates for {} paper slots",
-                deployable_count,
-                active_targets.len()
-            )
+            "no paper targets could be selected from the deployable candidates".to_string()
         }
     } else {
         String::new()
@@ -2646,6 +2721,7 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         .or_else(|| best_overall_candidate(validated))
         .ok_or_else(|| anyhow!("missing selected primary candidate"))?;
     let active_targets = active_paper_targets(selection);
+    let partial_selection = selected.len() < active_targets.len();
     let applied_count = deployments
         .iter()
         .filter(|item| item.status == "applied")
@@ -2669,6 +2745,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         "blocked"
     } else if deployment_failed {
         "failed"
+    } else if applied_count > 0 && partial_selection {
+        "paper_partial"
     } else if applied_count > 0 {
         "paper_applied"
     } else if same_config_count == active_targets.len() && !active_targets.is_empty() {
@@ -2704,6 +2782,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         selection_policy: DEFAULT_SELECTION_POLICY,
         selection_stage: if blocked || deployment_failed || promotion_failed {
             "blocked"
+        } else if partial_selection {
+            "selected_partial"
         } else {
             "selected"
         }
@@ -2711,6 +2791,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         selection_warnings,
         step5_gate_status: if blocked || deployment_failed {
             "blocked"
+        } else if partial_selection {
+            "partial"
         } else {
             "passed"
         }
@@ -5441,6 +5523,23 @@ symbols:
     }
 
     #[test]
+    fn selection_uses_deterministic_role_specific_ordering_for_mixed_modes() {
+        let items = vec![
+            validation_item("growth", "cfg-growth-a", 90.0, 1.8, 0.35),
+            validation_item("efficient", "cfg-efficient-a", 120.0, 1.4, 0.30),
+            validation_item("growth", "cfg-growth-b", 80.0, 1.6, 0.20),
+            validation_item("conservative", "cfg-conservative", 40.0, 1.1, 0.05),
+        ];
+
+        let selected = select_roles(&items, &SelectionSettings::default());
+
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].config_id, "cfg-efficient-a");
+        assert_eq!(selected[1].config_id, "cfg-growth-a");
+        assert_eq!(selected[2].config_id, "cfg-conservative");
+    }
+
+    #[test]
     fn selected_roles_limits_active_targets_and_gate_requirements() {
         let mut selection = SelectionSettings::default();
         selection.selected_roles = vec!["primary".to_string()];
@@ -5455,6 +5554,70 @@ symbols:
         let gate = build_gate_report("run", &items, &selected, &selection);
         assert!(!gate.blocked);
         assert_eq!(gate.slot_bindings.len(), 1);
+    }
+
+    #[test]
+    fn gate_allows_partial_advancement_without_secondary_candidates() {
+        let selection = SelectionSettings::default();
+        let items = vec![validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)];
+
+        let selected = select_roles(&items, &selection);
+        let gate = build_gate_report("run", &items, &selected, &selection);
+
+        assert_eq!(selected.len(), 1);
+        assert!(!gate.blocked);
+        assert_eq!(gate.selected_count, 1);
+        assert!(gate
+            .slot_bindings
+            .iter()
+            .any(|binding| binding.role == "fallback" && !binding.selected));
+    }
+
+    #[test]
+    fn selection_report_marks_partial_advancement_truthfully() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let selection = SelectionSettings::default();
+        let validated = vec![validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)];
+        let selected = select_roles(&validated, &selection);
+        let deployments = vec![DeploymentEvent {
+            role: "primary".to_string(),
+            slot: 1,
+            source_config_path: "/tmp/source.yaml".to_string(),
+            config_id: "cfg-primary".to_string(),
+            config_sha256: "sha".to_string(),
+            promoted_config_path: "/tmp/promoted.yaml".to_string(),
+            target_yaml_path: "/tmp/target.yaml".to_string(),
+            service: "svc".to_string(),
+            soak_marker_path: None,
+            restarted_service: false,
+            status: "applied".to_string(),
+        }];
+
+        let report = build_selection_report(SelectionReportInput {
+            run_id: "run",
+            run_dir: &run_dir,
+            effective_config_id: "effective",
+            effective_config_path: Path::new("/tmp/effective.yaml"),
+            validated: &validated,
+            selected: &selected,
+            selection: &selection,
+            base_cfg: &StrategyConfig::default(),
+            blocked: false,
+            blocked_reason: String::new(),
+            challenges: Vec::new(),
+            deployments,
+            paper_promotion_gate: None,
+            live_promotion: None,
+            promotion_requested: false,
+            selection_warnings: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(report.selection_stage, "selected_partial");
+        assert_eq!(report.deploy_stage, "paper_partial");
+        assert_eq!(report.step5_gate_status, "partial");
     }
 
     #[test]
@@ -5530,6 +5693,25 @@ symbols:
             Some(incumbent),
         );
         assert_eq!(report.decision, "incumbent_holds");
+    }
+
+    #[test]
+    fn challenger_compare_enforces_materiality_thresholds() {
+        let target = paper_target_primary();
+        let challenger = performance_summary("challenger", 130.0, 1.3, 0.20);
+        let incumbent = performance_summary("incumbent", 100.0, 1.2, 0.18);
+        let source_config_path = challenger.config_path.clone();
+
+        let report = compare_challenger_to_incumbent(
+            &target,
+            &ComparisonSettings::default(),
+            source_config_path.as_str(),
+            challenger,
+            Some(incumbent),
+        );
+
+        assert_eq!(report.decision, "incumbent_holds");
+        assert!(report.reason.contains("materiality"));
     }
 
     #[test]
