@@ -432,6 +432,7 @@ struct ValidationItem {
     canonical_cpu_verified: bool,
     config_id: String,
     config_path: String,
+    source_config_path: String,
     config_sha256: String,
     final_balance: f64,
     initial_balance: f64,
@@ -1803,6 +1804,7 @@ fn validate_candidate(
         canonical_cpu_verified: true,
         config_id,
         config_path: candidate_effective_config_path.display().to_string(),
+        source_config_path: candidate_config_path.display().to_string(),
         config_sha256,
         final_balance: replay_report.final_balance,
         initial_balance: replay_report.initial_balance,
@@ -2010,7 +2012,7 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
         reports.push(compare_challenger_to_incumbent(
             target,
             comparison,
-            selected_candidate.config_path.as_str(),
+            selected_candidate.source_config_path.as_str(),
             challenger_summary,
             incumbent,
         ));
@@ -3948,6 +3950,7 @@ symbols:
             canonical_cpu_verified: true,
             config_id: config_id.to_string(),
             config_path: format!("/tmp/{config_id}.yaml"),
+            source_config_path: format!("/tmp/{config_id}.raw.yaml"),
             config_sha256: config_id.to_string(),
             final_balance: 10_000.0 + pnl,
             initial_balance: 10_000.0,
