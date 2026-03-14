@@ -69,13 +69,13 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
                     "read auth is not configured",
                 );
             }
-            config.read_token
+            config.read_token.as_str()
         }
         AuthScope::Admin => {
             if config.admin_token.is_empty() {
                 return auth_error(StatusCode::FORBIDDEN, "admin auth is not configured");
             }
-            config.admin_token
+            config.admin_token.as_str()
         }
     };
 
@@ -84,9 +84,20 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let expected_header = format!("Bearer {expected_token}");
-    if constant_time_eq(auth_header.as_bytes(), expected_header.as_bytes()) {
-        return next.run(request).await;
+    match scope {
+        AuthScope::Read => {
+            if matches_bearer_token(auth_header, &expected_token)
+                || (!config.admin_token.is_empty()
+                    && matches_bearer_token(auth_header, &config.admin_token))
+            {
+                return next.run(request).await;
+            }
+        }
+        AuthScope::Admin => {
+            if matches_bearer_token(auth_header, &expected_token) {
+                return next.run(request).await;
+            }
+        }
     }
 
     auth_error(StatusCode::UNAUTHORIZED, "unauthorized")
@@ -95,6 +106,11 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
 fn auth_error(status: StatusCode, message: &str) -> Response {
     let body = json!({ "error": message });
     (status, axum::Json(body)).into_response()
+}
+
+fn matches_bearer_token(auth_header: &str, token: &str) -> bool {
+    let expected_header = format!("Bearer {token}");
+    constant_time_eq(auth_header.as_bytes(), expected_header.as_bytes())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -192,6 +208,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_token_can_pass_the_global_read_gate() {
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/test")
+                .header("authorization", "Bearer admin-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
