@@ -7,6 +7,67 @@ Active.
 Prepared on 2026-03-14 after an independent three-reviewer architecture review
 of the current modular/shared config control plane and runtime contract.
 
+## Execution Progress
+
+Progress recorded on 2026-03-14:
+
+- PR 1 completed and merged as `#997` (`runtime: harden live config contract defaults`).
+  This aligned Hub and runtime live-YAML defaults on
+  `config/strategy_overrides.live.yaml`, preserved `live:` overlays during live
+  runtime materialisation, and made live config resolution fail closed when the
+  real live YAML is missing.
+- PR 2 completed and merged as `#999` (`hub: harden auth and mutation routes`).
+  This made read auth mandatory outside explicit development mode, added a
+  dedicated admin token for mutation routes, replaced permissive CORS with an
+  explicit allow-list contract, and restored a working browser auth path for
+  the built-in Hub UI and WebSocket client.
+- PR 3 completed and merged as `#1001`
+  (`hub: make config writes validation-aware`).
+  This routed config saves through runtime-grade validation, required
+  optimistic-lock proof via `expected_config_id` / `If-Match`, surfaced config
+  identity headers to the editor, and added stale-edit rejection for raw YAML
+  changes including comment-only edits.
+
+Sequence status after those merges:
+
+- PR 1: complete
+- PR 2: complete
+- PR 3: complete
+- PR 5: next active implementation stage
+- PR 6: pending after PR 5
+- PR 4: pending after PR 6
+- PR 7: pending
+- PR 8: pending
+- PR 9: pending
+
+## Current Stage
+
+Current execution stage as of 2026-03-14:
+
+- Work has advanced into PR 5 planning and implementation prep
+  (`Make rollback and apply transactional`).
+- The operator explicitly chose to introduce a new, honest `apply` /
+  `restart` contract rather than reusing the legacy `reload` endpoint wording.
+- No PR 5 branch has been opened for review yet because the transactional apply
+  contract still needs one structural decision recorded here before coding
+  continues.
+
+Current blocker:
+
+- PR 5 requires the Hub apply path to report success only after the target live
+  runtime is healthy on the intended config identity.
+- The repository already has runtime-side `live manifest`, `live status`, and
+  `live service apply` contracts that can prove config identity and daemon
+  health, but the current Hub config route does not yet own that verification
+  boundary.
+- Because of that, PR 5 now depends on one of two approaches:
+  `1.` pull the runtime-side health/config-identity proof into the new Hub
+  apply path as part of PR 5
+  `2.` land the minimum runtime-status/config-identity primitives from PR 6
+  first, then return to PR 5 with those proofs available
+- Until that dependency is resolved, the plan is intentionally paused at the PR
+  5 boundary rather than landing a false-success apply contract.
+
 ## Objective
 
 Close the remaining correctness, security, audit, and operational-governance
