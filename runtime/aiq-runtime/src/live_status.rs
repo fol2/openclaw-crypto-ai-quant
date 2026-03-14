@@ -158,6 +158,12 @@ fn compare_manifest_and_status(
             status.config_path, manifest.config_path
         ));
     }
+    if status.config_id != manifest.config_id {
+        mismatches.push(format!(
+            "config_id mismatch (status={} current={})",
+            status.config_id, manifest.config_id
+        ));
+    }
     if status.runtime_bootstrap.config_fingerprint != manifest.runtime_bootstrap.config_fingerprint
     {
         mismatches.push(format!(
@@ -300,5 +306,116 @@ mod tests {
         assert_eq!(report.service_state, LiveServiceState::Ready);
         assert!(!report.status_file_present);
         assert!(report.manifest.safety_gate_ready);
+    }
+
+    #[test]
+    fn status_reports_restart_required_for_config_id_mismatch() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let config_path = dir
+            .path()
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        write_config(&config_path, "30m");
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_STRATEGY_YAML", None),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_MARKET_DB_PATH", None),
+            ("AI_QUANT_CANDLES_DB_DIR", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            ("AI_QUANT_EVENT_LOG_DIR", None),
+            ("AI_QUANT_INSTANCE_TAG", None),
+            ("AI_QUANT_LIVE_SERVICE_NAME", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
+            ("AI_QUANT_SECRETS_PATH", None),
+            ("AI_QUANT_LIVE_ENABLE", Some("1")),
+            (
+                "AI_QUANT_LIVE_CONFIRM",
+                Some("I_UNDERSTAND_THIS_CAN_LOSE_MONEY"),
+            ),
+        ]);
+
+        let manifest =
+            crate::live_manifest::build_manifest(crate::live_manifest::LiveManifestInput {
+                config: None,
+                project_dir: Some(dir.path()),
+                profile: None,
+                db: None,
+                market_db: None,
+                candles_db: None,
+                symbols: &[],
+                symbols_file: None,
+                btc_symbol: "BTC",
+                secrets_path: None,
+                lock_path: None,
+                status_path: None,
+                lookback_bars: Some(200),
+            })
+            .unwrap();
+        let status = crate::live_daemon::LiveDaemonStatusSnapshot {
+            ok: true,
+            running: true,
+            pid: 1234,
+            config_path: manifest.config_path.clone(),
+            config_id: "stale-config-id".to_string(),
+            live_db: manifest.live_db.clone(),
+            candles_db: manifest.candles_db.clone(),
+            lock_path: manifest.lock_path.clone(),
+            status_path: manifest.status_path.clone(),
+            started_at_ms: 1_773_424_200_000,
+            updated_at_ms: chrono::Utc::now().timestamp_millis(),
+            stopped_at_ms: None,
+            stop_requested: false,
+            runtime_bootstrap: crate::live_daemon::LiveDaemonStatusRuntimeBootstrap {
+                config_fingerprint: manifest.runtime_bootstrap.config_fingerprint.clone(),
+                pipeline: crate::live_daemon::LiveDaemonStatusRuntimePipeline {
+                    profile: manifest.runtime_bootstrap.pipeline.profile.clone(),
+                },
+            },
+            btc_symbol: manifest.btc_symbol.clone(),
+            lookback_bars: manifest.lookback_bars,
+            explicit_symbols: manifest.explicit_symbols.clone(),
+            symbols_file: manifest.symbols_file.clone(),
+            latest_common_close_ts_ms: None,
+            last_step_close_ts_ms: None,
+            last_fill_cursor_ms: 0,
+            last_plans_count: 0,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        fs::write(
+            &manifest.status_path,
+            serde_json::to_vec_pretty(&status).unwrap(),
+        )
+        .unwrap();
+
+        let report = build_status(LiveStatusInput {
+            config: None,
+            project_dir: Some(dir.path()),
+            profile: None,
+            db: None,
+            market_db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            btc_symbol: "BTC",
+            secrets_path: None,
+            lock_path: None,
+            status_path: None,
+            lookback_bars: Some(200),
+            stale_after_ms: Some(30_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, LiveServiceState::RestartRequired);
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("config_id mismatch")));
     }
 }

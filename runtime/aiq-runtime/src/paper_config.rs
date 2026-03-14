@@ -27,6 +27,14 @@ struct EffectiveConfigDefaults {
     default_strategy_mode: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct RuntimeContractMetadata {
+    base_config_path: Option<PathBuf>,
+    promoted_role: Option<String>,
+    promoted_config_path: Option<PathBuf>,
+    strategy_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaperEffectiveConfig {
     base_config_path: PathBuf,
@@ -76,6 +84,9 @@ impl PaperEffectiveConfig {
             .as_ref()
             .map(|defaults| defaults.project_dir.clone())
             .unwrap_or_else(project_root);
+        if looks_like_runtime_contract(&base_config_path)? {
+            return Self::resolve_runtime_contract(base_config_path, &resolved_project_root);
+        }
         Self::resolve_internal(
             base_config_path,
             defaults.as_ref(),
@@ -87,6 +98,9 @@ impl PaperEffectiveConfig {
     pub fn resolve_live(config: Option<&Path>, project_dir: Option<&Path>) -> Result<Self> {
         let defaults = EffectiveConfigDefaults::from(crate::live_lane::defaults(project_dir)?);
         let base_config_path = resolve_live_config_path(config, &defaults);
+        if looks_like_runtime_contract(&base_config_path)? {
+            return Self::resolve_runtime_contract(base_config_path, &defaults.project_dir);
+        }
         if !base_config_path.exists() {
             anyhow::bail!("live config does not exist: {}", base_config_path.display());
         }
@@ -204,11 +218,13 @@ impl PaperEffectiveConfig {
         let runtime_document =
             config::materialise_runtime_document(&effective_document, materialise_live, None)
                 .map_err(anyhow::Error::msg)?;
+        let config_id = yaml_document_sha256(&runtime_document);
         let runtime_yaml_path = runtime_output_path(
             materialised_output_root.as_path(),
             &base_config_path,
             promoted_role.as_deref(),
             strategy_mode.as_deref(),
+            &config_id,
         );
         write_yaml_document(
             &runtime_yaml_path,
@@ -217,10 +233,10 @@ impl PaperEffectiveConfig {
                 promoted_role.as_deref(),
                 promoted_config_path.as_deref(),
                 strategy_mode.as_deref(),
+                &config_id,
             ),
             &runtime_document,
         )?;
-        let config_id = yaml_document_sha256(&runtime_document);
 
         Ok(Self {
             base_config_path,
@@ -234,6 +250,64 @@ impl PaperEffectiveConfig {
             promoted_config_path,
             strategy_mode,
             strategy_mode_source,
+            strategy_overrides_sha1: config_id.clone(),
+            config_id,
+            warnings,
+        })
+    }
+
+    fn resolve_runtime_contract(runtime_yaml_path: PathBuf, project_root: &Path) -> Result<Self> {
+        let metadata = parse_runtime_contract_metadata(&runtime_yaml_path)?;
+        let runtime_document = config::load_yaml_document_checked(
+            runtime_yaml_path
+                .to_str()
+                .context("runtime config path must be valid UTF-8")?,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let config_id = yaml_document_sha256(&runtime_document);
+        let base_config_path = metadata
+            .base_config_path
+            .unwrap_or_else(|| runtime_yaml_path.clone());
+        let materialised_output_root = materialised_output_root(project_root, &base_config_path);
+        let active_yaml_path = if metadata.promoted_config_path.is_some() {
+            promoted_output_path(
+                materialised_output_root.as_path(),
+                metadata.promoted_role.as_deref(),
+            )
+        } else {
+            base_config_path.clone()
+        };
+        let effective_yaml_path = if metadata.strategy_mode.is_some() {
+            effective_output_path(
+                materialised_output_root.as_path(),
+                &base_config_path,
+                metadata.promoted_role.as_deref(),
+                metadata.strategy_mode.as_deref(),
+            )
+        } else {
+            active_yaml_path.clone()
+        };
+        let mut warnings = Vec::new();
+        warnings.push(format!(
+            "launch contract is pinned to immutable runtime config {}",
+            runtime_yaml_path.display()
+        ));
+
+        Ok(Self {
+            base_config_path,
+            active_yaml_path,
+            effective_yaml_path,
+            runtime_yaml_path,
+            active_document: runtime_document.clone(),
+            effective_document: runtime_document.clone(),
+            runtime_document,
+            promoted_role: metadata.promoted_role,
+            promoted_config_path: metadata.promoted_config_path,
+            strategy_mode: metadata.strategy_mode.clone(),
+            strategy_mode_source: metadata
+                .strategy_mode
+                .as_ref()
+                .map(|_| "runtime_contract".to_string()),
             strategy_overrides_sha1: config_id.clone(),
             config_id,
             warnings,
@@ -557,6 +631,7 @@ fn runtime_output_path(
     base_config_path: &Path,
     promoted_role: Option<&str>,
     strategy_mode: Option<&str>,
+    config_id: &str,
 ) -> PathBuf {
     let stem = base_config_path
         .file_stem()
@@ -567,7 +642,9 @@ fn runtime_output_path(
     output_root
         .join("artifacts")
         .join("_runtime_configs")
-        .join(format!("{stem}.{role_part}.{mode_part}.runtime.yaml"))
+        .join(format!(
+            "{stem}.{role_part}.{mode_part}.{config_id}.runtime.yaml"
+        ))
 }
 
 fn active_document_header(role: &str, promoted_config_path: Option<&Path>) -> String {
@@ -601,16 +678,74 @@ fn runtime_document_header(
     promoted_role: Option<&str>,
     promoted_config_path: Option<&Path>,
     strategy_mode: Option<&str>,
+    config_id: &str,
 ) -> String {
     format!(
-        "# AUTO-GENERATED by Rust paper effective-config resolver\n# Contract: runtime-facing materialised config\n# Base: {}\n# Role: {}\n# Source: {}\n# Strategy mode: {}\n# Do not edit — this file is overwritten by the resolver.\n",
+        "# AUTO-GENERATED by Rust paper effective-config resolver\n# Contract: runtime-facing materialised config\n# Base: {}\n# Role: {}\n# Source: {}\n# Strategy mode: {}\n# Config ID: {}\n# Do not edit — this file is overwritten by the resolver.\n",
         base_config_path.display(),
         promoted_role.unwrap_or("none"),
         promoted_config_path
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "n/a".to_string()),
         strategy_mode.unwrap_or("none"),
+        config_id,
     )
+}
+
+fn looks_like_runtime_contract(path: &Path) -> Result<bool> {
+    if path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.ends_with(".runtime.yaml"))
+    {
+        return Ok(true);
+    }
+    if !path.exists() {
+        return Ok(false);
+    }
+    let payload = fs::read_to_string(path)
+        .with_context(|| format!("failed to read potential runtime config {}", path.display()))?;
+    Ok(payload
+        .lines()
+        .take(8)
+        .any(|line| line.trim() == "# Contract: runtime-facing materialised config"))
+}
+
+fn parse_runtime_contract_metadata(path: &Path) -> Result<RuntimeContractMetadata> {
+    let payload = fs::read_to_string(path)
+        .with_context(|| format!("failed to read runtime config header {}", path.display()))?;
+    let mut metadata = RuntimeContractMetadata::default();
+    for line in payload.lines().take_while(|line| line.starts_with('#')) {
+        let line = line.trim_start_matches('#').trim();
+        if let Some(value) = line.strip_prefix("Base: ") {
+            metadata.base_config_path = parse_header_path_value(value);
+        } else if let Some(value) = line.strip_prefix("Role: ") {
+            metadata.promoted_role = normalise_header_token(value);
+        } else if let Some(value) = line.strip_prefix("Source: ") {
+            metadata.promoted_config_path = parse_header_path_value(value);
+        } else if let Some(value) = line.strip_prefix("Strategy mode: ") {
+            metadata.strategy_mode = normalise_header_token(value);
+        }
+    }
+    Ok(metadata)
+}
+
+fn parse_header_path_value(value: &str) -> Option<PathBuf> {
+    let token = value.trim();
+    if token.is_empty() || token == "n/a" {
+        None
+    } else {
+        Some(PathBuf::from(token))
+    }
+}
+
+fn normalise_header_token(value: &str) -> Option<String> {
+    let token = value.trim();
+    if token.is_empty() || token == "none" || token == "unknown" {
+        None
+    } else {
+        Some(token.to_string())
+    }
 }
 
 fn write_yaml_document(path: &Path, header: String, document: &serde_yaml::Value) -> Result<()> {
@@ -958,10 +1093,18 @@ modes:
             effective.effective_yaml_path(),
             output_root.join("artifacts/_effective_configs/strategy.primary.fallback.yaml")
         );
-        assert_eq!(
-            effective.config_path(),
-            output_root.join("artifacts/_runtime_configs/strategy.primary.fallback.runtime.yaml")
-        );
+        assert!(effective
+            .config_path()
+            .starts_with(output_root.join("artifacts/_runtime_configs")));
+        assert!(effective
+            .config_path()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                value.starts_with("strategy.primary.fallback.")
+                    && value.ends_with(".runtime.yaml")
+                    && value.contains(effective.config_id())
+            }));
     }
 
     #[test]
@@ -1030,6 +1173,27 @@ modes:
 
         assert_eq!(first.config_path(), second.config_path());
         assert_eq!(first_modified, second_modified);
+    }
+
+    #[test]
+    fn resolve_accepts_immutable_runtime_contract_path_without_rematerialising() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        fs::write(&config_path, "global:\n  engine:\n    interval: 30m\n").unwrap();
+
+        let resolved = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
+        let runtime_path = resolved.config_path().to_path_buf();
+
+        let pinned = PaperEffectiveConfig::resolve(Some(&runtime_path), None, None).unwrap();
+
+        assert_eq!(pinned.base_config_path(), resolved.base_config_path());
+        assert_eq!(pinned.config_path(), runtime_path.as_path());
+        assert_eq!(pinned.config_id(), resolved.config_id());
+        assert!(pinned
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("immutable runtime config")));
     }
 
     #[test]

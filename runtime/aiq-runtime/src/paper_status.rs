@@ -175,6 +175,12 @@ fn compare_manifest_and_status(
             status.config_path, manifest.config_path
         ));
     }
+    if status.config_id != manifest.config_id {
+        mismatches.push(format!(
+            "config_id mismatch (status={} current={})",
+            status.config_id, manifest.config_id
+        ));
+    }
     if status.runtime_bootstrap.config_fingerprint != manifest.runtime_bootstrap.config_fingerprint
     {
         mismatches.push(format!(
@@ -499,6 +505,7 @@ mod tests {
             running,
             pid: 1234,
             config_path: manifest.config_path.clone(),
+            config_id: manifest.config_id.clone(),
             paper_db: manifest.paper_db.clone(),
             candles_db: manifest.candles_db.clone(),
             lock_path: manifest.lock_path.clone(),

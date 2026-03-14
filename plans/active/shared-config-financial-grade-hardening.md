@@ -27,26 +27,33 @@ Progress recorded on 2026-03-14:
   optimistic-lock proof via `expected_config_id` / `If-Match`, surfaced config
   identity headers to the editor, and added stale-edit rejection for raw YAML
   changes including comment-only edits.
-- PR 5 implementation completed on 2026-03-14
+- PR 5 completed and merged as `#1010`
   (`hub: make live apply and rollback transactional`).
   This added a dedicated `POST /api/config/actions/apply-live` contract,
   routed both live apply and live rollback through runtime-supervised
   `aiq-runtime live service apply --json` verification, snapshotting the
   incumbent YAML before mutation, restoring it automatically when apply proof
   failed, and recording before/after `config_id` identities in the emitted live
-  apply / rollback artefacts. At the time of this documentation pass the PR is
-  implementation-complete on branch
-  `codex/shared-config-pr5-transactional-apply-v2` and is awaiting the
-  required review / merge flow.
+  apply / rollback artefacts.
+- PR 6 implementation completed on 2026-03-14
+  (`runtime: bind launch contracts to immutable config artefacts`).
+  This switched paper/live manifests to launch daemons from materialised
+  `config_path` artefacts, propagated `--expected-config-id` through paper/live
+  daemon and service-apply surfaces, persisted daemon `config_id` in paper/live
+  status files, made status checks fail closed on `config_id` drift, and
+  tightened Hub live apply to pass the approved `config_id` into the runtime
+  apply subprocess. At the time of this documentation pass the PR is
+  implementation-complete on branch `codex/shared-config-pr6-immutable-launch`
+  and is awaiting the required review / merge flow.
 
-Sequence status after those merges and the current PR 5 implementation pass:
+Sequence status after merged PR 5 and the current PR 6 implementation pass:
 
 - PR 1: complete
 - PR 2: complete
 - PR 3: complete
-- PR 5: implementation complete; review / merge pending
-- PR 6: next planned implementation stage after PR 5 merges
-- PR 4: pending after PR 6
+- PR 5: complete
+- PR 6: implementation complete; review / merge pending
+- PR 4: next planned implementation stage after PR 6 merges
 - PR 7: pending
 - PR 8: pending
 - PR 9: pending
@@ -55,23 +62,20 @@ Sequence status after those merges and the current PR 5 implementation pass:
 
 Current execution stage as of 2026-03-14:
 
-- PR 5 implementation is complete and the documentation pass is now describing
-  the post-change contract rather than an implementation blocker.
-- The Hub now owns the live apply proof boundary by invoking
-  `aiq-runtime live service apply --json` and refusing success unless the final
-  runtime proof is healthy, running, contract-matched, and on the intended
-  `config_id`.
-- Live rollback now shares that same transactional boundary: it snapshots the
-  incumbent live YAML before mutation, stages the restored payload, and
-  automatically restores the incumbent YAML plus a supervised recovery apply if
-  the rollback proof fails.
-- PR 6 (`Launch daemons from immutable config artefacts`) is the next active
-  implementation stage once PR 5 finishes review and merge.
+- PR 5 is merged and closed.
+- PR 6 implementation is complete and the documentation pass is now describing
+  the post-change immutable launch contract rather than a design gap.
+- Paper/live manifests now launch daemons from materialised `config_path`
+  artefacts, paper/live daemon and service-apply surfaces now accept
+  `--expected-config-id`, daemon status files persist `config_id`, and
+  paper/live status checks now fail closed on `config_id` drift.
+- PR 4 (`Replace false reload semantics with an honest apply model`) is the
+  next active implementation stage once PR 6 finishes review and merge.
 
 Current blocker:
 
 - None at the documentation-pass stage. The next action is reviewer coverage
-  for PR 5, followed by merge and cleanup before opening PR 6.
+  for PR 6, followed by merge and cleanup before opening PR 4.
 
 ## Objective
 
@@ -100,9 +104,7 @@ main reasons are:
 1. some control-plane defaults are too permissive for a trading system
 2. live config correctness is not fully preserved across Hub and runtime paths
 3. config mutation is not yet transactional or config-identity-aware
-4. daemon launch still depends on mutable base YAML instead of immutable config
-   artefacts
-5. audit, attribution, and operator messaging do not yet track deployed
+4. audit, attribution, and operator messaging do not yet track deployed
    `config_id` as the primary source of truth
 
 ## Confirmed Gaps
@@ -167,21 +169,19 @@ Required outcome:
 - writes use unique temp files, durable replacement, and optimistic locking
 - restart failure restores the prior config automatically
 
-### 4. Runtime launch still depends on mutable base YAML
+### 4. Runtime launch immutability is now implemented
 
-The manifests already compute materialised config artefacts and stable
-`config_id` values, but daemon launch commands still pass mutable
-`base_config_path` values instead of immutable runtime config artefacts.
+This gap is closed in the current PR 6 implementation branch.
 
-That creates a time-of-check vs time-of-use drift window between preview,
-approval, and actual daemon start.
+The runtime launch contract now:
 
-Required outcome:
-
-- daemons launch from immutable materialised config artefacts
-- apply/launch surfaces require an expected `config_id`
-- runtime status must prove that the launched daemon is using the approved
-  config identity
+- launches paper/live daemons from materialised `config_path` artefacts rather
+  than mutable `base_config_path`
+- propagates `--expected-config-id` through daemon launch and service-apply
+  surfaces
+- persists daemon `config_id` in paper/live status files
+- fails closed when paper/live status detects `config_id` drift from the
+  current launch contract
 
 ### 5. Reload semantics are misleading to operators
 

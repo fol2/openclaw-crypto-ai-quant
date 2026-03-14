@@ -14,6 +14,23 @@ cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 ```
 
+### Immutable Launch Contract
+
+The current Rust paper/live launch contract already starts daemons from the
+materialised runtime artefact path exposed as `config_path`, not from the
+mutable source YAML exposed as `base_config_path`.
+
+`paper manifest` and `live manifest` daemon commands now include both:
+
+- `--config <materialised runtime artefact>`
+- `--expected-config-id <approved config_id>`
+
+The daemon status contracts also persist `config_id`, and paper/live status
+surfaces fail closed when the running daemon drifts from the current launch
+contract identity. `paper service apply` and `live service apply` also verify
+the approved `config_id` before supervision and again against the final
+resolved launch contract.
+
 ### Transactional Live Apply and Rollback
 
 The Hub live control-plane now treats live apply and live rollback as
@@ -25,6 +42,10 @@ live YAML before mutation, and reports success only after
 - healthy
 - matched to the current launch contract
 - on the intended materialised `config_id`
+
+The Hub passes the approved candidate `config_id` into that runtime apply
+subprocess through `--expected-config-id`, so the supervised apply fails closed
+if the live contract re-resolves to a different identity.
 
 If the supervised apply proof fails, the Hub restores the incumbent live YAML
 and runs a supervised recovery apply against that incumbent contract before

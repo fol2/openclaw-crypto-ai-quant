@@ -741,6 +741,7 @@ fn restart_required_from_proof(proof: &LiveServiceApplyProof) -> bool {
 async fn run_live_service_apply_command(
     state: &AppState,
     config_path: &Path,
+    expected_config_id: &str,
     runtime_action: &str,
 ) -> Value {
     run_action_command(
@@ -753,6 +754,8 @@ async fn run_live_service_apply_command(
             config_path.display().to_string(),
             "--project-dir".to_string(),
             state.config.aiq_root.display().to_string(),
+            "--expected-config-id".to_string(),
+            expected_config_id.to_string(),
             "--action".to_string(),
             runtime_action.to_string(),
             "--json".to_string(),
@@ -821,6 +824,7 @@ async fn execute_live_config_transaction(
         runtime_result = run_live_service_apply_command(
             state,
             &state.config.live_yaml_path,
+            &input.candidate.config_id,
             input.runtime_action,
         )
         .await;
@@ -841,6 +845,7 @@ async fn execute_live_config_transaction(
                         let raw = run_live_service_apply_command(
                             state,
                             &state.config.live_yaml_path,
+                            input.current_config_id,
                             "auto",
                         )
                         .await;

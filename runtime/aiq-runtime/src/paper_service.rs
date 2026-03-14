@@ -30,6 +30,7 @@ pub struct PaperServiceInput<'a> {
 #[derive(Clone, Copy)]
 pub struct PaperServiceApplyInput<'a> {
     pub service: PaperServiceInput<'a>,
+    pub expected_config_id: Option<&'a str>,
     pub requested_action: PaperServiceApplyRequestedAction,
     pub start_wait_ms: u64,
     pub stop_wait_ms: u64,
@@ -133,6 +134,7 @@ pub fn build_service(input: PaperServiceInput<'_>) -> Result<PaperServiceReport>
 
 pub fn apply_service(input: PaperServiceApplyInput<'_>) -> Result<PaperServiceApplyReport> {
     let preview = build_service(input.service)?;
+    verify_expected_config_id(input.expected_config_id, &preview.status.manifest.config_id)?;
     let lock_path = PathBuf::from(&preview.lock_path);
     let status_path = PathBuf::from(&preview.status_path);
     let lock_owner_pid = paper_daemon::probe_lock_owner(&lock_path)?;
@@ -186,6 +188,10 @@ pub fn apply_service(input: PaperServiceApplyInput<'_>) -> Result<PaperServiceAp
     }
 
     let final_service = build_service(input.service)?;
+    verify_expected_config_id(
+        input.expected_config_id,
+        &final_service.status.manifest.config_id,
+    )?;
 
     Ok(PaperServiceApplyReport {
         ok: final_service.ok,
@@ -198,6 +204,25 @@ pub fn apply_service(input: PaperServiceApplyInput<'_>) -> Result<PaperServiceAp
         preview,
         final_service,
     })
+}
+
+fn verify_expected_config_id(
+    expected_config_id: Option<&str>,
+    actual_config_id: &str,
+) -> Result<()> {
+    if let Some(expected_config_id) = expected_config_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if expected_config_id != actual_config_id {
+            anyhow::bail!(
+                "paper service apply refused to continue because expected config_id {} did not match resolved {}",
+                expected_config_id,
+                actual_config_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn derive_action(status: &PaperStatusReport) -> (PaperSupervisorAction, String) {
@@ -823,6 +848,7 @@ mod tests {
             running: true,
             pid,
             config_path: status.manifest.config_path.clone(),
+            config_id: status.manifest.config_id.clone(),
             paper_db: status.manifest.paper_db.clone(),
             candles_db: status.manifest.candles_db.clone(),
             lock_path: status.manifest.lock_path.clone(),
@@ -1022,5 +1048,13 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("lock owner pid mismatch"));
+    }
+
+    #[test]
+    fn expected_config_id_guard_rejects_mismatch() {
+        let err = verify_expected_config_id(Some("cfg-wrong"), "cfg-actual").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("expected config_id cfg-wrong did not match resolved"));
     }
 }

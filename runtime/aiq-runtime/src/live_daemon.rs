@@ -71,6 +71,7 @@ pub struct LiveDaemonStatus {
     pub running: bool,
     pub pid: u32,
     pub config_path: String,
+    pub config_id: String,
     pub live_db: String,
     pub candles_db: String,
     pub lock_path: String,
@@ -99,6 +100,8 @@ pub(crate) struct LiveDaemonStatusSnapshot {
     pub pid: u32,
     #[serde(default)]
     pub config_path: String,
+    #[serde(default)]
+    pub config_id: String,
     #[serde(default)]
     pub live_db: String,
     #[serde(default)]
@@ -1230,6 +1233,7 @@ fn build_status(
         running: !context.stopped,
         pid: std::process::id(),
         config_path: input.effective_config.config_path().display().to_string(),
+        config_id: input.effective_config.config_id().to_string(),
         live_db: input.live_db.display().to_string(),
         candles_db: input.candles_db.display().to_string(),
         lock_path: lock_path.display().to_string(),
@@ -1363,6 +1367,7 @@ mod tests {
             running: false,
             pid: 42,
             config_path: "config.yaml".to_string(),
+            config_id: "cfg-live".to_string(),
             live_db: live_db.display().to_string(),
             candles_db: "candles.db".to_string(),
             lock_path: "lock".to_string(),
@@ -1426,6 +1431,7 @@ mod tests {
             running: false,
             pid: 42,
             config_path: "config.yaml".to_string(),
+            config_id: "cfg-live".to_string(),
             live_db: dir.path().join("other.db").display().to_string(),
             candles_db: "candles.db".to_string(),
             lock_path: "lock".to_string(),
