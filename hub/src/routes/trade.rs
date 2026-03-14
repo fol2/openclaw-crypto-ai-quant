@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::HubError;
+use crate::live_risk::{CancelCheck, OrderAction, OrderCheck, OrderRecord};
+use crate::live_safety;
 use crate::manual_trade;
 use crate::state::AppState;
 
@@ -79,6 +81,100 @@ async fn check_rate_limit(
     Ok(())
 }
 
+fn manual_risk_block_error(reason: &str) -> HubError {
+    match reason {
+        "close_only" | "halt_all" => HubError::Forbidden(format!("manual trade blocked: {reason}")),
+        _ => HubError::BadRequest(format!("manual trade blocked: {reason}")),
+    }
+}
+
+async fn record_guardrail_block(state: &AppState, symbol: &str, action: &str, reason: &str) {
+    let config = state.config.clone();
+    let symbol = symbol.to_string();
+    let action = action.to_string();
+    let reason = reason.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        manual_trade::record_manual_guardrail_block(&config, &symbol, &action, &reason)
+    })
+    .await;
+}
+
+async fn ensure_live_orders_enabled(
+    state: &AppState,
+    symbol: &str,
+    action: &str,
+) -> Result<(), HubError> {
+    if live_safety::live_orders_enabled() {
+        return Ok(());
+    }
+    record_guardrail_block(state, symbol, action, "live_orders_disabled").await;
+    Err(HubError::Forbidden(
+        "manual trade blocked: live orders are disabled".into(),
+    ))
+}
+
+async fn check_manual_order_risk(
+    state: &AppState,
+    symbol: &str,
+    action: OrderAction,
+    reduce_risk: bool,
+    audit_action: &str,
+) -> Result<(), HubError> {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let decision = {
+        let mut risk = state.manual_trade_risk.lock().await;
+        risk.refresh(now_ms, None);
+        risk.allow_order(OrderCheck {
+            now_ms,
+            symbol: &symbol_upper,
+            action,
+            reduce_risk,
+        })
+    };
+    if decision.allowed {
+        return Ok(());
+    }
+    record_guardrail_block(state, &symbol_upper, audit_action, &decision.reason).await;
+    Err(manual_risk_block_error(&decision.reason))
+}
+
+async fn note_manual_order_sent(
+    state: &AppState,
+    symbol: &str,
+    action: OrderAction,
+    reduce_risk: bool,
+) {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut risk = state.manual_trade_risk.lock().await;
+    risk.note_order_sent(OrderRecord {
+        now_ms,
+        symbol: &symbol_upper,
+        action,
+        reduce_risk,
+    });
+}
+
+async fn check_manual_cancel_risk(state: &AppState, symbol: &str) -> Result<(), HubError> {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let decision = {
+        let mut risk = state.manual_trade_risk.lock().await;
+        risk.refresh(now_ms, None);
+        risk.allow_cancel(CancelCheck {
+            now_ms,
+            symbol: &symbol_upper,
+            exchange_order_id: None,
+        })
+    };
+    if decision.allowed {
+        return Ok(());
+    }
+    record_guardrail_block(state, &symbol_upper, "CANCEL", &decision.reason).await;
+    Err(manual_risk_block_error(&decision.reason))
+}
+
 async fn trade_enabled(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "enabled": state.config.manual_trade_enabled,
@@ -122,6 +218,9 @@ async fn trade_execute(
     Json(body): Json<TradeOpenBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
+    ensure_live_orders_enabled(&state, &body.symbol, "OPEN").await?;
+    check_manual_order_risk(&state, &body.symbol, OrderAction::Open, false, "OPEN").await?;
+    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
         side: body.side,
@@ -143,6 +242,9 @@ async fn trade_execute(
     })
     .await
     .map_err(|error| HubError::Internal(format!("execute task failed: {error}")))??;
+    if result.get("deduped").and_then(|value| value.as_bool()) != Some(true) {
+        note_manual_order_sent(&state, &symbol, OrderAction::Open, false).await;
+    }
     Ok(Json(result))
 }
 
@@ -182,6 +284,9 @@ async fn trade_close(
         return Ok(Json(payload));
     }
 
+    ensure_live_orders_enabled(&state, &body.symbol, "CLOSE").await?;
+    check_manual_order_risk(&state, &body.symbol, OrderAction::Close, true, "CLOSE").await?;
+    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeCloseRequest {
         symbol: body.symbol,
         close_pct: body.close_pct,
@@ -200,6 +305,9 @@ async fn trade_close(
     })
     .await
     .map_err(|error| HubError::Internal(format!("close task failed: {error}")))??;
+    if result.get("deduped").and_then(|value| value.as_bool()) != Some(true) {
+        note_manual_order_sent(&state, &symbol, OrderAction::Close, true).await;
+    }
     Ok(Json(result))
 }
 
@@ -208,6 +316,8 @@ async fn trade_cancel(
     Json(body): Json<TradeCancelBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
+    ensure_live_orders_enabled(&state, &body.symbol, "CANCEL").await?;
+    check_manual_cancel_risk(&state, &body.symbol).await?;
     let config = state.config.clone();
     let request = manual_trade::ManualTradeCancelRequest {
         symbol: body.symbol,
