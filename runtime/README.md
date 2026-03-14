@@ -34,8 +34,17 @@ hourly automation should treat a failed run as an operator review signal rather
 than a silent partial success.
 
 It also refreshes DB-backed exchange account and position snapshots so the Hub
-can fall back to current live balance and holdings when an in-memory
-Hyperliquid cache is unavailable or stale.
+can expose exchange-observed equity and holdings when an in-memory
+Hyperliquid cache is unavailable.
+
+Hub live read paths now split exchange-observed equity from realised cash:
+
+- exchange observations surface `source`, `as_of`, `age_ms`, `freshness`, and
+  `reconciliation_status`
+- stale snapshots are last-known-good evidence only and must not present
+  themselves as current truth
+- realised cash remains a separate legacy trade-ledger field and is not yet an
+  audit-grade exchange cash figure
 
 ## Ownership
 

@@ -2,7 +2,15 @@
 
 ## Status
 
-Backlog.
+Active.
+
+Activated on 2026-03-14.
+
+Current execution status:
+
+- PR 1 implementation and documentation updates are complete; reviewer
+  subagent pending.
+- Remaining PRs are pending.
 
 Prepared on 2026-03-14 after a production incident review and three
 independent expert critiques covering trading operations, accounting truth, and
