@@ -361,10 +361,15 @@ async fn trade_open_orders(
     Ok(Json(result))
 }
 
-async fn trade_result(Path(id): Path<String>) -> Result<Json<Value>, HubError> {
-    Err(HubError::NotFound(format!(
-        "job {id} not found (rust-native manual trade executes synchronously)"
-    )))
+async fn trade_result(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HubError> {
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || manual_trade::execution_result(&config, &id))
+        .await
+        .map_err(|error| HubError::Internal(format!("trade-result task failed: {error}")))??;
+    Ok(Json(result))
 }
 
 #[cfg(test)]

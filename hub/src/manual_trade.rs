@@ -222,6 +222,18 @@ struct ExistingManualIntent {
     meta_json: Option<String>,
 }
 
+struct ManualConfirmationLookup {
+    confirm_token: String,
+    action: String,
+    symbol: Option<String>,
+    status: String,
+    intent_id: Option<String>,
+    last_error: Option<String>,
+    expires_ts_ms: i64,
+    consumed_ts_ms: Option<i64>,
+    preview: Option<Value>,
+}
+
 enum ManualExecutionClaim {
     Submit {
         intent_id: String,
@@ -741,6 +753,109 @@ pub fn preview_close(
         "current_size": prepared.current_size,
         "limit_price": prepared.limit_price,
     }))
+}
+
+pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubError> {
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    let lookup_id = lookup_id.trim();
+    if lookup_id.is_empty() {
+        return Err(HubError::BadRequest("trade lookup id is required".into()));
+    }
+
+    if let Some(confirmation) = load_manual_confirmation_lookup(&conn, lookup_id)? {
+        let mut payload = if let Some(intent_id) = confirmation.intent_id.as_deref() {
+            if let Some(intent) = load_existing_manual_intent_by_intent_id(&conn, intent_id)? {
+                existing_manual_execution_payload("result", &intent)
+            } else {
+                json!({
+                    "ok": true,
+                    "status": "pending",
+                    "kind": "result",
+                    "intent_id": intent_id,
+                    "deduped": true,
+                })
+            }
+        } else {
+            json!({
+                "ok": true,
+                "status": if confirmation.status.eq_ignore_ascii_case("PREVIEWED") {
+                    "previewed"
+                } else {
+                    "pending"
+                },
+                "kind": "result",
+                "deduped": true,
+            })
+        };
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "lookup".to_string(),
+                Value::String("confirm_token".to_string()),
+            );
+            object.insert(
+                "confirm_token".to_string(),
+                Value::String(confirmation.confirm_token),
+            );
+            object.insert("action".to_string(), Value::String(confirmation.action));
+            object.insert(
+                "confirmation_status".to_string(),
+                Value::String(confirmation.status),
+            );
+            object.insert(
+                "expires_ts_ms".to_string(),
+                Value::Number(confirmation.expires_ts_ms.into()),
+            );
+            object.insert(
+                "consumed_ts_ms".to_string(),
+                confirmation
+                    .consumed_ts_ms
+                    .map(|value| Value::Number(value.into()))
+                    .unwrap_or(Value::Null),
+            );
+            object.insert(
+                "last_error".to_string(),
+                confirmation
+                    .last_error
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+            object.insert(
+                "preview".to_string(),
+                confirmation.preview.unwrap_or(Value::Null),
+            );
+            if !object.contains_key("symbol") {
+                object.insert(
+                    "symbol".to_string(),
+                    confirmation
+                        .symbol
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                );
+            }
+            if !object.contains_key("intent_id") {
+                object.insert(
+                    "intent_id".to_string(),
+                    confirmation
+                        .intent_id
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                );
+            }
+        }
+        return Ok(payload);
+    }
+
+    if let Some(intent) = load_existing_manual_intent_by_intent_id(&conn, lookup_id)? {
+        let mut payload = existing_manual_execution_payload("result", &intent);
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("lookup".to_string(), Value::String("intent_id".to_string()));
+        }
+        return Ok(payload);
+    }
+
+    Err(HubError::NotFound(format!(
+        "manual trade result {lookup_id} not found"
+    )))
 }
 
 pub fn execute_close(
@@ -2215,6 +2330,55 @@ fn parse_manual_confirmation_preview(
     }
 }
 
+fn load_manual_confirmation_lookup(
+    conn: &Connection,
+    confirm_token: &str,
+) -> Result<Option<ManualConfirmationLookup>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT action, symbol, status, intent_id, last_error, expires_ts_ms, consumed_ts_ms, preview_json
+         FROM manual_trade_confirmations
+         WHERE confirm_token = ?1
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([confirm_token], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    });
+    let (
+        action,
+        symbol,
+        status,
+        intent_id,
+        last_error,
+        expires_ts_ms,
+        consumed_ts_ms,
+        preview_json,
+    ) = match row {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(HubError::Db(error.to_string())),
+    };
+    Ok(Some(ManualConfirmationLookup {
+        confirm_token: confirm_token.to_string(),
+        action,
+        symbol: symbol.map(|value| value.trim().to_ascii_uppercase()),
+        status,
+        intent_id,
+        last_error,
+        expires_ts_ms,
+        consumed_ts_ms,
+        preview: parse_manual_confirmation_preview(confirm_token, preview_json)?,
+    }))
+}
+
 fn bind_manual_confirmation_to_intent(
     conn: &Connection,
     confirm_token: &str,
@@ -2245,6 +2409,42 @@ fn load_existing_manual_intent_by_dedupe_key(
          LIMIT 1",
     )?;
     let row = stmt.query_row([dedupe_key], |row| {
+        Ok(ExistingManualIntent {
+            intent_id: row.get(0)?,
+            created_ts_ms: row.get(1)?,
+            symbol: row.get(2)?,
+            action: row.get(3)?,
+            side: row.get(4)?,
+            status: row.get(5)?,
+            requested_size: row.get(6)?,
+            leverage: row.get(7)?,
+            dedupe_key: row.get(8)?,
+            client_order_id: row.get(9)?,
+            exchange_order_id: row.get(10)?,
+            last_error: row.get(11)?,
+            sent_ts_ms: row.get(12)?,
+            meta_json: row.get(13)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn load_existing_manual_intent_by_intent_id(
+    conn: &Connection,
+    intent_id: &str,
+) -> Result<Option<ExistingManualIntent>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT intent_id, created_ts_ms, symbol, action, side, status, requested_size, leverage,
+                dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms, meta_json
+         FROM oms_intents
+         WHERE intent_id = ?1
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([intent_id], |row| {
         Ok(ExistingManualIntent {
             intent_id: row.get(0)?,
             created_ts_ms: row.get(1)?,
@@ -4987,6 +5187,154 @@ mod tests {
         assert!(runtime_row.1.contains("close_only"));
         assert_eq!(audit_row.0, "MANUAL_GUARDRAIL_BLOCKED");
         assert_eq!(audit_row.1, "ETH");
+    }
+
+    #[test]
+    fn execution_result_returns_preview_state_for_confirm_token() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash,
+                status, preview_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED', ?7)",
+            params![
+                "confirm-preview-result",
+                now_ms,
+                now_ms + MANUAL_CONFIRM_TTL_MS,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                "hash_open",
+                json!({
+                    "symbol": "ETH",
+                    "side": "SELL",
+                    "order_type": "market",
+                    "est_size": 0.0515,
+                    "leverage": 10,
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = execution_result(&cfg, "confirm-preview-result").unwrap();
+        assert_eq!(
+            result.get("lookup").and_then(|value| value.as_str()),
+            Some("confirm_token")
+        );
+        assert_eq!(
+            result.get("status").and_then(|value| value.as_str()),
+            Some("previewed")
+        );
+        assert_eq!(
+            result
+                .get("confirmation_status")
+                .and_then(|value| value.as_str()),
+            Some("PREVIEWED")
+        );
+        assert_eq!(result.get("intent_id"), Some(&Value::Null));
+        assert_eq!(
+            result
+                .get("preview")
+                .and_then(|value| value.get("est_size"))
+                .and_then(parse_json_number),
+            Some(0.0515)
+        );
+    }
+
+    #[test]
+    fn execution_result_returns_bound_intent_for_confirm_token_and_intent_id() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let intent_id = "manual_result_intent";
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: now_ms,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "SENT",
+                dedupe_key: Some("confirm-result-bound"),
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash,
+                status, intent_id, preview_json, consumed_ts_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'BOUND', ?7, ?8, ?9)",
+            params![
+                "confirm-result-bound",
+                now_ms,
+                now_ms + MANUAL_CONFIRM_TTL_MS,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                "hash_open",
+                intent_id,
+                json!({"symbol":"ETH","est_size":0.0515}).to_string(),
+                now_ms,
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let by_token = execution_result(&cfg, "confirm-result-bound").unwrap();
+        assert_eq!(
+            by_token.get("lookup").and_then(|value| value.as_str()),
+            Some("confirm_token")
+        );
+        assert_eq!(
+            by_token.get("intent_id").and_then(|value| value.as_str()),
+            Some(intent_id)
+        );
+        assert_eq!(
+            by_token
+                .get("confirmation_status")
+                .and_then(|value| value.as_str()),
+            Some("BOUND")
+        );
+        assert_eq!(
+            by_token
+                .get("intent_status")
+                .and_then(|value| value.as_str()),
+            Some("SENT")
+        );
+
+        let by_intent = execution_result(&cfg, intent_id).unwrap();
+        assert_eq!(
+            by_intent.get("lookup").and_then(|value| value.as_str()),
+            Some("intent_id")
+        );
+        assert_eq!(
+            by_intent.get("intent_id").and_then(|value| value.as_str()),
+            Some(intent_id)
+        );
+        assert_eq!(
+            by_intent
+                .get("intent_status")
+                .and_then(|value| value.as_str()),
+            Some("SENT")
+        );
     }
 
     #[test]
