@@ -34,7 +34,7 @@ mod subprocess;
 mod test_support;
 mod ws;
 
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::middleware;
 use axum::Router;
 use chrono::Utc;
@@ -119,7 +119,13 @@ async fn health() -> axum::Json<serde_json::Value> {
 fn build_cors_layer(config: &HubConfig) -> Result<CorsLayer, String> {
     let layer = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .expose_headers([
+            header::ETAG,
+            HeaderName::from_static("x-aiq-config-id"),
+            HeaderName::from_static("x-aiq-config-id-source"),
+            HeaderName::from_static("x-aiq-config-lock-id"),
+        ]);
 
     if config.cors_allowed_origins.is_empty() {
         return Ok(layer);
@@ -198,6 +204,48 @@ mod tests {
                 .unwrap(),
             "https://console.example"
         );
+    }
+
+    #[tokio::test]
+    async fn cors_exposes_config_identity_headers_for_allowed_origins() {
+        let mut config = HubConfig::from_env();
+        config.cors_allowed_origins = vec!["https://console.example".to_string()];
+        let app = Router::new()
+            .route(
+                "/test",
+                axum::routing::get(|| async {
+                    let mut response = axum::response::Response::new(Body::empty());
+                    response
+                        .headers_mut()
+                        .insert(header::ETAG, HeaderValue::from_static("\"abc123\""));
+                    response.headers_mut().insert(
+                        HeaderName::from_static("x-aiq-config-lock-id"),
+                        HeaderValue::from_static("abc123"),
+                    );
+                    response
+                }),
+            )
+            .layer(build_cors_layer(&config).unwrap());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test")
+                    .header(header::ORIGIN, "https://console.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let expose = response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(expose.contains("etag"));
+        assert!(expose.contains("x-aiq-config-lock-id"));
     }
 }
 

@@ -5,7 +5,7 @@
   let selectedFile = $state('main');
   let yamlText = $state('');
   let originalText = $state('');
-  let currentConfigId = $state<string | null>(null);
+  let currentLockId = $state<string | null>(null);
   let dirty = $derived(yamlText !== originalText);
   let saving = $state(false);
   let loading = $state(false);
@@ -32,7 +32,7 @@
       const res = await getConfigRaw(selectedFile);
       yamlText = res.raw;
       originalText = res.raw;
-      currentConfigId = res.configId;
+      currentLockId = res.configId;
     } catch (e: any) {
       error = e.message || 'Failed to load config';
     } finally {
@@ -43,9 +43,9 @@
   async function save() {
     saving = true; error = ''; success = '';
     try {
-      const res = await putConfig(yamlText, selectedFile, currentConfigId);
+      const res = await putConfig(yamlText, selectedFile, currentLockId);
       originalText = yamlText;
-      currentConfigId = res.config_id || currentConfigId;
+      currentLockId = res.lock_id || currentLockId;
       success = `Saved! Backup: ${res.backup || 'none'}`;
       setTimeout(() => { success = ''; }, 5000);
     } catch (e: any) {

@@ -67,12 +67,13 @@ pub struct BackupEntry {
 struct ResolvedConfigState {
     path: PathBuf,
     raw_text: String,
-    config_id: String,
-    config_id_source: &'static str,
+    lock_id: String,
+    runtime_config_id: Option<String>,
 }
 
 struct ValidatedConfigWrite {
     payload: String,
+    lock_id: String,
     config_id: String,
 }
 
@@ -342,17 +343,16 @@ fn resolve_current_config_state(
         )));
     }
     let raw_text = fs::read_to_string(&path)?;
-    let (config_id, config_id_source) =
-        match resolve_effective_config_for_variant(state, file_variant, &path) {
-            Ok(effective_config) => (effective_config.config_id().to_string(), "runtime"),
-            Err(_) => (raw_config_id(&raw_text), "raw_sha256"),
-        };
+    let lock_id = raw_config_id(&raw_text);
+    let runtime_config_id = resolve_effective_config_for_variant(state, file_variant, &path)
+        .ok()
+        .map(|effective_config| effective_config.config_id().to_string());
 
     Ok(ResolvedConfigState {
         path,
         raw_text,
-        config_id,
-        config_id_source,
+        lock_id,
+        runtime_config_id,
     })
 }
 
@@ -363,11 +363,13 @@ fn validate_candidate_config_write(
     yaml_text: &str,
 ) -> Result<ValidatedConfigWrite, HubError> {
     let payload = normalise_yaml_payload(yaml_text);
+    let lock_id = raw_config_id(&payload);
     let staged = stage_config_payload(target_path, &payload)?;
     let effective_config = resolve_effective_config_for_variant(state, file_variant, &staged.path)?;
 
     Ok(ValidatedConfigWrite {
         payload,
+        lock_id,
         config_id: effective_config.config_id().to_string(),
     })
 }
@@ -398,18 +400,27 @@ fn extract_expected_config_id(
 
 fn apply_config_identity_headers(
     headers: &mut HeaderMap,
-    config_id: &str,
-    config_id_source: &str,
+    state: &ResolvedConfigState,
 ) -> Result<(), HubError> {
-    let etag = HeaderValue::from_str(&format!("\"{config_id}\""))
+    let etag = HeaderValue::from_str(&format!("\"{}\"", state.lock_id))
         .map_err(|err| HubError::Internal(format!("invalid ETag header: {err}")))?;
-    let config_id_header = HeaderValue::from_str(config_id)
-        .map_err(|err| HubError::Internal(format!("invalid config-id header: {err}")))?;
-    let config_id_source_header = HeaderValue::from_str(config_id_source)
-        .map_err(|err| HubError::Internal(format!("invalid config-id source header: {err}")))?;
     headers.insert(header::ETAG, etag);
-    headers.insert("x-aiq-config-id", config_id_header);
-    headers.insert("x-aiq-config-id-source", config_id_source_header);
+    headers.insert(
+        "x-aiq-config-lock-id",
+        HeaderValue::from_str(&state.lock_id)
+            .map_err(|err| HubError::Internal(format!("invalid config-lock-id header: {err}")))?,
+    );
+    if let Some(runtime_config_id) = state.runtime_config_id.as_deref() {
+        headers.insert(
+            "x-aiq-config-id",
+            HeaderValue::from_str(runtime_config_id)
+                .map_err(|err| HubError::Internal(format!("invalid config-id header: {err}")))?,
+        );
+        headers.insert(
+            "x-aiq-config-id-source",
+            HeaderValue::from_static("runtime"),
+        );
+    }
     Ok(())
 }
 
@@ -455,11 +466,7 @@ async fn get_config(
     let resolved = resolve_current_config_state(&state, file_variant)?;
     let val: Value = serde_yaml::from_str(&resolved.raw_text)?;
     let mut response = Json(val).into_response();
-    apply_config_identity_headers(
-        response.headers_mut(),
-        &resolved.config_id,
-        resolved.config_id_source,
-    )?;
+    apply_config_identity_headers(response.headers_mut(), &resolved)?;
     Ok(response)
 }
 
@@ -469,12 +476,8 @@ async fn get_config_raw(
     Query(q): Query<ConfigQuery>,
 ) -> Result<Response, HubError> {
     let resolved = resolve_current_config_state(&state, variant(&q))?;
-    let mut response = resolved.raw_text.into_response();
-    apply_config_identity_headers(
-        response.headers_mut(),
-        &resolved.config_id,
-        resolved.config_id_source,
-    )?;
+    let mut response = resolved.raw_text.clone().into_response();
+    apply_config_identity_headers(response.headers_mut(), &resolved)?;
     Ok(response)
 }
 
@@ -492,10 +495,10 @@ async fn put_config(
     let file_variant = variant(&q);
     let current = resolve_current_config_state(&state, file_variant)?;
     let expected_config_id = extract_expected_config_id(&headers, &body)?;
-    if expected_config_id != current.config_id {
+    if expected_config_id != current.lock_id {
         return Err(HubError::Conflict(format!(
             "stale config write for {file_variant}: expected {expected_config_id} but current config is {}",
-            current.config_id
+            current.lock_id
         )));
     }
     let validated =
@@ -521,6 +524,7 @@ async fn put_config(
         "ok": true,
         "file": file_variant,
         "backup": backup_path_str,
+        "lock_id": validated.lock_id,
         "config_id": validated.config_id,
     })))
 }
@@ -952,6 +956,8 @@ mod tests {
         .await
         .unwrap();
 
+        assert!(response.headers().contains_key(header::ETAG));
+        assert!(response.headers().contains_key("x-aiq-config-lock-id"));
         assert!(response.headers().contains_key("x-aiq-config-id"));
         assert_eq!(
             response.headers()["x-aiq-config-id-source"],
@@ -975,7 +981,7 @@ mod tests {
             Query(ConfigQuery {
                 file: Some("main".to_string()),
             }),
-            if_match_headers(&current.config_id),
+            if_match_headers(&current.lock_id),
             Json(ConfigWriteBody {
                 yaml: "global:\n  trade:\n    leverage: nope\n".to_string(),
                 expected_config_id: None,
@@ -1014,7 +1020,7 @@ mod tests {
             Query(ConfigQuery {
                 file: Some("main".to_string()),
             }),
-            if_match_headers(&current.config_id),
+            if_match_headers(&current.lock_id),
             Json(ConfigWriteBody {
                 yaml: "global:\n  engine:\n    interval: 5m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n".to_string(),
                 expected_config_id: None,
@@ -1032,5 +1038,46 @@ mod tests {
         assert!(fs::read_to_string(&config_path)
             .unwrap()
             .contains("interval: 15m"));
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_stale_raw_text_edits_even_when_runtime_config_is_unchanged() {
+        let dir = tempdir().unwrap();
+        let config_path = write_main_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let state = test_state(dir.path());
+        let current = resolve_current_config_state(&state, "main").unwrap();
+
+        fs::write(
+            &config_path,
+            "# operator note\nglobal:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        )
+        .unwrap();
+
+        let err = put_config(
+            State(Arc::clone(&state)),
+            Query(ConfigQuery {
+                file: Some("main".to_string()),
+            }),
+            if_match_headers(&current.lock_id),
+            Json(ConfigWriteBody {
+                yaml: "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n".to_string(),
+                expected_config_id: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            HubError::Conflict(message) => {
+                assert!(message.contains("stale config write"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("operator note"));
     }
 }

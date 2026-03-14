@@ -185,9 +185,12 @@ export async function getConfigRaw(file = 'main'): Promise<{ raw: string; config
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
   const resp = await fetch(`/api/config/raw?file=${encodeURIComponent(file)}`, { headers });
   if (!resp.ok) throw new Error(`API ${resp.status}`);
+  const lockId = resp.headers.get('x-aiq-config-lock-id')
+    || resp.headers.get('etag')?.replace(/^W\//, '').replace(/^"|"$/g, '')
+    || null;
   return {
     raw: await resp.text(),
-    configId: resp.headers.get('x-aiq-config-id'),
+    configId: lockId,
   };
 }
 
