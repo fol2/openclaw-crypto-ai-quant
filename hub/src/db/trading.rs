@@ -108,6 +108,30 @@ pub struct LastTrade {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RuntimeAccountSnapshot {
+    pub ts_ms: i64,
+    pub timestamp: String,
+    pub account_value_usd: f64,
+    pub withdrawable_usd: f64,
+    pub total_margin_used_usd: f64,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeExchangePositionSnapshot {
+    pub symbol: String,
+    #[serde(rename = "type")]
+    pub pos_type: String,
+    pub size: f64,
+    pub entry_price: f64,
+    pub leverage: f64,
+    pub margin_used: f64,
+    pub ts_ms: i64,
+    pub updated_at: String,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DailyMetrics {
     pub utc_day: String,
     pub trades: i64,
@@ -519,6 +543,68 @@ pub fn latest_balance(conn: &Connection) -> Result<Option<(f64, Option<String>)>
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+pub fn latest_runtime_account_snapshot(
+    conn: &Connection,
+) -> Result<Option<RuntimeAccountSnapshot>, HubError> {
+    if !has_table(conn, "runtime_account_snapshots") {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "
+        SELECT ts_ms, timestamp, account_value_usd, withdrawable_usd, total_margin_used_usd, source
+        FROM runtime_account_snapshots
+        ORDER BY ts_ms DESC, id DESC
+        LIMIT 1
+        ",
+    )?;
+    let result = stmt.query_row([], |row| {
+        Ok(RuntimeAccountSnapshot {
+            ts_ms: row.get(0)?,
+            timestamp: row.get(1)?,
+            account_value_usd: row.get(2)?,
+            withdrawable_usd: row.get(3)?,
+            total_margin_used_usd: row.get(4)?,
+            source: row.get(5)?,
+        })
+    });
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn runtime_exchange_positions(
+    conn: &Connection,
+) -> Result<Vec<RuntimeExchangePositionSnapshot>, HubError> {
+    if !has_table(conn, "runtime_exchange_positions") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "
+        SELECT symbol, pos_type, size, entry_price, leverage, margin_used, ts_ms, updated_at, source
+        FROM runtime_exchange_positions
+        ORDER BY symbol ASC
+        ",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(RuntimeExchangePositionSnapshot {
+                symbol: row.get::<_, String>(0)?.to_uppercase(),
+                pos_type: row.get::<_, String>(1)?.to_uppercase(),
+                size: row.get(2)?,
+                entry_price: row.get(3)?,
+                leverage: row.get(4)?,
+                margin_used: row.get(5)?,
+                ts_ms: row.get(6)?,
+                updated_at: row.get(7)?,
+                source: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// Check if a table exists in the database.
@@ -992,6 +1078,35 @@ mod tests {
         .unwrap();
     }
 
+    fn setup_runtime_sync_tables(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE runtime_account_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                account_value_usd REAL NOT NULL,
+                withdrawable_usd REAL NOT NULL,
+                total_margin_used_usd REAL NOT NULL,
+                source TEXT NOT NULL,
+                meta_json TEXT
+            );
+            CREATE TABLE runtime_exchange_positions (
+                symbol TEXT PRIMARY KEY,
+                pos_type TEXT NOT NULL,
+                size REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                leverage REAL NOT NULL,
+                margin_used REAL NOT NULL,
+                ts_ms INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                source TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn position_entries_include_partial_close_rows() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1117,6 +1232,61 @@ mod tests {
         assert_eq!(journeys[0].manual_leg_count, 2);
         assert_eq!(journeys[0].legs[1].source, "manual");
         assert_eq!(journeys[0].legs[2].source, "manual");
+    }
+
+    #[test]
+    fn latest_runtime_account_snapshot_reads_latest_snapshot_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+        setup_runtime_sync_tables(&conn);
+        conn.execute(
+            "INSERT INTO runtime_account_snapshots (ts_ms, timestamp, account_value_usd, withdrawable_usd, total_margin_used_usd, source, meta_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                1_773_500_000_000_i64,
+                "2026-03-14T19:00:00+00:00",
+                200.015835_f64,
+                52.295391_f64,
+                147.720444_f64,
+                "live_fill_sync",
+                "{}",
+            ],
+        )
+        .unwrap();
+
+        let snapshot = latest_runtime_account_snapshot(&conn).unwrap().unwrap();
+        assert_eq!(snapshot.account_value_usd, 200.015835);
+        assert_eq!(snapshot.withdrawable_usd, 52.295391);
+        assert_eq!(snapshot.total_margin_used_usd, 147.720444);
+    }
+
+    #[test]
+    fn runtime_exchange_positions_reads_current_snapshot_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+        setup_runtime_sync_tables(&conn);
+        conn.execute(
+            "INSERT INTO runtime_exchange_positions (symbol, pos_type, size, entry_price, leverage, margin_used, ts_ms, updated_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "DOGE",
+                "LONG",
+                1692.0_f64,
+                0.094602_f64,
+                4.0_f64,
+                40.026798_f64,
+                1_773_500_000_000_i64,
+                "2026-03-14T19:00:00+00:00",
+                "live_fill_sync",
+            ],
+        )
+        .unwrap();
+
+        let positions = runtime_exchange_positions(&conn).unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].symbol, "DOGE");
+        assert_eq!(positions[0].pos_type, "LONG");
+        assert_eq!(positions[0].size, 1692.0);
     }
 }
 

@@ -1781,7 +1781,7 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "live sync-fills ok: window={}..{} fetched={} supported={} inserted_oms_fills={} inserted_trades={} backfilled_existing_trades={} manual_intents={} dry_run={}",
+                    "live sync-fills ok: window={}..{} fetched={} supported={} inserted_oms_fills={} inserted_trades={} backfilled_existing_trades={} manual_intents={} positions={} account_value_usd={} dry_run={}",
                     report.window.start_ms,
                     report.window.end_ms,
                     report.fetched_remote_fills,
@@ -1790,6 +1790,8 @@ fn run_live(command: LiveCommand) -> Result<()> {
                     report.inserted_trades,
                     report.backfilled_existing_trades,
                     report.inserted_manual_intents,
+                    report.exchange_position_count,
+                    report.account_value_usd,
                     report.dry_run,
                 );
                 if !report.warnings.is_empty() {
