@@ -15,6 +15,8 @@ pub struct HubAuthConfig {
     pub editor_token: String,
     pub approver_token: String,
     pub dev_mode: bool,
+    pub trust_loopback_read: bool,
+    pub trust_loopback_admin: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +35,8 @@ impl HubAuthConfig {
             editor_token: config.editor_token.clone(),
             approver_token: config.approver_token.clone(),
             dev_mode: config.dev_mode,
+            trust_loopback_read: config.trust_loopback_read,
+            trust_loopback_admin: config.trust_loopback_admin,
         }
     }
 
@@ -96,6 +100,10 @@ async fn require_any_scope(request: Request, next: Next, scopes: &[AuthScope]) -
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
+
+    if loopback_auth_bypassed(&request, &config, scopes) {
+        return next.run(request).await;
+    }
 
     if scopes == [AuthScope::Read] && config.read_token.is_empty() && config.dev_mode {
         return next.run(request).await;
@@ -163,6 +171,16 @@ fn expected_token_for_scope<'a>(config: &'a HubAuthConfig, scope: AuthScope) -> 
 fn auth_error(status: StatusCode, message: &str) -> Response {
     let body = json!({ "error": message });
     (status, axum::Json(body)).into_response()
+}
+
+fn loopback_auth_bypassed(request: &Request, config: &HubAuthConfig, scopes: &[AuthScope]) -> bool {
+    if !direct_peer_is_loopback(request) {
+        return false;
+    }
+    if scopes.iter().any(|scope| !matches!(scope, AuthScope::Read)) {
+        return config.trust_loopback_admin;
+    }
+    config.trust_loopback_read || config.trust_loopback_admin
 }
 
 fn read_auth_bypassed(request: &Request) -> bool {
@@ -388,6 +406,8 @@ mod tests {
             editor_token: String::new(),
             approver_token: String::new(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         };
 
         let err = config.validate_startup().unwrap_err();
@@ -402,6 +422,8 @@ mod tests {
             editor_token: String::new(),
             approver_token: String::new(),
             dev_mode: true,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
         .await
@@ -508,6 +530,8 @@ mod tests {
             editor_token: String::new(),
             approver_token: String::new(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         };
 
         let err = config.validate_startup().unwrap_err();
@@ -522,6 +546,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -549,6 +575,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -573,6 +601,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -594,6 +624,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -616,6 +648,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -637,6 +671,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -661,6 +697,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -677,6 +715,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -699,6 +739,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: true,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -721,6 +763,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -743,6 +787,8 @@ mod tests {
             editor_token: "editor-secret".to_string(),
             approver_token: "approver-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -768,6 +814,8 @@ mod tests {
                 editor_token: "editor-secret".to_string(),
                 approver_token: "approver-secret".to_string(),
                 dev_mode: false,
+                trust_loopback_read: false,
+                trust_loopback_admin: false,
             }));
 
         let response = app
@@ -794,6 +842,8 @@ mod tests {
                 editor_token: "editor-secret".to_string(),
                 approver_token: "approver-secret".to_string(),
                 dev_mode: false,
+                trust_loopback_read: false,
+                trust_loopback_admin: false,
             }));
 
         let response = app
@@ -810,6 +860,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_auth_allows_bare_loopback_when_opted_in() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
+
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
+            dev_mode: false,
+            trust_loopback_read: true,
+            trust_loopback_admin: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_allows_bare_loopback_when_opted_in() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
+
+        let response = admin_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
+            dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: true,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn websocket_query_editor_token_can_pass_the_read_gate() {
         let app = Router::new()
             .route("/ws", get(ok_handler))
@@ -820,6 +916,8 @@ mod tests {
                 editor_token: "editor-secret".to_string(),
                 approver_token: "approver-secret".to_string(),
                 dev_mode: false,
+                trust_loopback_read: false,
+                trust_loopback_admin: false,
             }));
 
         let response = app
