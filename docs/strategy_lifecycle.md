@@ -156,7 +156,6 @@ Step down or pause immediately.
 |---------|--------|-----------|
 | Rolling PF degradation | PF over last 30 trades | < 1.0 |
 | Drawdown warning | DD from config-start HWM | > 15% |
-| Latest validation fail | OOS validation suite result | Fail |
 | Max config age | Days since deployment | > 14 |
 
 **Source**: live trading DB (rolling window) + validation pipeline output.

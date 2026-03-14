@@ -3512,6 +3512,26 @@ fn write_live_governance_state(
     Ok(path)
 }
 
+fn infer_live_governance_start_ms(live_db_path: &Path, config_id: &str) -> Result<Option<i64>> {
+    if !live_db_path.is_file() {
+        return Ok(None);
+    }
+    let conn = Connection::open(live_db_path)
+        .with_context(|| format!("open {}", live_db_path.display()))?;
+    if !table_exists(&conn, "decision_events")? {
+        return Ok(None);
+    }
+    let first_decision_ms = conn
+        .query_row(
+            "SELECT MIN(timestamp_ms) FROM decision_events WHERE config_fingerprint = ?1",
+            [config_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(first_decision_ms)
+}
+
 fn stage_exposure_factor(settings: &LiveGovernanceSettings, ramp_stage: u8) -> f64 {
     match ramp_stage {
         1 => settings.stage1_exposure_factor,
@@ -3789,11 +3809,20 @@ fn promote_primary_live(
         } else {
             None
         };
-    if live_state.is_none()
-        && current_live_config_id.as_deref() == Some(primary_role.config_id.as_str())
-    {
-        let bootstrap_config_id = current_target_config_id(&live_yaml_path, "primary")?
+    if live_state.is_none() && current_live_text.is_some() && live_yaml_path.is_file() {
+        let bootstrap_config_id = current_live_config_id
+            .clone()
             .ok_or_else(|| anyhow!("missing current live config fingerprint"))?;
+        let bootstrap_started_at_ms =
+            infer_live_governance_start_ms(&live_db_path, bootstrap_config_id.as_str())?
+                .or_else(|| {
+                    fs::metadata(&live_yaml_path)
+                        .ok()
+                        .and_then(|meta| meta.modified().ok())
+                        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as i64)
+                })
+                .unwrap_or_else(|| Utc::now().timestamp_millis());
         let bootstrap_state = LiveGovernanceState {
             version: "factory_live_governance_v1".to_string(),
             role: "primary".to_string(),
@@ -3808,8 +3837,8 @@ fn promote_primary_live(
             manifest_path: live_yaml_path.display().to_string(),
             live_yaml_path: live_yaml_path.display().to_string(),
             live_db_path: live_db_path.display().to_string(),
-            started_at_ms: Utc::now().timestamp_millis(),
-            stage_started_at_ms: Utc::now().timestamp_millis(),
+            started_at_ms: bootstrap_started_at_ms,
+            stage_started_at_ms: bootstrap_started_at_ms,
             updated_at_ms: Utc::now().timestamp_millis(),
             last_transition_reason: "bootstrap_from_existing_live_yaml".to_string(),
             last_transition_by_run_id: run_dir
@@ -4844,6 +4873,63 @@ symbols:
         project_dir.join(DEFAULT_LIVE_DB_PATH)
     }
 
+    fn create_live_governance_schema(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT,
+                action TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                balance REAL
+            );
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                timestamp_ms INTEGER NOT NULL,
+                trade_id INTEGER,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision_phase TEXT NOT NULL,
+                config_fingerprint TEXT
+            );
+            CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY,
+                ts_ms INTEGER,
+                event TEXT
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    fn insert_live_close_fill(
+        conn: &Connection,
+        trade_id: i64,
+        timestamp: &str,
+        pnl: f64,
+        fee_usd: f64,
+        balance: f64,
+        config_fingerprint: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO trades (id, timestamp, action, pnl, fee_usd, balance) VALUES (?, ?, 'CLOSE', ?, ?, ?)",
+            rusqlite::params![trade_id, timestamp, pnl, fee_usd, balance],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO decision_events (id, timestamp_ms, trade_id, event_type, status, decision_phase, config_fingerprint)
+             VALUES (?, ?, ?, 'fill', 'executed', 'execution', ?)",
+            rusqlite::params![
+                format!("live-decision-{trade_id}"),
+                parse_trade_timestamp_ms(timestamp).unwrap(),
+                trade_id,
+                config_fingerprint
+            ],
+        )
+        .unwrap();
+    }
+
     fn paper_funding_db(project_dir: &Path) -> PathBuf {
         project_dir.join("funding_rates.db")
     }
@@ -5463,7 +5549,6 @@ symbols:
             .join("config")
             .join("strategy_overrides.live.yaml");
         fs::create_dir_all(live_yaml.parent().unwrap()).unwrap();
-        fs::write(&live_yaml, config_yaml("30m")).unwrap();
 
         let source_config = run_dir.join("configs").join("candidate_primary.yaml");
         fs::create_dir_all(source_config.parent().unwrap()).unwrap();
@@ -5546,6 +5631,113 @@ symbols:
         assert!(Path::new(&event.deployment_dir)
             .join("promotion_event.json")
             .is_file());
+    }
+
+    #[test]
+    fn promote_primary_live_bootstraps_existing_live_incumbent_before_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let artifacts_root = project_dir.join("artifacts");
+        let run_dir = artifacts_root.join("2026-03-14").join("run_nightly_test");
+        fs::create_dir_all(run_dir.join("promoted_configs")).unwrap();
+
+        let live_yaml = project_dir
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        fs::create_dir_all(live_yaml.parent().unwrap()).unwrap();
+        fs::write(&live_yaml, config_yaml("30m")).unwrap();
+        let incumbent_config_id = strategy_fingerprint_from_yaml(&config_yaml("30m"));
+
+        let live_db = live_governance_db(project_dir);
+        let conn = Connection::open(&live_db).unwrap();
+        create_live_governance_schema(&conn);
+        insert_live_close_fill(
+            &conn,
+            1,
+            "2026-03-10T00:00:00Z",
+            5.0,
+            0.5,
+            10_005.0,
+            &incumbent_config_id,
+        );
+        insert_live_close_fill(
+            &conn,
+            2,
+            "2026-03-11T00:00:00Z",
+            4.0,
+            0.5,
+            10_009.0,
+            &incumbent_config_id,
+        );
+
+        let source_config = run_dir.join("configs").join("candidate_primary.yaml");
+        fs::create_dir_all(source_config.parent().unwrap()).unwrap();
+        fs::write(&source_config, config_yaml("30m")).unwrap();
+
+        let promoted_config = run_dir.join("promoted_configs").join("primary.yaml");
+        fs::write(&promoted_config, config_yaml("30m")).unwrap();
+
+        let validated = vec![ValidationItem {
+            config_path: source_config.display().to_string(),
+            ..validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)
+        }];
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: "cfg-primary".to_string(),
+        }];
+        let paper_deployments = vec![DeploymentEvent {
+            role: "primary".to_string(),
+            slot: 1,
+            source_config_path: source_config.display().to_string(),
+            config_id: "cfg-primary".to_string(),
+            config_sha256: "cfg-primary".to_string(),
+            promoted_config_path: promoted_config.display().to_string(),
+            target_yaml_path: project_dir
+                .join("config")
+                .join("strategy_overrides.paper1.yaml")
+                .display()
+                .to_string(),
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            soak_marker_path: None,
+            restarted_service: false,
+            status: "applied".to_string(),
+        }];
+        let deployment = DeploymentSettings {
+            apply_to_paper: true,
+            restart_services: false,
+            apply_to_live: true,
+            restart_live_service: false,
+            live_yaml_path: PathBuf::from("config/strategy_overrides.live.yaml"),
+            live_service: "openclaw-ai-quant-live-v8".to_string(),
+        };
+        let live_governance = LiveGovernanceSettings::default();
+
+        let event = promote_primary_live(
+            project_dir,
+            &artifacts_root,
+            &run_dir,
+            &validated,
+            &selected,
+            &paper_deployments,
+            &deployment,
+            &live_governance,
+        )
+        .unwrap();
+
+        let state = load_live_governance_state(project_dir, &live_governance)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.status, "held");
+        assert_eq!(event.live_state, "live_full");
+        assert_eq!(state.config_id, incumbent_config_id);
+        assert_eq!(
+            state.started_at_ms,
+            parse_trade_timestamp_ms("2026-03-10T00:00:00Z").unwrap()
+        );
     }
 
     #[test]
