@@ -100,6 +100,11 @@ The top 1–3 validated candidates are deployed each cycle when the release path
 
 **Trigger**: Paper gate pass (Gate 1 + Gate 2 from `success_metrics.md`).
 
+The factory writes a generated live manifest for the selected config instead of
+copying the paper artefact directly into steady-state live YAML. Stage 1
+manifests scale target exposure to 25% and persist the current governance state
+to an auditable state file before the live service is restarted.
+
 All conditions must be met:
 
 | Gate | Metric | Threshold |
@@ -131,6 +136,9 @@ All conditions must be met:
 | 3 (= `live_full`) | 100% of target | — | Steady state |
 
 The current ramp stage is tracked as a metadata attribute on the config, not as a separate state.
+Each stage transition writes both a generated live manifest and a governance
+state record containing the stage, exposure factor, timestamp, and transition
+reason.
 
 ### live_small → paused
 
@@ -152,6 +160,10 @@ Step down or pause immediately.
 | Max config age | Days since deployment | > 14 |
 
 **Source**: live trading DB (rolling window) + validation pipeline output.
+
+When a pause trigger fires, the factory writes a generated paused manifest with
+zero entry exposure and records the pause transition in the live governance
+state file.
 
 ### paused → validated
 

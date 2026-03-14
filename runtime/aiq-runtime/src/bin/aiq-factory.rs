@@ -45,6 +45,7 @@ const DEFAULT_FACTORY_VERSION: &str = "factory_cycle_rust_v1";
 const DEFAULT_SELECTION_POLICY: &str = "promotion_roles_v2";
 const DEFAULT_LIVE_YAML_PATH: &str = "config/strategy_overrides.live.yaml";
 const DEFAULT_LIVE_SERVICE: &str = "openclaw-ai-quant-live-v8";
+const DEFAULT_LIVE_DB_PATH: &str = "trading_engine_v8_live.db";
 const DEFAULT_PRIMARY_PAPER_DB_PATH: &str = "trading_engine_v8_paper1.db";
 const DEFAULT_LIVE_SECRETS_PATH: &str = "~/.config/openclaw/ai-quant-secrets.json";
 
@@ -120,6 +121,7 @@ struct FactoryDefaults {
     validation: ValidationSettings,
     selection: SelectionSettings,
     deployment: DeploymentSettings,
+    live_governance: LiveGovernanceSettings,
 }
 
 impl Default for FactoryDefaults {
@@ -139,6 +141,7 @@ impl Default for FactoryDefaults {
             validation: ValidationSettings::default(),
             selection: SelectionSettings::default(),
             deployment: DeploymentSettings::default(),
+            live_governance: LiveGovernanceSettings::default(),
         }
     }
 }
@@ -320,6 +323,38 @@ impl Default for DeploymentSettings {
             restart_live_service: true,
             live_yaml_path: PathBuf::from(DEFAULT_LIVE_YAML_PATH),
             live_service: DEFAULT_LIVE_SERVICE.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct LiveGovernanceSettings {
+    live_db_path: PathBuf,
+    state_path: PathBuf,
+    stage1_exposure_factor: f64,
+    stage2_exposure_factor: f64,
+    stage3_exposure_factor: f64,
+    min_stage_hours: f64,
+    rotation_trade_window: usize,
+    min_live_profit_factor: f64,
+    max_live_drawdown_pct: f64,
+    max_config_age_days: f64,
+}
+
+impl Default for LiveGovernanceSettings {
+    fn default() -> Self {
+        Self {
+            live_db_path: PathBuf::from(DEFAULT_LIVE_DB_PATH),
+            state_path: PathBuf::from("artifacts/state/factory_live_primary.json"),
+            stage1_exposure_factor: 0.25,
+            stage2_exposure_factor: 0.50,
+            stage3_exposure_factor: 1.00,
+            min_stage_hours: 24.0,
+            rotation_trade_window: 30,
+            min_live_profit_factor: 1.0,
+            max_live_drawdown_pct: 15.0,
+            max_config_age_days: 14.0,
         }
     }
 }
@@ -616,15 +651,55 @@ struct PreparedDeployment {
 struct LivePromotionEvent {
     role: String,
     config_id: String,
+    manifest_config_id: String,
     source_config_path: String,
     promoted_config_path: String,
+    manifest_path: String,
+    state_path: String,
     live_yaml_path: String,
     live_service: String,
     deployment_dir: String,
     service_was_active_before: bool,
     restarted_service: bool,
     restart_required: bool,
+    live_state: String,
+    ramp_stage: u8,
+    exposure_factor: f64,
+    transition_reason: String,
     status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LiveGovernanceState {
+    version: String,
+    role: String,
+    config_id: String,
+    manifest_config_id: String,
+    manifest_config_sha256: String,
+    config_sha256: String,
+    state: String,
+    ramp_stage: u8,
+    exposure_factor: f64,
+    source_config_path: String,
+    manifest_path: String,
+    live_yaml_path: String,
+    live_db_path: String,
+    started_at_ms: i64,
+    stage_started_at_ms: i64,
+    updated_at_ms: i64,
+    last_transition_reason: String,
+    last_transition_by_run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LiveGovernanceSummary {
+    rolling_profit_factor: f64,
+    rolling_close_trades: u32,
+    max_drawdown_pct: f64,
+    kill_switch_events: u32,
+    config_age_days: f64,
+    should_pause: bool,
+    pause_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1051,6 +1126,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
                                         &selected,
                                         &events,
                                         &settings.deployment,
+                                        &settings.live_governance,
                                     ) {
                                         Ok(event) => (Some(gate), Some(event)),
                                         Err(err) => {
@@ -3408,6 +3484,240 @@ fn current_target_config_id(path: &Path, role: &str) -> Result<Option<String>> {
     Ok(Some(materialised.config_id))
 }
 
+fn live_governance_state_path(project_dir: &Path, settings: &LiveGovernanceSettings) -> PathBuf {
+    resolve_under_project(project_dir, &settings.state_path)
+}
+
+fn load_live_governance_state(
+    project_dir: &Path,
+    settings: &LiveGovernanceSettings,
+) -> Result<Option<LiveGovernanceState>> {
+    let path = live_governance_state_path(project_dir, settings);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let state =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(state))
+}
+
+fn write_live_governance_state(
+    project_dir: &Path,
+    settings: &LiveGovernanceSettings,
+    state: &LiveGovernanceState,
+) -> Result<PathBuf> {
+    let path = live_governance_state_path(project_dir, settings);
+    write_json(&path, state)?;
+    Ok(path)
+}
+
+fn stage_exposure_factor(settings: &LiveGovernanceSettings, ramp_stage: u8) -> f64 {
+    match ramp_stage {
+        1 => settings.stage1_exposure_factor,
+        2 => settings.stage2_exposure_factor,
+        _ => settings.stage3_exposure_factor,
+    }
+}
+
+fn build_live_manifest_document(
+    source_document: &serde_yaml::Value,
+    exposure_factor: f64,
+    paused: bool,
+) -> Result<(serde_yaml::Value, String, String)> {
+    let mut config = load_config_document_checked(source_document, None, false, None)
+        .map_err(|err| anyhow!(err))
+        .context("load source live manifest config")?;
+    if paused {
+        config.trade.allocation_pct = 0.0;
+        config.trade.max_total_margin_pct = 0.0;
+        config.trade.max_open_positions = 0;
+        config.trade.max_entry_orders_per_loop = 0;
+    } else {
+        config.trade.allocation_pct =
+            (config.trade.allocation_pct * exposure_factor).clamp(0.0, 1.0);
+        config.trade.max_total_margin_pct =
+            (config.trade.max_total_margin_pct * exposure_factor).clamp(0.0, 1.0);
+        if config.trade.max_open_positions > 0 {
+            let scaled = (config.trade.max_open_positions as f64 * exposure_factor).ceil() as usize;
+            config.trade.max_open_positions = scaled.max(1);
+        }
+        if config.trade.max_entry_orders_per_loop > 0 {
+            let scaled =
+                (config.trade.max_entry_orders_per_loop as f64 * exposure_factor).ceil() as usize;
+            config.trade.max_entry_orders_per_loop = scaled.max(1);
+        }
+    }
+    let manifest_document = replace_global_preserving_root(source_document, &config)?;
+    let manifest_yaml =
+        serde_yaml::to_string(&manifest_document).context("serialise generated live manifest")?;
+    let manifest_sha256 = {
+        let mut hasher = Sha256::new();
+        hasher.update(manifest_yaml.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+    Ok((
+        manifest_document,
+        strategy_config_fingerprint_sha256(&config),
+        manifest_sha256,
+    ))
+}
+
+fn build_live_governance_summary(
+    live_db_path: &Path,
+    config_id: &str,
+    since_ms: i64,
+    settings: &LiveGovernanceSettings,
+) -> Result<LiveGovernanceSummary> {
+    if !live_db_path.is_file() {
+        return Ok(LiveGovernanceSummary {
+            rolling_profit_factor: 0.0,
+            rolling_close_trades: 0,
+            max_drawdown_pct: 0.0,
+            kill_switch_events: 0,
+            config_age_days: 0.0,
+            should_pause: false,
+            pause_reason: None,
+        });
+    }
+    let conn = Connection::open(live_db_path)
+        .with_context(|| format!("open {}", live_db_path.display()))?;
+
+    let mut close_stmt = conn.prepare(
+        "SELECT COALESCE(d.timestamp_ms, 0), COALESCE(t.pnl, 0.0), COALESCE(t.fee_usd, 0.0), COALESCE(t.balance, 0.0)
+         FROM trades t
+         JOIN decision_events d ON d.trade_id = t.id
+         WHERE d.config_fingerprint = ?
+           AND d.event_type = 'fill'
+           AND d.status = 'executed'
+           AND t.action IN ('REDUCE', 'CLOSE', 'REDUCE_LONG', 'REDUCE_SHORT', 'CLOSE_LONG', 'CLOSE_SHORT')
+         ORDER BY d.timestamp_ms DESC",
+    )?;
+    let close_rows = close_stmt
+        .query_map(params![config_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut gross_profit = 0.0;
+    let mut gross_loss = 0.0;
+    let mut rolling_close_trades = 0u32;
+    let mut ordered_balances = Vec::new();
+    for (timestamp_ms, _pnl, _fee_usd, balance) in close_rows.iter().rev() {
+        if *timestamp_ms < since_ms {
+            continue;
+        }
+        ordered_balances.push(*balance);
+    }
+    for (timestamp_ms, pnl, fee_usd, _) in close_rows {
+        if timestamp_ms < since_ms
+            || rolling_close_trades as usize >= settings.rotation_trade_window
+        {
+            continue;
+        }
+        rolling_close_trades += 1;
+        let net_pnl = pnl - fee_usd;
+        if net_pnl > 0.0 {
+            gross_profit += net_pnl;
+        } else {
+            gross_loss += net_pnl.abs();
+        }
+    }
+    let rolling_profit_factor = if gross_loss > 0.0 {
+        gross_profit / gross_loss
+    } else if gross_profit > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let max_drawdown_pct = compute_max_drawdown_from_balances(&ordered_balances);
+    let kill_switch_events = count_live_kill_switch_events(&conn, since_ms)?;
+    let config_age_days =
+        ((Utc::now().timestamp_millis() - since_ms).max(0) as f64 / 86_400_000.0).max(0.0);
+    let pause_reason = if kill_switch_events > 0 {
+        Some(format!("kill_switch_events={kill_switch_events}"))
+    } else if rolling_close_trades as usize >= settings.rotation_trade_window
+        && rolling_profit_factor < settings.min_live_profit_factor
+    {
+        Some(format!(
+            "rolling_profit_factor {:.4} < {:.4}",
+            rolling_profit_factor, settings.min_live_profit_factor
+        ))
+    } else if max_drawdown_pct > settings.max_live_drawdown_pct {
+        Some(format!(
+            "live_drawdown {:.4}% > {:.2}%",
+            max_drawdown_pct, settings.max_live_drawdown_pct
+        ))
+    } else if config_age_days > settings.max_config_age_days {
+        Some(format!(
+            "config_age_days {:.2} > {:.2}",
+            config_age_days, settings.max_config_age_days
+        ))
+    } else {
+        None
+    };
+
+    Ok(LiveGovernanceSummary {
+        rolling_profit_factor,
+        rolling_close_trades,
+        max_drawdown_pct,
+        kill_switch_events,
+        config_age_days,
+        should_pause: pause_reason.is_some(),
+        pause_reason,
+    })
+}
+
+fn compute_max_drawdown_from_balances(balances: &[f64]) -> f64 {
+    let mut peak = None::<f64>;
+    let mut max_drawdown_pct = 0.0;
+    for balance in balances {
+        if *balance <= 0.0 {
+            continue;
+        }
+        match peak {
+            None => peak = Some(*balance),
+            Some(current_peak) if *balance > current_peak => peak = Some(*balance),
+            Some(current_peak) => {
+                let drawdown_pct = ((current_peak - *balance).max(0.0) / current_peak) * 100.0;
+                if drawdown_pct > max_drawdown_pct {
+                    max_drawdown_pct = drawdown_pct;
+                }
+            }
+        }
+    }
+    max_drawdown_pct
+}
+
+fn count_live_kill_switch_events(conn: &Connection, since_ms: i64) -> Result<u32> {
+    if !table_exists(conn, "audit_events")? {
+        return Ok(0);
+    }
+    let has_ts_ms = table_has_column(conn, "audit_events", "ts_ms")?;
+    let sql = if has_ts_ms {
+        "SELECT COALESCE(event, ''), COALESCE(ts_ms, 0) FROM audit_events"
+    } else {
+        "SELECT COALESCE(event, ''), 0 FROM audit_events"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(event, ts_ms)| {
+            event.starts_with("RISK_KILL_") && (!has_ts_ms || *ts_ms >= since_ms)
+        })
+        .count() as u32)
+}
+
 fn parse_trade_timestamp_ms(raw: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
@@ -3429,6 +3739,7 @@ fn promote_primary_live(
     selected: &[SelectionCandidate],
     paper_deployments: &[DeploymentEvent],
     deployment: &DeploymentSettings,
+    live_governance: &LiveGovernanceSettings,
 ) -> Result<LivePromotionEvent> {
     let primary_role = selected
         .iter()
@@ -3444,25 +3755,11 @@ fn promote_primary_live(
         .ok_or_else(|| anyhow!("missing primary paper deployment artefact"))?;
 
     let source_config_path = PathBuf::from(&primary_candidate.config_path);
-    let promoted_config_path = if primary_paper.promoted_config_path.trim().is_empty() {
-        PathBuf::from(&primary_paper.source_config_path)
-    } else {
-        PathBuf::from(&primary_paper.promoted_config_path)
-    };
-    let promoted_text = fs::read_to_string(&promoted_config_path).with_context(|| {
-        format!(
-            "read promoted live candidate {}",
-            promoted_config_path.display()
-        )
-    })?;
-    serde_yaml::from_str::<serde_yaml::Value>(&promoted_text).with_context(|| {
-        format!(
-            "parse promoted live candidate YAML {}",
-            promoted_config_path.display()
-        )
-    })?;
-
+    let source_document = read_yaml_document(&source_config_path)?;
+    let promoted_config_path = PathBuf::from(&primary_paper.promoted_config_path);
     let live_yaml_path = resolve_under_project(project_dir, &deployment.live_yaml_path);
+    let live_db_path = resolve_under_project(project_dir, &live_governance.live_db_path);
+    let state_path = live_governance_state_path(project_dir, live_governance);
     let current_live_text = if live_yaml_path.is_file() {
         let text = fs::read_to_string(&live_yaml_path)
             .with_context(|| format!("read current live YAML {}", live_yaml_path.display()))?;
@@ -3472,21 +3769,6 @@ fn promote_primary_live(
     } else {
         None
     };
-    let current_interval = current_live_text
-        .as_deref()
-        .map(load_yaml_engine_interval)
-        .unwrap_or_default();
-    let promoted_interval = load_yaml_engine_interval(&promoted_text);
-    let restart_required = current_interval != promoted_interval
-        && !current_interval.is_empty()
-        && !promoted_interval.is_empty();
-    if restart_required && !deployment.restart_live_service {
-        bail!(
-            "live promotion changes engine.interval ({} -> {}) but restart_live_service=false",
-            current_interval,
-            promoted_interval
-        );
-    }
     let live_service_was_active = if deployment.restart_live_service {
         user_service_is_active(deployment.live_service.as_str())?
     } else {
@@ -3497,10 +3779,230 @@ fn promote_primary_live(
     fs::create_dir_all(&deploy_root)
         .with_context(|| format!("create {}", deploy_root.display()))?;
     let deploy_stamp = unique_utc_stamp(Utc::now());
-    let deploy_dir = deploy_root.join(format!("manual_switch_{}_primary", deploy_stamp));
+    let deploy_dir = deploy_root.join(format!("governed_switch_{}_primary", deploy_stamp));
     fs::create_dir_all(&deploy_dir).with_context(|| format!("create {}", deploy_dir.display()))?;
 
-    let promoted_payload = format!("{}\n", promoted_text.trim_end());
+    let mut live_state = load_live_governance_state(project_dir, live_governance)?;
+    let current_live_config_id =
+        if live_state.is_none() && current_live_text.is_some() && live_yaml_path.is_file() {
+            current_target_config_id(&live_yaml_path, "primary")?
+        } else {
+            None
+        };
+    if live_state.is_none()
+        && current_live_config_id.as_deref() == Some(primary_role.config_id.as_str())
+    {
+        let bootstrap_config_id = current_target_config_id(&live_yaml_path, "primary")?
+            .ok_or_else(|| anyhow!("missing current live config fingerprint"))?;
+        let bootstrap_state = LiveGovernanceState {
+            version: "factory_live_governance_v1".to_string(),
+            role: "primary".to_string(),
+            config_id: bootstrap_config_id.clone(),
+            manifest_config_id: bootstrap_config_id.clone(),
+            manifest_config_sha256: file_sha256_hex(&live_yaml_path)?,
+            config_sha256: file_sha256_hex(&live_yaml_path)?,
+            state: "live_full".to_string(),
+            ramp_stage: 3,
+            exposure_factor: stage_exposure_factor(live_governance, 3),
+            source_config_path: live_yaml_path.display().to_string(),
+            manifest_path: live_yaml_path.display().to_string(),
+            live_yaml_path: live_yaml_path.display().to_string(),
+            live_db_path: live_db_path.display().to_string(),
+            started_at_ms: Utc::now().timestamp_millis(),
+            stage_started_at_ms: Utc::now().timestamp_millis(),
+            updated_at_ms: Utc::now().timestamp_millis(),
+            last_transition_reason: "bootstrap_from_existing_live_yaml".to_string(),
+            last_transition_by_run_id: run_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("bootstrap")
+                .to_string(),
+        };
+        write_live_governance_state(project_dir, live_governance, &bootstrap_state)?;
+        live_state = Some(bootstrap_state);
+    }
+
+    let governance_summary = live_state
+        .as_ref()
+        .map(|state| {
+            build_live_governance_summary(
+                &live_db_path,
+                state.config_id.as_str(),
+                state.started_at_ms,
+                live_governance,
+            )
+        })
+        .transpose()?;
+    let now_ms = Utc::now().timestamp_millis();
+
+    let (next_state, next_stage, exposure_factor, transition_reason, apply_manifest, paused) =
+        match live_state.as_ref() {
+            None => (
+                "live_small".to_string(),
+                1,
+                stage_exposure_factor(live_governance, 1),
+                "paper_gate_pass".to_string(),
+                true,
+                false,
+            ),
+            Some(state)
+                if state.config_id != primary_role.config_id
+                    && governance_summary
+                        .as_ref()
+                        .is_some_and(|summary| summary.should_pause) =>
+            {
+                (
+                    "live_small".to_string(),
+                    1,
+                    stage_exposure_factor(live_governance, 1),
+                    format!(
+                        "replace_after_{}",
+                        governance_summary
+                            .as_ref()
+                            .and_then(|summary| summary.pause_reason.clone())
+                            .unwrap_or_else(|| "rotation".to_string())
+                    ),
+                    true,
+                    false,
+                )
+            }
+            Some(state) if state.config_id != primary_role.config_id => (
+                state.state.clone(),
+                state.ramp_stage,
+                state.exposure_factor,
+                "live_incumbent_holds".to_string(),
+                false,
+                false,
+            ),
+            Some(state)
+                if governance_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.should_pause) =>
+            {
+                (
+                    "paused".to_string(),
+                    state.ramp_stage,
+                    0.0,
+                    governance_summary
+                        .as_ref()
+                        .and_then(|summary| summary.pause_reason.clone())
+                        .unwrap_or_else(|| "rotation".to_string()),
+                    true,
+                    true,
+                )
+            }
+            Some(state) if state.state == "paused" => (
+                "live_small".to_string(),
+                1,
+                stage_exposure_factor(live_governance, 1),
+                "resume_after_paper_gate".to_string(),
+                true,
+                false,
+            ),
+            Some(state)
+                if state.state == "live_small"
+                    && state.ramp_stage < 3
+                    && (now_ms - state.stage_started_at_ms) as f64 / 3_600_000.0
+                        >= live_governance.min_stage_hours =>
+            {
+                let next_stage = state.ramp_stage + 1;
+                (
+                    if next_stage >= 3 {
+                        "live_full".to_string()
+                    } else {
+                        "live_small".to_string()
+                    },
+                    next_stage,
+                    stage_exposure_factor(live_governance, next_stage),
+                    format!("ramp_advance_to_stage_{next_stage}"),
+                    true,
+                    false,
+                )
+            }
+            Some(state) => (
+                state.state.clone(),
+                state.ramp_stage,
+                state.exposure_factor,
+                "live_state_hold".to_string(),
+                false,
+                false,
+            ),
+        };
+
+    let manifest_path = deploy_dir.join(format!("stage_{}.yaml", next_stage));
+    let live_snapshot = snapshot_target(&live_yaml_path)?;
+    let state_snapshot = snapshot_target(&state_path)?;
+
+    if !apply_manifest {
+        let current_state =
+            live_state.ok_or_else(|| anyhow!("missing current live governance state"))?;
+        let event = serde_json::json!({
+            "version": "factory_live_promotion_v2",
+            "source": "aiq-factory",
+            "ts_utc": iso_utc_now(),
+            "run_dir": run_dir.display().to_string(),
+            "role": primary_role.role,
+            "config_id": primary_role.config_id,
+            "live_state": current_state.state,
+            "ramp_stage": current_state.ramp_stage,
+            "exposure_factor": current_state.exposure_factor,
+            "transition_reason": transition_reason,
+            "live_yaml_path": live_yaml_path.display().to_string(),
+            "live_db_path": live_db_path.display().to_string(),
+        });
+        write_json(&deploy_dir.join("promotion_event.json"), &event)?;
+        return Ok(LivePromotionEvent {
+            role: primary_role.role.clone(),
+            config_id: primary_role.config_id.clone(),
+            manifest_config_id: current_state.manifest_config_id.clone(),
+            source_config_path: source_config_path.display().to_string(),
+            promoted_config_path: promoted_config_path.display().to_string(),
+            manifest_path: current_state.manifest_path.clone(),
+            state_path: state_path.display().to_string(),
+            live_yaml_path: live_yaml_path.display().to_string(),
+            live_service: deployment.live_service.clone(),
+            deployment_dir: deploy_dir.display().to_string(),
+            service_was_active_before: live_service_was_active,
+            restarted_service: false,
+            restart_required: false,
+            live_state: current_state.state,
+            ramp_stage: current_state.ramp_stage,
+            exposure_factor: current_state.exposure_factor,
+            transition_reason,
+            status: "held".to_string(),
+        });
+    }
+
+    let (manifest_document, manifest_config_id, manifest_config_sha256) =
+        build_live_manifest_document(&source_document, exposure_factor, paused)?;
+    let manifest_header = format!(
+        "# Generated by aiq-factory at {}\n# Role: primary\n# Source: {}\n# Live state: {}\n# Ramp stage: {}\n# Exposure factor: {:.2}\n# Reason: {}\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        source_config_path.display(),
+        next_state,
+        next_stage,
+        exposure_factor,
+        transition_reason,
+    );
+    write_yaml_document(&manifest_path, manifest_header, &manifest_document)?;
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let current_interval = current_live_text
+        .as_deref()
+        .map(load_yaml_engine_interval)
+        .unwrap_or_default();
+    let promoted_interval = load_yaml_engine_interval(&manifest_text);
+    let restart_required = current_interval != promoted_interval
+        && !current_interval.is_empty()
+        && !promoted_interval.is_empty();
+    if restart_required && !deployment.restart_live_service {
+        bail!(
+            "live promotion changes engine.interval ({} -> {}) but restart_live_service=false",
+            current_interval,
+            promoted_interval
+        );
+    }
+    let promoted_payload = format!("{}\n", manifest_text.trim_end());
     fs::write(deploy_dir.join("promoted_config.yaml"), &promoted_payload).with_context(|| {
         format!(
             "write {}",
@@ -3513,7 +4015,6 @@ fn promote_primary_live(
     )
     .with_context(|| format!("write {}", deploy_dir.join("prev_config.yaml").display()))?;
 
-    let live_snapshot = snapshot_target(&live_yaml_path)?;
     let promotion_result: Result<LivePromotionEvent> = (|| {
         atomic_write_text(&live_yaml_path, &promoted_payload)?;
         let restarted_service = if deployment.restart_live_service {
@@ -3521,42 +4022,98 @@ fn promote_primary_live(
         } else {
             false
         };
+        let state = LiveGovernanceState {
+            version: "factory_live_governance_v1".to_string(),
+            role: "primary".to_string(),
+            config_id: primary_role.config_id.clone(),
+            manifest_config_id: manifest_config_id.clone(),
+            manifest_config_sha256: manifest_config_sha256.clone(),
+            config_sha256: primary_candidate.config_sha256.clone(),
+            state: next_state.clone(),
+            ramp_stage: next_stage,
+            exposure_factor,
+            source_config_path: source_config_path.display().to_string(),
+            manifest_path: manifest_path.display().to_string(),
+            live_yaml_path: live_yaml_path.display().to_string(),
+            live_db_path: live_db_path.display().to_string(),
+            started_at_ms: live_state
+                .as_ref()
+                .map(|state| {
+                    if state.config_id == primary_role.config_id {
+                        state.started_at_ms
+                    } else {
+                        now_ms
+                    }
+                })
+                .unwrap_or(now_ms),
+            stage_started_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            last_transition_reason: transition_reason.clone(),
+            last_transition_by_run_id: run_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("run")
+                .to_string(),
+        };
+        write_live_governance_state(project_dir, live_governance, &state)?;
         let event = serde_json::json!({
-            "version": "factory_live_promotion_v1",
+            "version": "factory_live_promotion_v2",
             "source": "aiq-factory",
             "ts_utc": iso_utc_now(),
             "run_dir": run_dir.display().to_string(),
             "selection_policy": DEFAULT_SELECTION_POLICY,
             "role": primary_role.role,
             "config_id": primary_role.config_id,
+            "manifest_config_id": manifest_config_id,
             "source_config_path": source_config_path.display().to_string(),
             "promoted_config_path": promoted_config_path.display().to_string(),
+            "manifest_path": manifest_path.display().to_string(),
+            "state_path": state_path.display().to_string(),
             "live_yaml_path": live_yaml_path.display().to_string(),
+            "live_db_path": live_db_path.display().to_string(),
             "live_service": deployment.live_service,
             "service_was_active_before": live_service_was_active,
             "restart_required": restart_required,
             "restarted_service": restarted_service,
+            "live_state": next_state,
+            "ramp_stage": next_stage,
+            "exposure_factor": exposure_factor,
+            "transition_reason": transition_reason,
+            "paused": paused,
         });
         write_json(&deploy_dir.join("promotion_event.json"), &event)?;
         Ok(LivePromotionEvent {
             role: primary_role.role.clone(),
             config_id: primary_role.config_id.clone(),
+            manifest_config_id,
             source_config_path: source_config_path.display().to_string(),
             promoted_config_path: promoted_config_path.display().to_string(),
+            manifest_path: manifest_path.display().to_string(),
+            state_path: state_path.display().to_string(),
             live_yaml_path: live_yaml_path.display().to_string(),
             live_service: deployment.live_service.clone(),
             deployment_dir: deploy_dir.display().to_string(),
             service_was_active_before: live_service_was_active,
             restarted_service,
             restart_required,
-            status: "applied".to_string(),
+            live_state: state.state,
+            ramp_stage: state.ramp_stage,
+            exposure_factor: state.exposure_factor,
+            transition_reason: state.last_transition_reason,
+            status: if paused {
+                "paused".to_string()
+            } else if next_stage >= 3 {
+                "live_full".to_string()
+            } else {
+                format!("live_small_stage_{}", next_stage)
+            },
         })
     })();
 
     match promotion_result {
         Ok(event) => Ok(event),
         Err(err) => {
-            rollback_target_snapshots(&[live_snapshot])?;
+            rollback_target_snapshots(&[live_snapshot, state_snapshot])?;
             if should_restart_live_service_after_rollback(
                 deployment.restart_live_service,
                 live_service_was_active,
@@ -4283,6 +4840,10 @@ symbols:
         project_dir.join(DEFAULT_PRIMARY_PAPER_DB_PATH)
     }
 
+    fn live_governance_db(project_dir: &Path) -> PathBuf {
+        project_dir.join(DEFAULT_LIVE_DB_PATH)
+    }
+
     fn paper_funding_db(project_dir: &Path) -> PathBuf {
         project_dir.join("funding_rates.db")
     }
@@ -4957,14 +5518,25 @@ symbols:
             &selected,
             &paper_deployments,
             &deployment,
+            &LiveGovernanceSettings::default(),
         )
         .unwrap();
 
         assert_eq!(event.role, "primary");
-        assert_eq!(event.status, "applied");
+        assert_eq!(event.status, "live_small_stage_1");
+        assert_eq!(event.live_state, "live_small");
+        assert_eq!(event.ramp_stage, 1);
+        assert!((event.exposure_factor - 0.25).abs() < 1e-9);
         assert!(!event.service_was_active_before);
         assert!(!event.restarted_service);
-        assert_eq!(fs::read_to_string(&live_yaml).unwrap(), config_yaml("30m"));
+        let live_yaml_text = fs::read_to_string(&live_yaml).unwrap();
+        let live_document: serde_yaml::Value = serde_yaml::from_str(&live_yaml_text).unwrap();
+        let live_cfg = load_config_document_checked(&live_document, None, false, None)
+            .map_err(|err| anyhow!(err))
+            .unwrap();
+        assert!((live_cfg.trade.allocation_pct - 0.0075).abs() < 1e-9);
+        assert!(Path::new(&event.manifest_path).is_file());
+        assert!(Path::new(&event.state_path).is_file());
         assert!(Path::new(&event.deployment_dir)
             .join("promoted_config.yaml")
             .is_file());
@@ -4974,6 +5546,203 @@ symbols:
         assert!(Path::new(&event.deployment_dir)
             .join("promotion_event.json")
             .is_file());
+    }
+
+    #[test]
+    fn promote_primary_live_advances_existing_live_small_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let artifacts_root = project_dir.join("artifacts");
+        let run_dir = artifacts_root.join("2026-03-14").join("run_nightly_test");
+        fs::create_dir_all(run_dir.join("promoted_configs")).unwrap();
+
+        let live_yaml = project_dir
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        fs::create_dir_all(live_yaml.parent().unwrap()).unwrap();
+        fs::write(&live_yaml, config_yaml("30m")).unwrap();
+
+        let source_config = run_dir.join("configs").join("candidate_primary.yaml");
+        fs::create_dir_all(source_config.parent().unwrap()).unwrap();
+        fs::write(&source_config, config_yaml("30m")).unwrap();
+
+        let promoted_config = run_dir.join("promoted_configs").join("primary.yaml");
+        fs::write(&promoted_config, config_yaml("30m")).unwrap();
+
+        let validated = vec![ValidationItem {
+            config_path: source_config.display().to_string(),
+            ..validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)
+        }];
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: "cfg-primary".to_string(),
+        }];
+        let paper_deployments = vec![DeploymentEvent {
+            role: "primary".to_string(),
+            slot: 1,
+            source_config_path: source_config.display().to_string(),
+            config_id: "cfg-primary".to_string(),
+            config_sha256: "cfg-primary".to_string(),
+            promoted_config_path: promoted_config.display().to_string(),
+            target_yaml_path: project_dir
+                .join("config")
+                .join("strategy_overrides.paper1.yaml")
+                .display()
+                .to_string(),
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            soak_marker_path: None,
+            restarted_service: false,
+            status: "applied".to_string(),
+        }];
+        let deployment = DeploymentSettings {
+            apply_to_paper: true,
+            restart_services: false,
+            apply_to_live: true,
+            restart_live_service: false,
+            live_yaml_path: PathBuf::from("config/strategy_overrides.live.yaml"),
+            live_service: "openclaw-ai-quant-live-v8".to_string(),
+        };
+        let live_governance = LiveGovernanceSettings::default();
+        let state = LiveGovernanceState {
+            version: "factory_live_governance_v1".to_string(),
+            role: "primary".to_string(),
+            config_id: "cfg-primary".to_string(),
+            manifest_config_id: "cfg-primary-stage1".to_string(),
+            manifest_config_sha256: "cfg-primary-stage1".to_string(),
+            config_sha256: "cfg-primary".to_string(),
+            state: "live_small".to_string(),
+            ramp_stage: 1,
+            exposure_factor: 0.25,
+            source_config_path: source_config.display().to_string(),
+            manifest_path: promoted_config.display().to_string(),
+            live_yaml_path: live_yaml.display().to_string(),
+            live_db_path: live_governance_db(project_dir).display().to_string(),
+            started_at_ms: parse_trade_timestamp_ms("2026-03-10T00:00:00Z").unwrap(),
+            stage_started_at_ms: parse_trade_timestamp_ms("2026-03-10T00:00:00Z").unwrap(),
+            updated_at_ms: parse_trade_timestamp_ms("2026-03-10T00:00:00Z").unwrap(),
+            last_transition_reason: "paper_gate_pass".to_string(),
+            last_transition_by_run_id: "run-old".to_string(),
+        };
+        write_live_governance_state(project_dir, &live_governance, &state).unwrap();
+
+        let event = promote_primary_live(
+            project_dir,
+            &artifacts_root,
+            &run_dir,
+            &validated,
+            &selected,
+            &paper_deployments,
+            &deployment,
+            &live_governance,
+        )
+        .unwrap();
+
+        assert_eq!(event.status, "live_small_stage_2");
+        assert_eq!(event.live_state, "live_small");
+        assert_eq!(event.ramp_stage, 2);
+        assert!((event.exposure_factor - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn promote_primary_live_holds_existing_live_incumbent_without_rotation_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let artifacts_root = project_dir.join("artifacts");
+        let run_dir = artifacts_root.join("2026-03-14").join("run_nightly_test");
+        fs::create_dir_all(run_dir.join("promoted_configs")).unwrap();
+
+        let live_yaml = project_dir
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        fs::create_dir_all(live_yaml.parent().unwrap()).unwrap();
+        fs::write(&live_yaml, config_yaml("30m")).unwrap();
+
+        let source_config = run_dir.join("configs").join("candidate_primary.yaml");
+        fs::create_dir_all(source_config.parent().unwrap()).unwrap();
+        fs::write(&source_config, config_yaml("30m")).unwrap();
+
+        let promoted_config = run_dir.join("promoted_configs").join("primary.yaml");
+        fs::write(&promoted_config, config_yaml("30m")).unwrap();
+
+        let validated = vec![ValidationItem {
+            config_path: source_config.display().to_string(),
+            ..validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)
+        }];
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: "cfg-primary".to_string(),
+        }];
+        let paper_deployments = vec![DeploymentEvent {
+            role: "primary".to_string(),
+            slot: 1,
+            source_config_path: source_config.display().to_string(),
+            config_id: "cfg-primary".to_string(),
+            config_sha256: "cfg-primary".to_string(),
+            promoted_config_path: promoted_config.display().to_string(),
+            target_yaml_path: project_dir
+                .join("config")
+                .join("strategy_overrides.paper1.yaml")
+                .display()
+                .to_string(),
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            soak_marker_path: None,
+            restarted_service: false,
+            status: "applied".to_string(),
+        }];
+        let deployment = DeploymentSettings {
+            apply_to_paper: true,
+            restart_services: false,
+            apply_to_live: true,
+            restart_live_service: false,
+            live_yaml_path: PathBuf::from("config/strategy_overrides.live.yaml"),
+            live_service: "openclaw-ai-quant-live-v8".to_string(),
+        };
+        let live_governance = LiveGovernanceSettings::default();
+        let state = LiveGovernanceState {
+            version: "factory_live_governance_v1".to_string(),
+            role: "primary".to_string(),
+            config_id: "cfg-live-incumbent".to_string(),
+            manifest_config_id: "cfg-live-incumbent-stage3".to_string(),
+            manifest_config_sha256: "cfg-live-incumbent-stage3".to_string(),
+            config_sha256: "cfg-live-incumbent".to_string(),
+            state: "live_full".to_string(),
+            ramp_stage: 3,
+            exposure_factor: 1.0,
+            source_config_path: live_yaml.display().to_string(),
+            manifest_path: live_yaml.display().to_string(),
+            live_yaml_path: live_yaml.display().to_string(),
+            live_db_path: live_governance_db(project_dir).display().to_string(),
+            started_at_ms: parse_trade_timestamp_ms("2026-03-14T00:00:00Z").unwrap(),
+            stage_started_at_ms: parse_trade_timestamp_ms("2026-03-14T00:00:00Z").unwrap(),
+            updated_at_ms: parse_trade_timestamp_ms("2026-03-14T00:00:00Z").unwrap(),
+            last_transition_reason: "bootstrap_from_existing_live_yaml".to_string(),
+            last_transition_by_run_id: "run-old".to_string(),
+        };
+        write_live_governance_state(project_dir, &live_governance, &state).unwrap();
+
+        let event = promote_primary_live(
+            project_dir,
+            &artifacts_root,
+            &run_dir,
+            &validated,
+            &selected,
+            &paper_deployments,
+            &deployment,
+            &live_governance,
+        )
+        .unwrap();
+
+        assert_eq!(event.status, "held");
+        assert_eq!(event.live_state, "live_full");
+        assert_eq!(fs::read_to_string(&live_yaml).unwrap(), config_yaml("30m"));
     }
 
     #[test]

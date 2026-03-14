@@ -45,6 +45,9 @@ All must be met:
 | 2 | 50% of target | 1 day | No kill-switch triggers |
 | 3 | 100% of target | — | Steady state |
 
+The factory enforces the ramp by generating stage-specific live manifests rather
+than editing the steady-state config in place.
+
 Step down or pause immediately if any kill-switch fires during ramp.
 
 ## Rotation Criteria (When to Retire a Config)
