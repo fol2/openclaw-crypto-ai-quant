@@ -495,6 +495,35 @@ FROM runtime_sync_cursors;
 mutable row back to the append-only run header. `runtime_sync_cursors.last_run_id`
 records which successful run advanced the cursor.
 
+`runtime_account_snapshots.account_snapshot_event_id` now points to the
+append-only `exchange_account_snapshot_events` row captured from the same
+`clearinghouseState` observation. Use that link when you need the raw payload
+JSON, stable digest, wallet identity, or shared observation timestamp behind
+the latest mutable account snapshot:
+
+```bash
+sqlite3 "$PWD/trading_engine_v8_live.db" "
+SELECT
+  s.ts_ms,
+  s.timestamp,
+  s.sync_run_id,
+  s.account_snapshot_event_id,
+  e.payload_digest,
+  e.request_type,
+  e.wallet_address
+FROM runtime_account_snapshots AS s
+JOIN exchange_account_snapshot_events AS e
+  ON e.id = s.account_snapshot_event_id
+ORDER BY s.ts_ms DESC, s.id DESC
+LIMIT 1;
+"
+```
+
+The append-only evidence row is written before the run decides whether to
+refresh the mutable current snapshot tables, so failed or degraded runs still
+leave behind the captured account payload even when `runtime_account_snapshots`
+is not updated.
+
 ## Diagnostics
 
 ```bash
