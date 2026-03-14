@@ -1200,6 +1200,9 @@ mod tests {
                     source_ip: None,
                     user_agent: None,
                 },
+                request_id: None,
+                requester: None,
+                approver: None,
                 reason: Some("deploy".to_string()),
                 validation: json!({ "ok": true }),
                 before: ConfigAuditIdentity {

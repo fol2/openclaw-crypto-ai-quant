@@ -55,17 +55,24 @@ Progress recorded on 2026-03-14:
   config audit events, added a `GET /api/config/audit` read surface, and moved
   monitor `since_config` attribution from YAML file `mtime` to deployed
   `config_id` boundaries.
-- PR 8 implementation completed on 2026-03-14
+- PR 8 completed and merged as `#1018`
   (`hub: add sensitive metadata redaction boundaries`).
   This default-redacted raw config, config diff, config audit, system logs, and
   path-bearing system/monitor metadata, introduced explicit privileged raw
   routes for diagnostics, and appended privileged diagnostic reads to a
-  dedicated audit ledger. At the time of this documentation pass the PR is
-  implementation-complete on branch
-  `codex/shared-config-pr8-redaction-boundaries` and is awaiting the required
-  review / merge flow.
+  dedicated audit ledger.
+- PR 9 implementation completed on 2026-03-14
+  (`hub: add financial-grade maker-checker approvals`).
+  This introduced distinct `viewer` / `editor` / `approver` token boundaries,
+  moved save-only config writes under `editor` auth, replaced direct live apply
+  / rollback execution with durable pending approval requests, added approver
+  approve/reject routes plus a pending request list surface, and extended audit
+  events so high-risk live mutations record both requester and approver actors.
+  At the time of this documentation pass the PR is implementation-complete on
+  branch `codex/shared-config-pr9-maker-checker-v2` and is awaiting the
+  required review / merge flow.
 
-Sequence status after merged PR 7 and the current PR 8 implementation pass:
+Sequence status after merged PR 8 and the current PR 9 implementation pass:
 
 - PR 1: complete
 - PR 2: complete
@@ -74,8 +81,8 @@ Sequence status after merged PR 7 and the current PR 8 implementation pass:
 - PR 6: complete
 - PR 4: complete
 - PR 7: complete
-- PR 8: implementation complete; review / merge pending
-- PR 9: pending
+- PR 8: complete
+- PR 9: implementation complete; review / merge pending
 
 ## Current Stage
 
@@ -85,18 +92,18 @@ Current execution stage as of 2026-03-14:
 - PR 6 is merged and closed.
 - PR 4 is merged and closed.
 - PR 7 is merged and closed.
-- PR 8 implementation is complete and the documentation pass is now describing
-  the post-change redaction contract rather than an open metadata leak.
-- Sensitive operational metadata is now redacted on default config/system/
-  monitor reads, explicit raw routes are privileged and auditable, and
-  privileged diagnostics append read events to `artifacts/diagnostic_audit/`.
-- PR 9 (`Add financial-grade approval workflow and role separation`) becomes
-  the next active implementation stage once PR 8 finishes review and merge.
+- PR 8 is merged and closed.
+- PR 9 implementation is complete and the documentation pass is now describing
+  the post-change maker-checker contract rather than one undifferentiated live
+  mutation bearer.
+- `editor` and `approver` permissions are now distinct, live apply / rollback
+  move through a durable pending approval store, and high-risk live mutation
+  audit events now carry both requester and approver actors.
 
 Current blocker:
 
 - None at the documentation-pass stage. The next action is reviewer coverage
-  for PR 8, followed by merge and cleanup before opening PR 9.
+  for PR 9, followed by merge and cleanup to close this active plan.
 
 ## Objective
 
@@ -243,18 +250,16 @@ The current branch now:
 - appends privileged diagnostics reads to
   `artifacts/diagnostic_audit/read_events.jsonl`
 
-### 8. Governance workflow is not yet financial-grade
+### 8. Governance workflow is now implemented
 
-The system does not yet separate read-only access, config editing, and live
-approval duties. There is no maker-checker or dual-control boundary for the
-highest-risk live mutations.
+This gap is closed in the current PR 9 implementation branch.
 
-Required outcome:
+The current branch now:
 
-- role separation exists at minimum for viewer, config editor, and live
-  approver responsibilities
-- live rollback or live-cutover actions require stronger approval semantics than
-  read-only monitoring
+- separates `viewer`, `editor`, and `approver` auth boundaries
+- requires live apply / rollback to move through a durable pending approval
+  request before execution
+- records both requester and approver actors for high-risk live mutations
 
 ## Guardrails
 

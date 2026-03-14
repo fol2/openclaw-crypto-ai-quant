@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue},
     middleware,
     response::{IntoResponse, Response},
@@ -17,6 +17,10 @@ use std::time::Duration;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::config_approval::{
+    create_request as create_config_approval_request, list_pending_requests, load_for_processing,
+    mark_approved, mark_failed, mark_rejected, ConfigApprovalAction,
+};
 use crate::config_audit::{
     append_event as append_config_audit_ledger_event, read_recent_events, weak_actor_from_headers,
     ConfigAuditEvent, ConfigAuditIdentity, ConfigAuditQuery,
@@ -74,6 +78,16 @@ pub struct ApplyLiveBody {
     pub reason: Option<String>,
     pub restart: Option<String>,
     pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigApprovalDecisionBody {
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigApprovalListQuery {
+    pub status: Option<String>,
 }
 
 /// A single backup entry.
@@ -221,6 +235,26 @@ struct LiveConfigTransactionInput<'a> {
     extra_event_details: Value,
 }
 
+struct PreparedLiveApply {
+    current: ResolvedConfigState,
+    incumbent: ValidatedConfigWrite,
+    candidate: ValidatedConfigWrite,
+    reason: String,
+    restart_mode: LiveApplyRestartMode,
+    preview_restart_required: bool,
+}
+
+struct PreparedLiveRollback {
+    steps: usize,
+    src_dir: PathBuf,
+    restored_from: PathBuf,
+    current: ResolvedConfigState,
+    incumbent: ValidatedConfigWrite,
+    restored: ValidatedConfigWrite,
+    reason: String,
+    restart_mode: LiveApplyRestartMode,
+}
+
 struct StagedConfig {
     root: PathBuf,
     path: PathBuf,
@@ -279,7 +313,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/config/audit", get(get_config_audit))
         .route("/api/config/diff", get(get_config_diff))
         .route("/api/config/files", get(get_config_files));
-    let mutation_routes = Router::new()
+    let admin_routes = Router::new()
         .route("/api/config/raw/privileged", get(get_config_raw_privileged))
         .route(
             "/api/config/audit/privileged",
@@ -289,17 +323,49 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/api/config/diff/privileged",
             get(get_config_diff_privileged),
         )
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+    let editor_routes = Router::new()
         .route("/api/config", put(put_config))
         .route("/api/config/reload", post(post_config_reload))
-        .route("/api/config/actions/apply-live", post(post_apply_live))
-        .route("/api/config/actions/promote-live", post(post_promote_live))
+        .route(
+            "/api/config/actions/apply-live",
+            post(post_preview_apply_live),
+        )
+        .route(
+            "/api/config/actions/apply-live/request",
+            post(post_request_apply_live),
+        )
         .route(
             "/api/config/actions/rollback-live",
-            post(post_rollback_live),
+            post(post_preview_rollback_live),
         )
-        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+        .route(
+            "/api/config/actions/rollback-live/request",
+            post(post_request_rollback_live),
+        )
+        .route_layer(middleware::from_fn(crate::auth::require_editor_auth));
+    let approval_read_routes = Router::new()
+        .route("/api/config/approvals", get(get_config_approvals))
+        .route_layer(middleware::from_fn(
+            crate::auth::require_editor_or_approver_auth,
+        ));
+    let approver_routes = Router::new()
+        .route(
+            "/api/config/approvals/{request_id}/approve",
+            post(post_approve_config_approval),
+        )
+        .route(
+            "/api/config/approvals/{request_id}/reject",
+            post(post_reject_config_approval),
+        )
+        .route("/api/config/actions/promote-live", post(post_promote_live))
+        .route_layer(middleware::from_fn(crate::auth::require_approver_auth));
 
-    read_routes.merge(mutation_routes)
+    read_routes
+        .merge(admin_routes)
+        .merge(editor_routes)
+        .merge(approval_read_routes)
+        .merge(approver_routes)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -683,6 +749,13 @@ fn append_diagnostic_read_audit(
     Ok(())
 }
 
+fn actor_from_headers(
+    headers: &HeaderMap,
+    auth_scope: &str,
+) -> crate::config_audit::ConfigAuditActor {
+    weak_actor_from_headers(headers, auth_scope)
+}
+
 fn summarise_runtime_apply_result(result: &Value) -> Value {
     let parsed = result.get("parsed");
     json!({
@@ -741,7 +814,7 @@ fn normalise_reason(reason: Option<&str>) -> Option<String> {
 
 fn append_config_audit_event(
     state: &AppState,
-    headers: &HeaderMap,
+    actor: crate::config_audit::ConfigAuditActor,
     file_variant: &str,
     action: &str,
     reason: Option<&str>,
@@ -752,6 +825,9 @@ fn append_config_audit_event(
     validation: Value,
     result: Value,
     artifact_path: Option<&str>,
+    request_id: Option<&str>,
+    requester: Option<crate::config_audit::ConfigAuditActor>,
+    approver: Option<crate::config_audit::ConfigAuditActor>,
 ) -> Result<(), HubError> {
     let event = ConfigAuditEvent {
         version: "config_audit_event_v1".to_string(),
@@ -760,7 +836,10 @@ fn append_config_audit_event(
         lane: file_variant.to_string(),
         file_variant: file_variant.to_string(),
         action: action.to_string(),
-        actor: weak_actor_from_headers(headers, "admin_token"),
+        actor,
+        request_id: request_id.map(ToOwned::to_owned),
+        requester,
+        approver,
         reason: normalise_reason(reason),
         validation,
         before: ConfigAuditIdentity {
@@ -1041,6 +1120,276 @@ async fn execute_live_config_transaction(
     })
 }
 
+fn prepare_live_apply(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &ApplyLiveBody,
+) -> Result<PreparedLiveApply, HubError> {
+    let _: Value = serde_yaml::from_str(&body.yaml)
+        .map_err(|err| HubError::BadRequest(format!("invalid YAML: {err}")))?;
+    let restart_mode = LiveApplyRestartMode::parse(body.restart.as_deref())?;
+    let reason = body.reason.clone().unwrap_or_default().trim().to_string();
+    let current = resolve_current_config_state(state, "live")?;
+    let expected_config_id =
+        extract_expected_config_id_value(headers, body.expected_config_id.as_deref())?;
+    if expected_config_id != current.lock_id {
+        return Err(HubError::Conflict(format!(
+            "stale config write for live: expected {expected_config_id} but current config is {}",
+            current.lock_id
+        )));
+    }
+    let incumbent = validate_candidate_config_write(
+        state,
+        "live",
+        &state.config.live_yaml_path,
+        &current.raw_text,
+    )?;
+    let candidate =
+        validate_candidate_config_write(state, "live", &state.config.live_yaml_path, &body.yaml)?;
+    let preview_restart_required = candidate.config_id != incumbent.config_id;
+    Ok(PreparedLiveApply {
+        current,
+        incumbent,
+        candidate,
+        reason,
+        restart_mode,
+        preview_restart_required,
+    })
+}
+
+fn prepare_live_rollback(
+    state: &AppState,
+    body: &RollbackLiveBody,
+) -> Result<PreparedLiveRollback, HubError> {
+    let steps = body.steps.unwrap_or(1).max(1) as usize;
+    let restart_mode = LiveApplyRestartMode::parse(body.restart.as_deref())?;
+    let reason = body.reason.clone().unwrap_or_default().trim().to_string();
+
+    let deploy_root = state.config.artifacts_dir.join("deployments").join("live");
+    let deploy_dirs = sorted_subdirs_desc(&deploy_root)?;
+    if deploy_dirs.len() < steps {
+        return Err(HubError::BadRequest(format!(
+            "insufficient live deployments for rollback: requested {steps}, available {}",
+            deploy_dirs.len()
+        )));
+    }
+    let src_dir = deploy_dirs[steps - 1].clone();
+    let mut restored_from = src_dir.join("prev_config.yaml");
+    let mut restored_text = fs::read_to_string(&restored_from).unwrap_or_default();
+
+    if restored_text.trim().is_empty() {
+        if let Some(alt_dir) = deploy_dirs.get(steps) {
+            for name in ["promoted_config.yaml", "prev_config.yaml"] {
+                let candidate = alt_dir.join(name);
+                let txt = fs::read_to_string(&candidate).unwrap_or_default();
+                if !txt.trim().is_empty() {
+                    restored_text = txt;
+                    restored_from = candidate;
+                    break;
+                }
+            }
+        }
+    }
+    if restored_text.trim().is_empty() {
+        return Err(HubError::BadRequest("missing rollback config".to_string()));
+    }
+    serde_yaml::from_str::<serde_yaml::Value>(&restored_text)
+        .map_err(|err| HubError::BadRequest(format!("rollback config invalid YAML: {err}")))?;
+
+    let current = resolve_current_config_state(state, "live")?;
+    let incumbent = validate_candidate_config_write(
+        state,
+        "live",
+        &state.config.live_yaml_path,
+        &current.raw_text,
+    )?;
+    let restored = validate_candidate_config_write(
+        state,
+        "live",
+        &state.config.live_yaml_path,
+        &restored_text,
+    )?;
+
+    Ok(PreparedLiveRollback {
+        steps,
+        src_dir,
+        restored_from,
+        current,
+        incumbent,
+        restored,
+        reason,
+        restart_mode,
+    })
+}
+
+async fn execute_live_apply(
+    state: &AppState,
+    headers: &HeaderMap,
+    prepared: PreparedLiveApply,
+    request_id: Option<&str>,
+    requester: Option<crate::config_audit::ConfigAuditActor>,
+    approver: Option<crate::config_audit::ConfigAuditActor>,
+) -> Result<Json<Value>, HubError> {
+    let runtime_action = prepared.restart_mode.runtime_action(false)?;
+    let apply_dir = build_action_dir(&state.config.artifacts_dir.join("applies").join("live"))?;
+    let transaction = execute_live_config_transaction(
+        state,
+        LiveConfigTransactionInput {
+            action_dir: &apply_dir,
+            event_version: "apply_event_v1",
+            action_name: "apply_live",
+            current: &prepared.current,
+            current_config_id: &prepared.incumbent.config_id,
+            candidate_label: "candidate_config.yaml",
+            candidate: &prepared.candidate,
+            reason: &prepared.reason,
+            runtime_action,
+            dry_run: false,
+            extra_event_details: json!({
+                "restart_mode": prepared.restart_mode.as_str(),
+            }),
+        },
+    )
+    .await?;
+
+    let approver_actor = approver
+        .clone()
+        .unwrap_or_else(|| actor_from_headers(headers, "approver_token"));
+    append_config_audit_event(
+        state,
+        approver_actor.clone(),
+        "live",
+        "apply_live",
+        Some(prepared.reason.as_str()),
+        Some(&prepared.current.lock_id),
+        Some(&prepared.incumbent.config_id),
+        Some(&prepared.candidate.lock_id),
+        Some(&prepared.candidate.config_id),
+        json!({
+            "kind": "runtime_validation",
+            "ok": true,
+            "config_id": prepared.candidate.config_id,
+        }),
+        json!({
+            "ok": transaction.ok,
+            "restart_required": transaction.restart_required,
+            "runtime_apply": transaction.runtime_result,
+            "recovery": transaction.restore_result,
+        }),
+        Some(&transaction.action_dir),
+        request_id,
+        requester,
+        Some(approver_actor),
+    )?;
+
+    Ok(Json(json!({
+        "ok": transaction.ok,
+        "action": "apply_live",
+        "backup": transaction.backup,
+        "lock_id": prepared.candidate.lock_id,
+        "config_id": prepared.candidate.config_id,
+        "previous_lock_id": prepared.current.lock_id,
+        "previous_config_id": prepared.incumbent.config_id,
+        "restart_required": transaction.restart_required,
+        "service": state.config.live_service,
+        "artifact_path_redacted": true,
+        "request_id": request_id,
+        "restart": {
+            "mode": prepared.restart_mode.as_str(),
+            "result": summarise_runtime_apply_result(&transaction.runtime_result),
+            "recovery": transaction.restore_result.as_ref().map(summarise_runtime_apply_result),
+        },
+        "error": transaction.error,
+    })))
+}
+
+async fn execute_live_rollback(
+    state: &AppState,
+    headers: &HeaderMap,
+    prepared: PreparedLiveRollback,
+    request_id: Option<&str>,
+    requester: Option<crate::config_audit::ConfigAuditActor>,
+    approver: Option<crate::config_audit::ConfigAuditActor>,
+) -> Result<Json<Value>, HubError> {
+    let runtime_action = prepared.restart_mode.runtime_action(false)?;
+    let rollback_dir =
+        build_action_dir(&state.config.artifacts_dir.join("rollbacks").join("live"))?;
+    let transaction = execute_live_config_transaction(
+        state,
+        LiveConfigTransactionInput {
+            action_dir: &rollback_dir,
+            event_version: "rollback_event_v2",
+            action_name: "rollback_live",
+            current: &prepared.current,
+            current_config_id: &prepared.incumbent.config_id,
+            candidate_label: "restored_config.yaml",
+            candidate: &prepared.restored,
+            reason: &prepared.reason,
+            runtime_action,
+            dry_run: false,
+            extra_event_details: json!({
+                "restart_mode": prepared.restart_mode.as_str(),
+                "steps": prepared.steps,
+                "source_deploy_dir": prepared.src_dir.to_string_lossy().to_string(),
+                "restored_from": prepared.restored_from.to_string_lossy().to_string(),
+            }),
+        },
+    )
+    .await?;
+
+    let approver_actor = approver
+        .clone()
+        .unwrap_or_else(|| actor_from_headers(headers, "approver_token"));
+    append_config_audit_event(
+        state,
+        approver_actor.clone(),
+        "live",
+        "rollback_live",
+        Some(prepared.reason.as_str()),
+        Some(&prepared.current.lock_id),
+        Some(&prepared.incumbent.config_id),
+        Some(&prepared.restored.lock_id),
+        Some(&prepared.restored.config_id),
+        json!({
+            "kind": "runtime_validation",
+            "ok": true,
+            "config_id": prepared.restored.config_id,
+        }),
+        json!({
+            "ok": transaction.ok,
+            "restart_required": transaction.restart_required,
+            "runtime_apply": transaction.runtime_result,
+            "recovery": transaction.restore_result,
+            "steps": prepared.steps,
+        }),
+        Some(&transaction.action_dir),
+        request_id,
+        requester,
+        Some(approver_actor),
+    )?;
+
+    Ok(Json(json!({
+        "ok": transaction.ok,
+        "action": "rollback_live",
+        "backup": transaction.backup,
+        "steps": prepared.steps,
+        "previous_lock_id": prepared.current.lock_id,
+        "previous_config_id": prepared.incumbent.config_id,
+        "restored_lock_id": prepared.restored.lock_id,
+        "restored_config_id": prepared.restored.config_id,
+        "restart_required": transaction.restart_required,
+        "artifact_path_redacted": true,
+        "request_id": request_id,
+        "restart": {
+            "mode": prepared.restart_mode.as_str(),
+            "service": state.config.live_service,
+            "result": summarise_runtime_apply_result(&transaction.runtime_result),
+            "recovery": transaction.restore_result.as_ref().map(summarise_runtime_apply_result),
+        },
+        "error": transaction.error,
+    })))
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 /// GET /api/config — Read YAML file, return as JSON.
@@ -1120,7 +1469,7 @@ async fn put_config(
 
     append_config_audit_event(
         &state,
-        &headers,
+        actor_from_headers(&headers, "editor_token"),
         file_variant,
         "save_config",
         body.reason.as_deref(),
@@ -1137,6 +1486,9 @@ async fn put_config(
             "ok": true,
             "backup": backup_path_str,
         }),
+        None,
+        None,
+        None,
         None,
     )?;
 
@@ -1160,105 +1512,99 @@ async fn post_config_reload(
     )))
 }
 
-/// POST /api/config/actions/apply-live — Transactionally apply a live YAML change and prove runtime health.
+/// POST /api/config/actions/apply-live — Preview a live apply without mutating runtime state.
+async fn post_preview_apply_live(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplyLiveBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+    if !body.dry_run.unwrap_or(false) {
+        return Err(HubError::BadRequest(
+            "direct live apply execution retired; create a pending live apply request instead"
+                .to_string(),
+        ));
+    }
+    let prepared = prepare_live_apply(&state, &headers, &body)?;
+    Ok(Json(json!({
+        "ok": true,
+        "action": "apply_live_preview",
+        "lock_id": prepared.candidate.lock_id,
+        "config_id": prepared.candidate.config_id,
+        "previous_lock_id": prepared.current.lock_id,
+        "previous_config_id": prepared.incumbent.config_id,
+        "restart_required": prepared.preview_restart_required,
+        "service": state.config.live_service,
+        "dry_run": true,
+    })))
+}
+
 async fn post_apply_live(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<ApplyLiveBody>,
 ) -> Result<Json<Value>, HubError> {
     ensure_admin_actions_enabled(&state)?;
-    let _: Value = serde_yaml::from_str(&body.yaml)
-        .map_err(|err| HubError::BadRequest(format!("invalid YAML: {err}")))?;
+    let prepared = prepare_live_apply(&state, &headers, &body)?;
+    execute_live_apply(&state, &headers, prepared, None, None, None).await
+}
 
-    let dry_run = body.dry_run.unwrap_or(false);
-    let restart_mode = LiveApplyRestartMode::parse(body.restart.as_deref())?;
-    let runtime_action = restart_mode.runtime_action(dry_run)?;
-    let reason = body.reason.unwrap_or_default().trim().to_string();
-
-    let current = resolve_current_config_state(&state, "live")?;
-    let expected_config_id =
-        extract_expected_config_id_value(&headers, body.expected_config_id.as_deref())?;
-    if expected_config_id != current.lock_id {
-        return Err(HubError::Conflict(format!(
-            "stale config write for live: expected {expected_config_id} but current config is {}",
-            current.lock_id
-        )));
-    }
-
-    let incumbent = validate_candidate_config_write(
-        &state,
-        "live",
-        &state.config.live_yaml_path,
-        &current.raw_text,
+/// POST /api/config/actions/apply-live/request — Create a pending live apply request.
+async fn post_request_apply_live(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplyLiveBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+    let prepared = prepare_live_apply(&state, &headers, &body)?;
+    let requester = actor_from_headers(&headers, "editor_token");
+    let request = create_config_approval_request(
+        &state.config.artifacts_dir,
+        ConfigApprovalAction::ApplyLive,
+        requester.clone(),
+        normalise_reason(Some(prepared.reason.as_str())),
+        json!({
+            "previous_lock_id": prepared.current.lock_id,
+            "previous_config_id": prepared.incumbent.config_id,
+            "lock_id": prepared.candidate.lock_id,
+            "config_id": prepared.candidate.config_id,
+            "restart_required": prepared.preview_restart_required,
+            "service": state.config.live_service,
+        }),
+        json!({
+            "yaml": body.yaml,
+            "expected_config_id": prepared.current.lock_id,
+            "reason": prepared.reason,
+            "restart": prepared.restart_mode.as_str(),
+            "dry_run": false,
+        }),
     )?;
-    let candidate =
-        validate_candidate_config_write(&state, "live", &state.config.live_yaml_path, &body.yaml)?;
-    let preview_restart_required = candidate.config_id != incumbent.config_id;
-    let apply_dir = build_action_dir(&state.config.artifacts_dir.join("applies").join("live"))?;
-    let transaction = execute_live_config_transaction(
+    append_config_audit_event(
         &state,
-        LiveConfigTransactionInput {
-            action_dir: &apply_dir,
-            event_version: "apply_event_v1",
-            action_name: "apply_live",
-            current: &current,
-            current_config_id: &incumbent.config_id,
-            candidate_label: "candidate_config.yaml",
-            candidate: &candidate,
-            reason: &reason,
-            runtime_action,
-            dry_run,
-            extra_event_details: json!({
-                "restart_mode": restart_mode.as_str(),
-            }),
-        },
-    )
-    .await?;
-
-    if !dry_run {
-        append_config_audit_event(
-            &state,
-            &headers,
-            "live",
-            "apply_live",
-            Some(reason.as_str()),
-            Some(&current.lock_id),
-            Some(&incumbent.config_id),
-            Some(&candidate.lock_id),
-            Some(&candidate.config_id),
-            json!({
-                "kind": "runtime_validation",
-                "ok": true,
-                "config_id": candidate.config_id,
-            }),
-            json!({
-                "ok": transaction.ok,
-                "restart_required": transaction.restart_required,
-                "runtime_apply": transaction.runtime_result,
-                "recovery": transaction.restore_result,
-            }),
-            Some(&transaction.action_dir),
-        )?;
-    }
-
+        requester.clone(),
+        "live",
+        "apply_live_requested",
+        request.reason.as_deref(),
+        Some(&prepared.current.lock_id),
+        Some(&prepared.incumbent.config_id),
+        Some(&prepared.candidate.lock_id),
+        Some(&prepared.candidate.config_id),
+        json!({ "kind": "request_created", "ok": true }),
+        json!({ "ok": true, "status": "pending" }),
+        None,
+        Some(&request.request_id),
+        Some(requester),
+        None,
+    )?;
     Ok(Json(json!({
-        "ok": transaction.ok,
-        "action": "apply_live",
-        "backup": transaction.backup,
-        "lock_id": candidate.lock_id,
-        "config_id": candidate.config_id,
-        "previous_lock_id": current.lock_id,
-        "previous_config_id": incumbent.config_id,
-        "restart_required": if dry_run { preview_restart_required } else { transaction.restart_required },
+        "ok": true,
+        "request_id": request.request_id,
+        "action": "apply_live_request",
+        "previous_config_id": prepared.incumbent.config_id,
+        "config_id": prepared.candidate.config_id,
+        "restart_required": prepared.preview_restart_required,
         "service": state.config.live_service,
-        "artifact_path_redacted": true,
-        "restart": {
-            "mode": restart_mode.as_str(),
-            "result": summarise_runtime_apply_result(&transaction.runtime_result),
-            "recovery": transaction.restore_result.as_ref().map(summarise_runtime_apply_result),
-        },
-        "dry_run": dry_run,
-        "error": transaction.error,
+        "status": "pending",
     })))
 }
 
@@ -1278,6 +1624,20 @@ async fn get_config_audit(
             .map(redacted_config_audit_event)
             .collect::<Vec<_>>(),
     ))
+}
+
+/// GET /api/config/approvals — List pending live approval requests.
+async fn get_config_approvals(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConfigApprovalListQuery>,
+) -> Result<Json<Value>, HubError> {
+    if let Some(status) = q.status.as_deref().filter(|value| !value.trim().is_empty()) {
+        if !status.eq_ignore_ascii_case("pending") {
+            return Ok(Json(json!({ "requests": [] })));
+        }
+    }
+    let requests = list_pending_requests(&state.config.artifacts_dir)?;
+    Ok(Json(json!({ "requests": requests })))
 }
 
 /// GET /api/config/audit/privileged — Read full config audit events.
@@ -1485,152 +1845,224 @@ async fn post_promote_live(
     ))
 }
 
-/// POST /api/config/actions/rollback-live — Roll back live config to previous deployment version.
+/// POST /api/config/actions/rollback-live — Direct rollback execution is retired; use a request route.
+async fn post_preview_rollback_live(
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<RollbackLiveBody>,
+) -> Result<Json<Value>, HubError> {
+    Err(HubError::BadRequest(
+        "direct live rollback execution retired; create a pending rollback request instead"
+            .to_string(),
+    ))
+}
+
 async fn post_rollback_live(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<RollbackLiveBody>,
 ) -> Result<Json<Value>, HubError> {
     ensure_admin_actions_enabled(&state)?;
+    let prepared = prepare_live_rollback(&state, &body)?;
+    execute_live_rollback(&state, &headers, prepared, None, None, None).await
+}
 
-    let steps = body.steps.unwrap_or(1).max(1) as usize;
-    let dry_run = body.dry_run.unwrap_or(false);
-    let restart_mode = LiveApplyRestartMode::parse(body.restart.as_deref())?;
-    let runtime_action = restart_mode.runtime_action(dry_run)?;
-    let reason = body.reason.unwrap_or_default().trim().to_string();
-
-    let deploy_root = state.config.artifacts_dir.join("deployments").join("live");
-    let deploy_dirs = sorted_subdirs_desc(&deploy_root)?;
-    if deploy_dirs.len() < steps {
-        return Ok(Json(json!({
-            "ok": false,
-            "action": "rollback_live",
-            "error": "insufficient_live_deployments",
-            "steps": steps,
-            "available": deploy_dirs.len(),
-            "deploy_root": deploy_root.to_string_lossy().to_string(),
-        })));
+/// POST /api/config/actions/rollback-live/request — Create a pending live rollback request.
+async fn post_request_rollback_live(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<RollbackLiveBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+    if body.dry_run.unwrap_or(false) {
+        return Err(HubError::BadRequest(
+            "rollback request creation does not support dry_run; create a pending request instead"
+                .to_string(),
+        ));
     }
-
-    let src_dir = deploy_dirs[steps - 1].clone();
-    let mut restored_from = src_dir.join("prev_config.yaml");
-    let mut restored_text = fs::read_to_string(&restored_from).unwrap_or_default();
-
-    if restored_text.trim().is_empty() {
-        if let Some(alt_dir) = deploy_dirs.get(steps) {
-            for name in ["promoted_config.yaml", "prev_config.yaml"] {
-                let candidate = alt_dir.join(name);
-                let txt = fs::read_to_string(&candidate).unwrap_or_default();
-                if !txt.trim().is_empty() {
-                    restored_text = txt;
-                    restored_from = candidate;
-                    break;
-                }
-            }
-        }
-    }
-
-    if restored_text.trim().is_empty() {
-        return Ok(Json(json!({
-            "ok": false,
-            "action": "rollback_live",
-            "error": "missing_rollback_config",
-            "source_deploy_dir": src_dir.to_string_lossy().to_string(),
-        })));
-    }
-
-    if let Err(err) = serde_yaml::from_str::<serde_yaml::Value>(&restored_text) {
-        return Ok(Json(json!({
-            "ok": false,
-            "action": "rollback_live",
-            "error": "rollback_config_invalid_yaml",
-            "detail": err.to_string(),
-            "restored_from": restored_from.to_string_lossy().to_string(),
-        })));
-    }
-
-    let current = resolve_current_config_state(&state, "live")?;
-    let incumbent = validate_candidate_config_write(
-        &state,
-        "live",
-        &state.config.live_yaml_path,
-        &current.raw_text,
+    let prepared = prepare_live_rollback(&state, &body)?;
+    let requester = actor_from_headers(&headers, "editor_token");
+    let request = create_config_approval_request(
+        &state.config.artifacts_dir,
+        ConfigApprovalAction::RollbackLive,
+        requester.clone(),
+        normalise_reason(Some(prepared.reason.as_str())),
+        json!({
+            "steps": prepared.steps,
+            "previous_lock_id": prepared.current.lock_id,
+            "previous_config_id": prepared.incumbent.config_id,
+            "restored_lock_id": prepared.restored.lock_id,
+            "restored_config_id": prepared.restored.config_id,
+            "restart_required": prepared.restored.config_id != prepared.incumbent.config_id,
+            "service": state.config.live_service,
+        }),
+        json!({
+            "steps": prepared.steps,
+            "reason": prepared.reason,
+            "restart": prepared.restart_mode.as_str(),
+            "dry_run": false,
+        }),
     )?;
-    let restored = validate_candidate_config_write(
-        &state,
-        "live",
-        &state.config.live_yaml_path,
-        &restored_text,
-    )?;
-    let rollback_dir =
-        build_action_dir(&state.config.artifacts_dir.join("rollbacks").join("live"))?;
-    let transaction = execute_live_config_transaction(
-        &state,
-        LiveConfigTransactionInput {
-            action_dir: &rollback_dir,
-            event_version: "rollback_event_v2",
-            action_name: "rollback_live",
-            current: &current,
-            current_config_id: &incumbent.config_id,
-            candidate_label: "restored_config.yaml",
-            candidate: &restored,
-            reason: &reason,
-            runtime_action,
-            dry_run,
-            extra_event_details: json!({
-                "restart_mode": restart_mode.as_str(),
-                "steps": steps,
-                "source_deploy_dir": src_dir.to_string_lossy().to_string(),
-                "restored_from": restored_from.to_string_lossy().to_string(),
-            }),
-        },
-    )
-    .await?;
-
     append_config_audit_event(
         &state,
-        &headers,
+        requester.clone(),
         "live",
-        "rollback_live",
-        Some(reason.as_str()),
-        Some(&current.lock_id),
-        Some(&incumbent.config_id),
-        Some(&restored.lock_id),
-        Some(&restored.config_id),
-        json!({
-            "kind": "runtime_validation",
-            "ok": true,
-            "config_id": restored.config_id,
-        }),
-        json!({
-            "ok": transaction.ok,
-            "restart_required": transaction.restart_required,
-            "runtime_apply": transaction.runtime_result,
-            "recovery": transaction.restore_result,
-            "steps": steps,
-        }),
-        Some(&transaction.action_dir),
+        "rollback_live_requested",
+        request.reason.as_deref(),
+        Some(&prepared.current.lock_id),
+        Some(&prepared.incumbent.config_id),
+        Some(&prepared.restored.lock_id),
+        Some(&prepared.restored.config_id),
+        json!({ "kind": "request_created", "ok": true }),
+        json!({ "ok": true, "status": "pending", "steps": prepared.steps }),
+        None,
+        Some(&request.request_id),
+        Some(requester),
+        None,
     )?;
-
     Ok(Json(json!({
-        "ok": transaction.ok,
-        "action": "rollback_live",
-        "backup": transaction.backup,
-        "steps": steps,
-        "previous_lock_id": current.lock_id,
-        "previous_config_id": incumbent.config_id,
-        "restored_lock_id": restored.lock_id,
-        "restored_config_id": restored.config_id,
-        "restart_required": transaction.restart_required,
-        "artifact_path_redacted": true,
-        "restart": {
-            "mode": restart_mode.as_str(),
-            "service": state.config.live_service,
-            "result": summarise_runtime_apply_result(&transaction.runtime_result),
-            "recovery": transaction.restore_result.as_ref().map(summarise_runtime_apply_result),
-        },
-        "dry_run": dry_run,
-        "error": transaction.error,
+        "ok": true,
+        "request_id": request.request_id,
+        "action": "rollback_live_request",
+        "steps": prepared.steps,
+        "previous_config_id": prepared.incumbent.config_id,
+        "restored_config_id": prepared.restored.config_id,
+        "restart_required": prepared.restored.config_id != prepared.incumbent.config_id,
+        "service": state.config.live_service,
+        "status": "pending",
+    })))
+}
+
+/// POST /api/config/approvals/{request_id}/approve — Approve and execute a pending live request.
+async fn post_approve_config_approval(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(_body): Json<ConfigApprovalDecisionBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+    let request = load_for_processing(&state.config.artifacts_dir, &request_id)?;
+    let requester = request.requester.clone();
+    let approver = actor_from_headers(&headers, "approver_token");
+
+    let result = match request.action {
+        ConfigApprovalAction::ApplyLive => {
+            let body: ApplyLiveBody = serde_json::from_value(request.execute.clone())?;
+            let prepared = prepare_live_apply(&state, &HeaderMap::new(), &body)?;
+            execute_live_apply(
+                &state,
+                &headers,
+                prepared,
+                Some(&request.request_id),
+                Some(requester),
+                Some(approver.clone()),
+            )
+            .await
+            .map(|json| json.0)
+        }
+        ConfigApprovalAction::RollbackLive => {
+            let body: RollbackLiveBody = serde_json::from_value(request.execute.clone())?;
+            let prepared = prepare_live_rollback(&state, &body)?;
+            execute_live_rollback(
+                &state,
+                &headers,
+                prepared,
+                Some(&request.request_id),
+                Some(requester),
+                Some(approver.clone()),
+            )
+            .await
+            .map(|json| json.0)
+        }
+    };
+
+    match result {
+        Ok(payload) => {
+            let payload_ok = payload
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if payload_ok {
+                let request = mark_approved(
+                    &state.config.artifacts_dir,
+                    request,
+                    approver,
+                    payload.clone(),
+                )?;
+                Ok(Json(json!({
+                    "ok": true,
+                    "request_id": request.request_id,
+                    "status": "approved",
+                    "result": payload,
+                })))
+            } else {
+                let failed = mark_failed(
+                    &state.config.artifacts_dir,
+                    request,
+                    approver,
+                    payload.clone(),
+                )?;
+                Ok(Json(json!({
+                    "ok": false,
+                    "request_id": failed.request_id,
+                    "status": "failed",
+                    "result": payload,
+                })))
+            }
+        }
+        Err(err) => {
+            let failed = mark_failed(
+                &state.config.artifacts_dir,
+                request,
+                approver,
+                json!({ "ok": false, "error": err.to_string() }),
+            )?;
+            Ok(Json(json!({
+                "ok": false,
+                "request_id": failed.request_id,
+                "status": "failed",
+                "error": err.to_string(),
+            })))
+        }
+    }
+}
+
+/// POST /api/config/approvals/{request_id}/reject — Reject a pending live request.
+async fn post_reject_config_approval(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<ConfigApprovalDecisionBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+    let request = load_for_processing(&state.config.artifacts_dir, &request_id)?;
+    let approver = actor_from_headers(&headers, "approver_token");
+    let rejected = mark_rejected(
+        &state.config.artifacts_dir,
+        request.clone(),
+        approver.clone(),
+        normalise_reason(body.reason.as_deref()),
+    )?;
+    append_config_audit_event(
+        &state,
+        approver.clone(),
+        "live",
+        &format!("{}_rejected", request.action.as_str()),
+        rejected.reason.as_deref(),
+        None,
+        None,
+        None,
+        None,
+        json!({ "kind": "request_rejected", "ok": true }),
+        json!({ "ok": true, "status": "rejected" }),
+        None,
+        Some(&rejected.request_id),
+        Some(rejected.requester.clone()),
+        Some(approver),
+    )?;
+    Ok(Json(json!({
+        "ok": true,
+        "request_id": rejected.request_id,
+        "status": "rejected",
     })))
 }
 
@@ -2143,7 +2575,7 @@ fi
         let state = admin_test_state(dir.path(), Path::new("/bin/true"));
         let current = resolve_current_config_state(&state, "live").unwrap();
 
-        let Json(response) = post_apply_live(
+        let Json(response) = post_preview_apply_live(
             State(Arc::clone(&state)),
             if_match_headers(&current.lock_id),
             Json(ApplyLiveBody {
@@ -2393,5 +2825,220 @@ fi
             latest.after.config_id.as_deref(),
             Some(restored.config_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn apply_live_request_can_be_approved_and_executes_once() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let live_path = write_live_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let candidate_yaml =
+            "global:\n  engine:\n    interval: 15m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n";
+        let baseline_state = test_state(dir.path());
+        let current = resolve_current_config_state(&baseline_state, "live").unwrap();
+        let candidate =
+            validate_candidate_config_write(&baseline_state, "live", &live_path, candidate_yaml)
+                .unwrap();
+        let success_report = fake_live_service_apply_report(&candidate.config_id, "running", true);
+        let (runtime_bin, count_path, first_path, second_path) =
+            write_fake_runtime_script(dir.path(), &success_report, &success_report);
+        let _env = EnvGuard::set(&[
+            (
+                "AIQ_TEST_RUNTIME_COUNT_FILE",
+                Some(count_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_1",
+                Some(first_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_2",
+                Some(second_path.to_str().unwrap()),
+            ),
+        ]);
+        let state = admin_test_state(dir.path(), &runtime_bin);
+        let mut request_headers = if_match_headers(&current.lock_id);
+        request_headers.insert("x-aiq-actor", HeaderValue::from_static("editor-jt"));
+
+        let Json(request_response) = post_request_apply_live(
+            State(Arc::clone(&state)),
+            request_headers,
+            Json(ApplyLiveBody {
+                yaml: candidate_yaml.to_string(),
+                expected_config_id: None,
+                reason: Some("maker request".to_string()),
+                restart: Some("auto".to_string()),
+                dry_run: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let request_id = request_response["request_id"].as_str().unwrap().to_string();
+        let Json(pending) = get_config_approvals(
+            State(Arc::clone(&state)),
+            Query(ConfigApprovalListQuery {
+                status: Some("pending".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending["requests"].as_array().unwrap().len(), 1);
+
+        let mut approver_headers = HeaderMap::new();
+        approver_headers.insert("x-aiq-actor", HeaderValue::from_static("approver-jm"));
+        let Json(approved) = post_approve_config_approval(
+            State(Arc::clone(&state)),
+            AxumPath(request_id.clone()),
+            approver_headers,
+            Json(ConfigApprovalDecisionBody { reason: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(approved["ok"], Value::Bool(true));
+        assert_eq!(approved["status"], Value::String("approved".to_string()));
+        assert!(fs::read_to_string(&live_path)
+            .unwrap()
+            .contains("interval: 15m"));
+
+        let Json(pending_after) = get_config_approvals(
+            State(Arc::clone(&state)),
+            Query(ConfigApprovalListQuery {
+                status: Some("pending".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending_after["requests"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn rollback_request_can_be_rejected_without_mutating_live_yaml() {
+        let dir = tempdir().unwrap();
+        let live_yaml =
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n";
+        let live_path = write_live_config(dir.path(), live_yaml);
+        let deploy_dir = dir
+            .path()
+            .join("artifacts")
+            .join("deployments")
+            .join("live")
+            .join("20260314T120000Z");
+        fs::create_dir_all(&deploy_dir).unwrap();
+        fs::write(
+            deploy_dir.join("prev_config.yaml"),
+            "global:\n  engine:\n    interval: 1h\nsymbols:\n  ETH:\n    trade:\n      leverage: 1.0\n",
+        )
+        .unwrap();
+        let state = admin_test_state(dir.path(), Path::new("/bin/true"));
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("x-aiq-actor", HeaderValue::from_static("editor-jt"));
+
+        let Json(request_response) = post_request_rollback_live(
+            State(Arc::clone(&state)),
+            request_headers,
+            Json(RollbackLiveBody {
+                steps: Some(1),
+                reason: Some("need rollback".to_string()),
+                restart: Some("auto".to_string()),
+                dry_run: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let request_id = request_response["request_id"].as_str().unwrap().to_string();
+        let mut approver_headers = HeaderMap::new();
+        approver_headers.insert("x-aiq-actor", HeaderValue::from_static("approver-jm"));
+        let Json(rejected) = post_reject_config_approval(
+            State(Arc::clone(&state)),
+            AxumPath(request_id),
+            approver_headers,
+            Json(ConfigApprovalDecisionBody {
+                reason: Some("hold".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rejected["ok"], Value::Bool(true));
+        assert_eq!(rejected["status"], Value::String("rejected".to_string()));
+        assert_eq!(fs::read_to_string(&live_path).unwrap(), live_yaml);
+    }
+
+    #[tokio::test]
+    async fn approval_marks_request_failed_when_live_execution_returns_ok_false() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let live_path = write_live_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let candidate_yaml =
+            "global:\n  engine:\n    interval: 15m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n";
+        let baseline_state = test_state(dir.path());
+        let current = resolve_current_config_state(&baseline_state, "live").unwrap();
+        let failed_report = fake_live_service_apply_report("wrong-config-id", "running", true);
+        let recovery_report =
+            fake_live_service_apply_report(&validate_candidate_config_write(&baseline_state, "live", &live_path, "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n").unwrap().config_id, "running", true);
+        let (runtime_bin, count_path, first_path, second_path) =
+            write_fake_runtime_script(dir.path(), &failed_report, &recovery_report);
+        let _env = EnvGuard::set(&[
+            (
+                "AIQ_TEST_RUNTIME_COUNT_FILE",
+                Some(count_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_1",
+                Some(first_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_2",
+                Some(second_path.to_str().unwrap()),
+            ),
+        ]);
+        let state = admin_test_state(dir.path(), &runtime_bin);
+        let mut request_headers = if_match_headers(&current.lock_id);
+        request_headers.insert("x-aiq-actor", HeaderValue::from_static("editor-jt"));
+
+        let Json(request_response) = post_request_apply_live(
+            State(Arc::clone(&state)),
+            request_headers,
+            Json(ApplyLiveBody {
+                yaml: candidate_yaml.to_string(),
+                expected_config_id: None,
+                reason: Some("maker request".to_string()),
+                restart: Some("auto".to_string()),
+                dry_run: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let request_id = request_response["request_id"].as_str().unwrap().to_string();
+        let mut approver_headers = HeaderMap::new();
+        approver_headers.insert("x-aiq-actor", HeaderValue::from_static("approver-jm"));
+        let Json(approved) = post_approve_config_approval(
+            State(Arc::clone(&state)),
+            AxumPath(request_id),
+            approver_headers,
+            Json(ConfigApprovalDecisionBody { reason: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(approved["ok"], Value::Bool(false));
+        assert_eq!(approved["status"], Value::String("failed".to_string()));
+        assert!(fs::read_to_string(&live_path)
+            .unwrap()
+            .contains("interval: 30m"));
     }
 }

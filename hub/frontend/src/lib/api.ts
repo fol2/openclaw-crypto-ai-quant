@@ -264,6 +264,10 @@ export interface ApplyLiveRequest {
   dry_run?: boolean;
 }
 
+export interface LiveApprovalDecision {
+  reason?: string;
+}
+
 export async function promoteLiveConfig(body: PromoteLiveRequest = {}) {
   return apiFetch('/api/config/actions/promote-live', {
     method: 'POST',
@@ -279,8 +283,41 @@ export async function applyLiveConfig(body: ApplyLiveRequest, expectedConfigId?:
   });
 }
 
+export async function requestLiveApplyConfig(body: ApplyLiveRequest, expectedConfigId?: string | null) {
+  return apiFetch('/api/config/actions/apply-live/request', {
+    method: 'POST',
+    headers: expectedConfigId ? { 'If-Match': expectedConfigId } : undefined,
+    body: JSON.stringify(body),
+  });
+}
+
 export async function rollbackLiveConfig(body: RollbackLiveRequest = {}) {
   return apiFetch('/api/config/actions/rollback-live', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function requestLiveRollbackConfig(body: RollbackLiveRequest = {}) {
+  return apiFetch('/api/config/actions/rollback-live/request', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getPendingConfigApprovals() {
+  return apiFetch('/api/config/approvals?status=pending');
+}
+
+export async function approveConfigApproval(requestId: string, body: LiveApprovalDecision = {}) {
+  return apiFetch(`/api/config/approvals/${encodeURIComponent(requestId)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function rejectConfigApproval(requestId: string, body: LiveApprovalDecision = {}) {
+  return apiFetch(`/api/config/approvals/${encodeURIComponent(requestId)}/reject`, {
     method: 'POST',
     body: JSON.stringify(body),
   });

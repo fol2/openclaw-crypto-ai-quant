@@ -40,6 +40,12 @@ pub struct ConfigAuditEvent {
     pub action: String,
     pub actor: ConfigAuditActor,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<ConfigAuditActor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approver: Option<ConfigAuditActor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub validation: Value,
     pub before: ConfigAuditIdentity,
@@ -198,6 +204,9 @@ mod tests {
                 source_ip: None,
                 user_agent: None,
             },
+            request_id: None,
+            requester: None,
+            approver: None,
             reason: Some("test".to_string()),
             validation: serde_json::json!({ "ok": true }),
             before: ConfigAuditIdentity {
