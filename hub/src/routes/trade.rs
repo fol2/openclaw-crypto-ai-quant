@@ -59,6 +59,26 @@ fn require_trade_enabled(state: &AppState) -> Result<(), HubError> {
     Ok(())
 }
 
+fn open_param_fingerprint(body: &TradeOpenBody) -> String {
+    manual_trade::open_request_hash(&manual_trade::ManualTradeOpenRequest {
+        symbol: body.symbol.clone(),
+        side: body.side.clone(),
+        notional_usd: body.notional_usd,
+        leverage: body.leverage,
+        order_type: body.order_type.clone(),
+        limit_price: body.limit_price,
+    })
+}
+
+fn close_param_fingerprint(body: &TradeCloseBody) -> String {
+    manual_trade::close_request_hash(&manual_trade::ManualTradeCloseRequest {
+        symbol: body.symbol.clone(),
+        close_pct: body.close_pct,
+        order_type: body.order_type.clone(),
+        limit_price: body.limit_price,
+    })
+}
+
 async fn check_rate_limit(
     state: &AppState,
     symbol: &str,
@@ -253,7 +273,6 @@ async fn trade_close(
     Json(body): Json<TradeCloseBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-
     if body.confirm_token.is_none() {
         let request = manual_trade::ManualTradeCloseRequest {
             symbol: body.symbol,
@@ -346,4 +365,83 @@ async fn trade_result(Path(id): Path<String>) -> Result<Json<Value>, HubError> {
     Err(HubError::NotFound(format!(
         "job {id} not found (rust-native manual trade executes synchronously)"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_param_fingerprint_normalises_case_and_spacing() {
+        let a = TradeOpenBody {
+            symbol: " eth ".to_string(),
+            side: " sell ".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: " MARKET ".to_string(),
+            limit_price: None,
+            confirm_token: None,
+        };
+        let b = TradeOpenBody {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: "market".to_string(),
+            limit_price: None,
+            confirm_token: None,
+        };
+
+        assert_eq!(open_param_fingerprint(&a), open_param_fingerprint(&b));
+    }
+
+    #[test]
+    fn open_param_fingerprint_changes_when_limit_price_changes() {
+        let base = TradeOpenBody {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: "limit_gtc".to_string(),
+            limit_price: Some(2100.5),
+            confirm_token: None,
+        };
+        let changed = TradeOpenBody {
+            limit_price: Some(2100.6),
+            ..base
+        };
+
+        assert_ne!(
+            open_param_fingerprint(&TradeOpenBody {
+                symbol: "ETH".to_string(),
+                side: "SELL".to_string(),
+                notional_usd: 500.0,
+                leverage: 10,
+                order_type: "limit_gtc".to_string(),
+                limit_price: Some(2100.5),
+                confirm_token: None,
+            }),
+            open_param_fingerprint(&changed)
+        );
+    }
+
+    #[test]
+    fn close_param_fingerprint_normalises_case_and_spacing() {
+        let a = TradeCloseBody {
+            symbol: " hype ".to_string(),
+            close_pct: 25.0,
+            order_type: " LIMIT_IOC ".to_string(),
+            limit_price: Some(35.5),
+            confirm_token: None,
+        };
+        let b = TradeCloseBody {
+            symbol: "HYPE".to_string(),
+            close_pct: 25.0,
+            order_type: "limit_ioc".to_string(),
+            limit_price: Some(35.5),
+            confirm_token: None,
+        };
+
+        assert_eq!(close_param_fingerprint(&a), close_param_fingerprint(&b));
+    }
 }

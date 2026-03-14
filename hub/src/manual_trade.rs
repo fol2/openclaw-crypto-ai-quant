@@ -57,10 +57,10 @@ pub fn open_request_hash(request: &ManualTradeOpenRequest) -> String {
         "kind": "open",
         "symbol": request.symbol.trim().to_ascii_uppercase(),
         "side": request.side.trim().to_ascii_uppercase(),
-        "notional_usd": request.notional_usd,
+        "notional_usd_bits": encode_f64_bits(request.notional_usd),
         "leverage": request.leverage,
         "order_type": request.order_type.trim().to_ascii_lowercase(),
-        "limit_price": request.limit_price,
+        "limit_price_bits": encode_optional_f64_bits(request.limit_price),
     }))
 }
 
@@ -68,15 +68,23 @@ pub fn close_request_hash(request: &ManualTradeCloseRequest) -> String {
     manual_request_hash(json!({
         "kind": "close",
         "symbol": request.symbol.trim().to_ascii_uppercase(),
-        "close_pct": request.close_pct,
+        "close_pct_bits": encode_f64_bits(request.close_pct),
         "order_type": request.order_type.trim().to_ascii_lowercase(),
-        "limit_price": request.limit_price,
+        "limit_price_bits": encode_optional_f64_bits(request.limit_price),
     }))
 }
 
 fn manual_request_hash(payload: Value) -> String {
     let digest = sha3::Sha3_256::digest(payload.to_string().as_bytes());
     hex::encode(digest)
+}
+
+fn encode_f64_bits(value: f64) -> String {
+    format!("{:016x}", value.to_bits())
+}
+
+fn encode_optional_f64_bits(value: Option<f64>) -> Option<String> {
+    value.map(encode_f64_bits)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
