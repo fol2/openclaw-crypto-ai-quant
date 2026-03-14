@@ -1028,7 +1028,7 @@ pub fn preflight_cancel_request(
     let dedupe_key = manual_cancel_dedupe_key(request)?;
     if let Some(existing) = load_manual_cancel_request_by_dedupe_key(&conn, &dedupe_key)? {
         return Ok(match existing.status.trim().to_ascii_uppercase().as_str() {
-            "NEW" => ManualCancelPreflight::ExistingPendingRequest,
+            "NEW" | "ERROR" | "REJECTED" => ManualCancelPreflight::ExistingPendingRequest,
             "CANCELLED" => ManualCancelPreflight::ExistingTerminal(
                 existing_manual_cancel_request_payload(&existing, "dedupe_key", true)?,
             ),
@@ -6356,6 +6356,46 @@ mod tests {
         } else {
             panic!("expected existing terminal cancel payload");
         }
+    }
+
+    #[test]
+    fn preflight_cancel_request_marks_failed_retry_as_pending_resumption() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO manual_cancel_requests (
+                request_id, created_ts_ms, symbol, dedupe_key, intent_id, status, last_error
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'ERROR', ?6)",
+            params![
+                "cancel_request_retry",
+                1_773_500_450_000_i64,
+                "ETH",
+                "cancel:intent:manual_cancelled_intent",
+                "manual_cancelled_intent",
+                "temporary error",
+            ],
+        )
+        .unwrap();
+
+        let preflight = preflight_cancel_request(
+            &cfg,
+            &ManualTradeCancelRequest {
+                symbol: "ETH".to_string(),
+                oid: None,
+                intent_id: Some("manual_cancelled_intent".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            preflight,
+            ManualCancelPreflight::ExistingPendingRequest
+        ));
     }
 
     #[test]
