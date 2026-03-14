@@ -3512,7 +3512,11 @@ fn write_live_governance_state(
     Ok(path)
 }
 
-fn infer_live_governance_start_ms(live_db_path: &Path, config_id: &str) -> Result<Option<i64>> {
+fn infer_live_governance_start_ms(
+    live_db_path: &Path,
+    config_id: &str,
+    not_before_ms: i64,
+) -> Result<Option<i64>> {
     if !live_db_path.is_file() {
         return Ok(None);
     }
@@ -3523,8 +3527,11 @@ fn infer_live_governance_start_ms(live_db_path: &Path, config_id: &str) -> Resul
     }
     let first_decision_ms = conn
         .query_row(
-            "SELECT MIN(timestamp_ms) FROM decision_events WHERE config_fingerprint = ?1",
-            [config_id],
+            "SELECT MIN(timestamp_ms)
+             FROM decision_events
+             WHERE config_fingerprint = ?1
+               AND timestamp_ms >= ?2",
+            params![config_id, not_before_ms],
             |row| row.get::<_, Option<i64>>(0),
         )
         .optional()?
@@ -3813,16 +3820,18 @@ fn promote_primary_live(
         let bootstrap_config_id = current_live_config_id
             .clone()
             .ok_or_else(|| anyhow!("missing current live config fingerprint"))?;
-        let bootstrap_started_at_ms =
-            infer_live_governance_start_ms(&live_db_path, bootstrap_config_id.as_str())?
-                .or_else(|| {
-                    fs::metadata(&live_yaml_path)
-                        .ok()
-                        .and_then(|meta| meta.modified().ok())
-                        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_millis() as i64)
-                })
-                .unwrap_or_else(|| Utc::now().timestamp_millis());
+        let live_yaml_started_at_ms = fs::metadata(&live_yaml_path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        let bootstrap_started_at_ms = infer_live_governance_start_ms(
+            &live_db_path,
+            bootstrap_config_id.as_str(),
+            live_yaml_started_at_ms,
+        )?
+        .unwrap_or(live_yaml_started_at_ms);
         let bootstrap_state = LiveGovernanceState {
             version: "factory_live_governance_v1".to_string(),
             role: "primary".to_string(),
@@ -5647,6 +5656,7 @@ symbols:
         fs::create_dir_all(live_yaml.parent().unwrap()).unwrap();
         fs::write(&live_yaml, config_yaml("30m")).unwrap();
         let incumbent_config_id = strategy_fingerprint_from_yaml(&config_yaml("30m"));
+        let incumbent_start_ms = Utc::now().timestamp_millis() + 1_000;
 
         let live_db = live_governance_db(project_dir);
         let conn = Connection::open(&live_db).unwrap();
@@ -5654,7 +5664,7 @@ symbols:
         insert_live_close_fill(
             &conn,
             1,
-            "2026-03-10T00:00:00Z",
+            &gate_iso_from_ms(incumbent_start_ms),
             5.0,
             0.5,
             10_005.0,
@@ -5663,7 +5673,7 @@ symbols:
         insert_live_close_fill(
             &conn,
             2,
-            "2026-03-11T00:00:00Z",
+            &gate_iso_from_ms(incumbent_start_ms + 86_400_000),
             4.0,
             0.5,
             10_009.0,
@@ -5734,10 +5744,7 @@ symbols:
         assert_eq!(event.status, "held");
         assert_eq!(event.live_state, "live_full");
         assert_eq!(state.config_id, incumbent_config_id);
-        assert_eq!(
-            state.started_at_ms,
-            parse_trade_timestamp_ms("2026-03-10T00:00:00Z").unwrap()
-        );
+        assert_eq!(state.started_at_ms, incumbent_start_ms);
     }
 
     #[test]
