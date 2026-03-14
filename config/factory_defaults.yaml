@@ -27,7 +27,8 @@ validation:
   min_trades: 30
   slippage_bps: 20.0
   max_top1_pnl_pct: 0.50
-  walk_forward_splits: 3
+  holdout_fraction: 0.25
+  holdout_splits: 3
   parity_abs_eps: 0.001
   parity_rel_eps: 0.000001
   parity_trade_delta_max: 0
