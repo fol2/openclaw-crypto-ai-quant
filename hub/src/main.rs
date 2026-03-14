@@ -7,6 +7,12 @@ mod heartbeat;
 mod hyperliquid;
 #[path = "../../runtime/aiq-runtime/src/live_hyperliquid.rs"]
 mod live_hyperliquid;
+#[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/live_risk.rs"]
+mod live_risk;
+#[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/live_safety.rs"]
+mod live_safety;
 #[path = "../../runtime/aiq-runtime/src/live_secrets.rs"]
 mod live_secrets;
 mod manual_trade;
@@ -14,6 +20,9 @@ mod routes;
 mod sidecar;
 mod state;
 mod subprocess;
+#[cfg(test)]
+#[path = "../../runtime/aiq-runtime/src/test_support.rs"]
+mod test_support;
 mod ws;
 
 use axum::middleware;
