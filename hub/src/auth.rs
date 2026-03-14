@@ -13,6 +13,8 @@ pub struct HubAuthConfig {
     pub read_token: String,
     pub admin_token: String,
     pub dev_mode: bool,
+    pub trust_loopback_read: bool,
+    pub trust_loopback_admin: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +29,8 @@ impl HubAuthConfig {
             read_token: config.token.clone(),
             admin_token: config.admin_token.clone(),
             dev_mode: config.dev_mode,
+            trust_loopback_read: config.trust_loopback_read,
+            trust_loopback_admin: config.trust_loopback_admin,
         }
     }
 
@@ -87,7 +91,8 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
         .unwrap_or("");
     match scope {
         AuthScope::Read => {
-            if read_auth_bypassed(&request)
+            if loopback_auth_bypassed(&request, &config, AuthScope::Read)
+                || read_auth_bypassed(&request)
                 || matches_query_token(&request, expected_token)
                 || matches_bearer_token(auth_header, expected_token)
                 || (!config.admin_token.is_empty()
@@ -98,7 +103,9 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
             }
         }
         AuthScope::Admin => {
-            if matches_bearer_token(auth_header, expected_token) {
+            if loopback_auth_bypassed(&request, &config, AuthScope::Admin)
+                || matches_bearer_token(auth_header, expected_token)
+            {
                 return next.run(request).await;
             }
         }
@@ -110,6 +117,16 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
 fn auth_error(status: StatusCode, message: &str) -> Response {
     let body = json!({ "error": message });
     (status, axum::Json(body)).into_response()
+}
+
+fn loopback_auth_bypassed(request: &Request, config: &HubAuthConfig, scope: AuthScope) -> bool {
+    if !direct_peer_is_loopback(request) {
+        return false;
+    }
+    match scope {
+        AuthScope::Read => config.trust_loopback_read || config.trust_loopback_admin,
+        AuthScope::Admin => config.trust_loopback_admin,
+    }
 }
 
 fn read_auth_bypassed(request: &Request) -> bool {
@@ -317,6 +334,8 @@ mod tests {
             read_token: String::new(),
             admin_token: String::new(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         };
 
         let err = config.validate_startup().unwrap_err();
@@ -329,6 +348,8 @@ mod tests {
             read_token: String::new(),
             admin_token: String::new(),
             dev_mode: true,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
         .await
@@ -433,6 +454,8 @@ mod tests {
             read_token: "shared-secret".to_string(),
             admin_token: "shared-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         };
 
         let err = config.validate_startup().unwrap_err();
@@ -445,6 +468,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -470,6 +495,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -492,6 +519,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -511,6 +540,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -531,6 +562,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -550,6 +583,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -572,6 +607,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(request)
         .await
@@ -586,6 +623,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
             dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -606,6 +645,8 @@ mod tests {
             read_token: "viewer-secret".to_string(),
             admin_token: String::new(),
             dev_mode: true,
+            trust_loopback_read: false,
+            trust_loopback_admin: false,
         })
         .oneshot(
             Request::builder()
@@ -629,6 +670,8 @@ mod tests {
                 read_token: "viewer-secret".to_string(),
                 admin_token: "admin-secret".to_string(),
                 dev_mode: false,
+                trust_loopback_read: false,
+                trust_loopback_admin: false,
             }));
 
         let response = app
@@ -653,6 +696,8 @@ mod tests {
                 read_token: "abc+def=".to_string(),
                 admin_token: "admin-secret".to_string(),
                 dev_mode: false,
+                trust_loopback_read: false,
+                trust_loopback_admin: false,
             }));
 
         let response = app
@@ -664,6 +709,48 @@ mod tests {
             )
             .await
             .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn read_auth_allows_bare_loopback_when_opted_in() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
+
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+            trust_loopback_read: true,
+            trust_loopback_admin: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_allows_bare_loopback_when_opted_in() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
+
+        let response = admin_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+            trust_loopback_read: false,
+            trust_loopback_admin: true,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
     }

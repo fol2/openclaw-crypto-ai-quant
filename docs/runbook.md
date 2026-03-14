@@ -61,6 +61,27 @@ Tailscale identity headers, so it cannot satisfy the Tailscale read-auth
 bypass on its own. Use an HTTP/HTTPS Tailscale Serve-style front layer when the
 operator wants tailnet reads without `AIQ_MONITOR_TOKEN`.
 
+When an operator explicitly accepts the local-trust tradeoff for this machine,
+the Hub can also trust bare loopback peers through these opt-in flags:
+
+- `AIQ_MONITOR_TRUST_LOOPBACK_READ=1`
+- `AIQ_MONITOR_TRUST_LOOPBACK_ADMIN=1`
+
+`AIQ_MONITOR_TRUST_LOOPBACK_READ=1` makes bare loopback peers bypass the
+read-auth check, so clients on that localhost-forwarded path do not need to
+present `AIQ_MONITOR_TOKEN` on those read requests.
+`AIQ_MONITOR_TRUST_LOOPBACK_ADMIN=1` also bypasses the admin-auth check for the
+same bare loopback peers, so manual-trade and other admin mutation routes do
+not need to present `AIQ_MONITOR_ADMIN_TOKEN` on those loopback requests.
+
+Use those flags only when the operator intentionally treats local loopback as a
+trusted boundary, for example a machine-specific raw Tailscale TCP forward that
+lands on `127.0.0.1:61010`. Any same-host client that can reach the Hub on
+localhost will inherit the same read/admin access while those flags are set.
+Keep `AIQ_MONITOR_TOKEN` and `AIQ_MONITOR_ADMIN_TOKEN` configured in the Hub
+environment. These flags bypass presenting credentials for loopback requests;
+they do not remove the need for the Hub to keep both tokens configured.
+
 Keep `AIQ_MONITOR_TOKEN` configured for non-trusted read clients and WebSocket
 consumers outside those local/Tailscale ranges. Keep
 `AIQ_MONITOR_ADMIN_TOKEN` configured for all admin and manual-trade actions.

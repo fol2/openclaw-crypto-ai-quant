@@ -15,6 +15,10 @@ pub struct HubConfig {
     pub admin_token: String,
     /// Explicit development-mode opt-in for local unsecured read-only access.
     pub dev_mode: bool,
+    /// Explicit opt-in to trust bare loopback peers for read-only routes.
+    pub trust_loopback_read: bool,
+    /// Explicit opt-in to trust bare loopback peers for admin routes.
+    pub trust_loopback_admin: bool,
     /// Explicit browser origins allowed to call the Hub cross-origin.
     pub cors_allowed_origins: Vec<String>,
 
@@ -287,6 +291,8 @@ impl HubConfig {
             token: env_str("AIQ_MONITOR_TOKEN", ""),
             admin_token: env_str("AIQ_MONITOR_ADMIN_TOKEN", ""),
             dev_mode: env_bool("AIQ_MONITOR_DEV_MODE", false),
+            trust_loopback_read: env_bool("AIQ_MONITOR_TRUST_LOOPBACK_READ", false),
+            trust_loopback_admin: env_bool("AIQ_MONITOR_TRUST_LOOPBACK_ADMIN", false),
             cors_allowed_origins: env_csv("AIQ_MONITOR_CORS_ALLOWED_ORIGINS"),
             live_db,
             live_log,
