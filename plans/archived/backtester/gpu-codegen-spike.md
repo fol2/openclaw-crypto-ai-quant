@@ -1,8 +1,10 @@
 # AQC-762: Rust-to-PTX Compilation Spike Report
 
+> Archived on 2026-03-14 during repository plan consolidation.
+
 **Date:** 2026-02-15
 **Author:** dev-762 (automated research spike)
-**Status:** Complete — concluded that template-based codegen is the path. Codegen implemented in Milestone 8 (see [gpu-decision-codegen.md](../5/gpu-decision-codegen.md)).
+**Status:** Complete — concluded that template-based codegen is the path. Codegen implemented in Milestone 8 (see [gpu-decision-codegen.md](./gpu-decision-codegen.md)).
 
 ---
 

@@ -1,6 +1,8 @@
 # Milestone 8: GPU Decision Logic Codegen (Full SSOT)
 
-> **Status**: Complete. All 37 tickets implemented and validated. See [gpu-runtime-validation-report.md](../docs/gpu-runtime-validation-report.md) and [gpu-codegen-guide.md](../docs/gpu-codegen-guide.md).
+> Archived on 2026-03-14 during repository plan consolidation.
+>
+> **Status**: Complete. All 37 tickets implemented and validated. See [gpu-runtime-validation-report.md](../../../backtester/docs/gpu-runtime-validation-report.md) and [gpu-codegen-guide.md](../../../backtester/docs/gpu-codegen-guide.md).
 
 **Epic**: AQC-M1200 — Extend template-based CUDA codegen to cover all sweep decision logic
 **Goal**: Eliminate GPU↔CPU decision divergence; GPU sweep produces identical signals/exits/sizing as CPU backtester
