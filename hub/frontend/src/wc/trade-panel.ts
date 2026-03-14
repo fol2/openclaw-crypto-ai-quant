@@ -10,6 +10,12 @@ import {
 } from '../lib/api';
 
 type OrdType = 'market' | 'limit_ioc' | 'limit_gtc';
+type PersistedTradeHandle = {
+  symbol: string;
+  confirmToken: string;
+  requestBody: Record<string, any>;
+  preview: any | null;
+};
 
 @customElement('trade-panel')
 export class TradePanel extends LitElement {
@@ -57,6 +63,8 @@ export class TradePanel extends LitElement {
   private _pos: any = null;
   private _poll: ReturnType<typeof setInterval> | null = null;
   private _prevSym = '';
+  private _openReq: Record<string, any> | null = null;
+  private _closeReq: Record<string, any> | null = null;
 
   /* ── Styles ───────────────────────────────────────────────────────────────── */
   static styles = css`
@@ -408,6 +416,7 @@ export class TradePanel extends LitElement {
       this._prevSym = this.symbol;
       this._resetOpen();
       this._resetClose();
+      this._restorePersistedTradeState();
       this.orders = [];
       if (this.expanded && this.symbol) this._fetchOrders();
     }
@@ -428,11 +437,131 @@ export class TradePanel extends LitElement {
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
   }
 
+  private _storageKey(kind: 'open' | 'close'): string {
+    return `aiq:manual-trade:${kind}:${this.symbol.trim().toUpperCase()}`;
+  }
+
+  private _persistTradeState(kind: 'open' | 'close', token: string, requestBody: Record<string, any>, preview: any | null) {
+    if (typeof window === 'undefined' || !this.symbol || !token) return;
+    const payload: PersistedTradeHandle = {
+      symbol: this.symbol.trim().toUpperCase(),
+      confirmToken: token,
+      requestBody,
+      preview,
+    };
+    window.localStorage.setItem(this._storageKey(kind), JSON.stringify(payload));
+  }
+
+  private _clearPersistedTradeState(kind: 'open' | 'close') {
+    if (typeof window !== 'undefined' && this.symbol) {
+      window.localStorage.removeItem(this._storageKey(kind));
+    }
+    if (kind === 'open') {
+      this._openReq = null;
+    } else {
+      this._closeReq = null;
+    }
+  }
+
+  private _readPersistedTradeState(kind: 'open' | 'close'): PersistedTradeHandle | null {
+    if (typeof window === 'undefined' || !this.symbol) return null;
+    const raw = window.localStorage.getItem(this._storageKey(kind));
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as PersistedTradeHandle;
+      if (!parsed?.confirmToken || !parsed?.requestBody) return null;
+      return parsed.symbol === this.symbol.trim().toUpperCase() ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private _applyOpenRequest(body: Record<string, any> | null) {
+    if (!body) return;
+    this.side = String(body.side || '').toUpperCase() === 'SELL' ? 'short' : 'long';
+    this.notional = String(body.notional_usd ?? this.notional);
+    this.lev = String(body.leverage ?? this.lev);
+    this.ordType = (body.order_type || this.ordType) as OrdType;
+    this.limPx = body.limit_price != null ? String(body.limit_price) : '';
+  }
+
+  private _applyCloseRequest(body: Record<string, any> | null) {
+    if (!body) return;
+    const pct = Number(body.close_pct);
+    if (Number.isFinite(pct) && [25, 50, 75, 100].includes(pct)) {
+      this.closePct = pct;
+      this.closeCustom = '';
+    } else if (Number.isFinite(pct)) {
+      this.closePct = -1;
+      this.closeCustom = String(pct);
+    }
+    this.closeOrdType = (body.order_type || this.closeOrdType) as OrdType;
+    this.closeLimPx = body.limit_price != null ? String(body.limit_price) : '';
+  }
+
+  private _restorePersistedTradeState() {
+    const openState = this._readPersistedTradeState('open');
+    if (openState) {
+      this.openTok = openState.confirmToken;
+      this.openPrev = openState.preview;
+      this._openReq = openState.requestBody;
+      this._applyOpenRequest(openState.requestBody);
+      void this._hydratePersistedResult('open', openState.confirmToken);
+    }
+    const closeState = this._readPersistedTradeState('close');
+    if (closeState) {
+      this.closeTok = closeState.confirmToken;
+      this.closePrev = closeState.preview;
+      this._closeReq = closeState.requestBody;
+      this._applyCloseRequest(closeState.requestBody);
+      void this._hydratePersistedResult('close', closeState.confirmToken);
+    }
+  }
+
+  private async _hydratePersistedResult(kind: 'open' | 'close', token: string) {
+    try {
+      const result = await tradeJobResult(token);
+      if (!result?.ok) return;
+      if (kind === 'open') {
+        if (result.status === 'previewed' && result.preview) {
+          this.openPrev = result.preview;
+          return;
+        }
+        if (result.status === 'error' || result.intent_status === 'REJECTED') {
+          this.openErr = result.last_error || 'Execution failed';
+          this._clearPersistedTradeState('open');
+          this.openTok = '';
+          return;
+        }
+        if (result.intent_id) {
+          this.openOk = `Recovered: ${result.intent_id} ${result.intent_status || result.status || ''}`.trim();
+        }
+      } else {
+        if (result.status === 'previewed' && result.preview) {
+          this.closePrev = result.preview;
+          return;
+        }
+        if (result.status === 'error' || result.intent_status === 'REJECTED') {
+          this.closeErr = result.last_error || 'Close failed';
+          this._clearPersistedTradeState('close');
+          this.closeTok = '';
+          return;
+        }
+        if (result.intent_id || result.symbol) {
+          this.closeOk = `Recovered: ${result.symbol || ''} ${result.intent_status || result.status || ''}`.trim();
+        }
+      }
+    } catch {
+      // Keep the local token/request body so the operator can retry manually.
+    }
+  }
+
   private _resetOpen() {
     this.openPrev = null;
     this.openTok = '';
     this.openErr = '';
     this.openOk = '';
+    this._openReq = null;
   }
 
   private _resetClose() {
@@ -440,6 +569,7 @@ export class TradePanel extends LitElement {
     this.closeTok = '';
     this.closeErr = '';
     this.closeOk = '';
+    this._closeReq = null;
   }
 
   private _fmt(v: number | null | undefined, dp = 2): string {
@@ -488,10 +618,14 @@ export class TradePanel extends LitElement {
 
   private async _doOpenPreview() {
     this._resetOpen();
+    this._clearPersistedTradeState('open');
     this.openBusy = true;
     try {
-      const res = await tradePreview(this._openBody());
+      const requestBody = this._openBody();
+      const res = await tradePreview(requestBody);
       this.openTok = res?.confirm_token || '';
+      this._openReq = requestBody;
+      if (this.openTok) this._persistTradeState('open', this.openTok, requestBody, res ?? null);
       if (res?.job_id) {
         // Poll for subprocess result (server-side estimates)
         const result = await this._awaitJobResult(res.job_id);
@@ -500,16 +634,20 @@ export class TradePanel extends LitElement {
         } else if (result && result.error) {
           this.openErr = result.error;
           this.openTok = ''; // invalidate — preview failed
+          this._clearPersistedTradeState('open');
         } else {
           // Timeout — no result received
           this.openErr = 'Preview timed out, please retry';
           this.openTok = '';
+          this._clearPersistedTradeState('open');
         }
       } else if (res?.ok) {
         this.openPrev = res;
+        if (this.openTok) this._persistTradeState('open', this.openTok, requestBody, res);
       }
     } catch (e: any) {
       this.openErr = e?.message || 'Preview failed';
+      this._clearPersistedTradeState('open');
     } finally {
       this.openBusy = false;
     }
@@ -521,21 +659,25 @@ export class TradePanel extends LitElement {
     this.openErr = '';
     try {
       let res: any;
+      const executeBody = { ...(this._openReq || this._openBody()), confirm_token: this.openTok };
       try {
-        res = await tradeExecute({ ...this._openBody(), confirm_token: this.openTok });
+        res = await tradeExecute(executeBody);
       } catch (e: any) {
         const msg: string = e?.message ?? '';
         // If the confirm token was lost (hub restart), auto re-preview and retry once.
         if (msg.includes('confirm token') || msg.includes('expired')) {
-          const preview = await tradePreview(this._openBody());
+          const requestBody = this._openReq || this._openBody();
+          const preview = await tradePreview(requestBody);
           this.openTok = preview?.confirm_token || '';
+          this._openReq = requestBody;
           if (!this.openTok) throw e;
+          this._persistTradeState('open', this.openTok, requestBody, preview ?? null);
           // Wait for preview job to complete before retrying execute.
           if (preview?.job_id) {
             const prevResult = await this._awaitJobResult(preview.job_id);
             if (!prevResult?.ok) throw e;
           }
-          res = await tradeExecute({ ...this._openBody(), confirm_token: this.openTok });
+          res = await tradeExecute({ ...requestBody, confirm_token: this.openTok });
         } else {
           throw e;
         }
@@ -554,6 +696,7 @@ export class TradePanel extends LitElement {
       }
       this.openTok = '';
       this.openPrev = null;
+      this._clearPersistedTradeState('open');
       this.dispatchEvent(new CustomEvent('tradedone', { bubbles: true, composed: true }));
     } catch (e: any) {
       this.openErr = e?.message || 'Execution failed';
@@ -575,13 +718,18 @@ export class TradePanel extends LitElement {
 
   private async _doClosePreview() {
     this._resetClose();
+    this._clearPersistedTradeState('close');
     this.closeBusy = true;
     try {
-      const res = await tradeClose(this._closeBody());
+      const requestBody = this._closeBody();
+      const res = await tradeClose(requestBody);
       this.closePrev = res;
       this.closeTok = res?.confirm_token || '';
+      this._closeReq = requestBody;
+      if (this.closeTok) this._persistTradeState('close', this.closeTok, requestBody, res ?? null);
     } catch (e: any) {
       this.closeErr = e?.message || 'Preview failed';
+      this._clearPersistedTradeState('close');
     } finally {
       this.closeBusy = false;
     }
@@ -593,16 +741,20 @@ export class TradePanel extends LitElement {
     this.closeErr = '';
     try {
       let res: any;
+      const executeBody = { ...(this._closeReq || this._closeBody()), confirm_token: this.closeTok };
       try {
-        res = await tradeClose({ ...this._closeBody(), confirm_token: this.closeTok });
+        res = await tradeClose(executeBody);
       } catch (e: any) {
         const msg: string = e?.message ?? '';
         // If the confirm token was lost (hub restart), auto-refresh and retry once.
         if (msg.includes('confirm token') || msg.includes('expired')) {
-          const preview = await tradeClose(this._closeBody());
+          const requestBody = this._closeReq || this._closeBody();
+          const preview = await tradeClose(requestBody);
           this.closeTok = preview?.confirm_token || '';
+          this._closeReq = requestBody;
           if (!this.closeTok) throw e;
-          res = await tradeClose({ ...this._closeBody(), confirm_token: this.closeTok });
+          this._persistTradeState('close', this.closeTok, requestBody, preview ?? null);
+          res = await tradeClose({ ...requestBody, confirm_token: this.closeTok });
         } else {
           throw e;
         }
@@ -621,6 +773,7 @@ export class TradePanel extends LitElement {
       }
       this.closeTok = '';
       this.closePrev = null;
+      this._clearPersistedTradeState('close');
       this.dispatchEvent(new CustomEvent('tradedone', { bubbles: true, composed: true }));
     } catch (e: any) {
       this.closeErr = e?.message || 'Close failed';
