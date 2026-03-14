@@ -385,15 +385,20 @@ async fn trade_cancel(
     let preflight_config = config.clone();
     let preflight_request = request.clone();
     let preflight = tokio::task::spawn_blocking(move || {
-        manual_trade::preflight_cancel_retry(&preflight_config, &preflight_request)
+        manual_trade::preflight_cancel_request(&preflight_config, &preflight_request)
     })
     .await
     .map_err(|error| HubError::Internal(format!("cancel preflight task failed: {error}")))??;
-    if let Some(existing) = preflight {
-        return Ok(Json(existing));
+    match preflight {
+        manual_trade::ManualCancelPreflight::ExistingTerminal(existing) => {
+            return Ok(Json(existing));
+        }
+        manual_trade::ManualCancelPreflight::NewSubmission => {
+            ensure_live_orders_enabled(&state, &request.symbol, "CANCEL").await?;
+            check_manual_cancel_risk(&state, &request.symbol).await?;
+        }
+        manual_trade::ManualCancelPreflight::ExistingPendingRequest => {}
     }
-    ensure_live_orders_enabled(&state, &request.symbol, "CANCEL").await?;
-    check_manual_cancel_risk(&state, &request.symbol).await?;
     let result = tokio::task::spawn_blocking(move || manual_trade::cancel_order(&config, &request))
         .await
         .map_err(|error| HubError::Internal(format!("cancel task failed: {error}")))??;
