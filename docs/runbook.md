@@ -50,6 +50,21 @@ live equity (including unrealised PnL) and compares each challenger against the
 currently deployed target config before any paper replacement is applied. Use
 `balance.mode: fixed` only for controlled research runs.
 
+Factory validation now splits the common DB coverage into an explicit train
+window plus a trailing holdout window. Tune `validation.holdout_fraction` and
+`validation.holdout_splits` in `config/factory_defaults.yaml` when operators
+need a different holdout share or slice count. Sweep / TPE search and the
+dedicated CPU parity replay run on the train window, while candidate gating and
+incumbent/challenger comparison use the holdout window only.
+The financial-grade defaults reserve the trailing 25% of common coverage as the
+holdout window and summarise it in 3 equal holdout slices.
+
+Inspect `artifacts/.../run_metadata.json` and the candidate rows in
+`reports/report.json` for the resolved `coverage`, `train`, and `holdout`
+boundaries. Candidate rows now expose `train_parity_replay_report_path`,
+`holdout_summary_path`, and `holdout_median_daily_return` so operators can
+audit exactly which window produced each gate decision.
+
 Paper selection is now deterministic per role. `primary` prefers `efficient`
 artefacts ranked by total PnL, then profit factor, then lower drawdown;
 `fallback` prefers `growth` artefacts ranked by profit factor, then total PnL,

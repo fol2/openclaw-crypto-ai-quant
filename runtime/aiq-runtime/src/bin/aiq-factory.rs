@@ -282,7 +282,9 @@ struct ValidationSettings {
     min_trades: u32,
     slippage_bps: f64,
     max_top1_pnl_pct: f64,
-    walk_forward_splits: usize,
+    holdout_fraction: f64,
+    #[serde(alias = "walk_forward_splits")]
+    holdout_splits: usize,
     parity_abs_eps: f64,
     parity_rel_eps: f64,
     parity_trade_delta_max: u32,
@@ -295,7 +297,8 @@ impl Default for ValidationSettings {
             min_trades: 30,
             slippage_bps: 20.0,
             max_top1_pnl_pct: 0.50,
-            walk_forward_splits: 3,
+            holdout_fraction: 0.25,
+            holdout_splits: 3,
             parity_abs_eps: 0.001,
             parity_rel_eps: 0.000_001,
             parity_trade_delta_max: 0,
@@ -485,7 +488,7 @@ struct ParityThresholds {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct SplitReturn {
+struct HoldoutSplit {
     split: usize,
     start_ts_ms: i64,
     end_ts_ms: i64,
@@ -496,10 +499,24 @@ struct SplitReturn {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct WalkForwardSummary {
+struct HoldoutSummary {
     split_count: usize,
-    median_oos_daily_return: f64,
-    splits: Vec<SplitReturn>,
+    median_holdout_daily_return: f64,
+    holdout_window: TimeWindowRecord,
+    splits: Vec<HoldoutSplit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TimeWindowRecord {
+    start_ts_ms: i64,
+    end_ts_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationWindowsRecord {
+    coverage: TimeWindowRecord,
+    train: TimeWindowRecord,
+    holdout: TimeWindowRecord,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,8 +547,10 @@ struct ValidationItem {
     total_pnl: f64,
     total_trades: u32,
     validation_gate: String,
-    walk_forward_summary_path: String,
-    wf_median_oos_daily_return: f64,
+    validation_windows: ValidationWindowsRecord,
+    train_parity_replay_report_path: String,
+    holdout_summary_path: String,
+    holdout_median_daily_return: f64,
     blocked_reasons: Vec<String>,
     rejected: bool,
     reject_reason: String,
@@ -654,9 +673,10 @@ struct PerformanceSummary {
     top1_pnl_pct: f64,
     slippage_pnl_at_reject_bps: f64,
     slippage_reject_bps: f64,
-    wf_median_oos_daily_return: f64,
+    validation_windows: ValidationWindowsRecord,
+    holdout_median_daily_return: f64,
     replay_report_path: String,
-    walk_forward_summary_path: String,
+    holdout_summary_path: String,
     rejected: bool,
     reject_reason: String,
     blocked_reasons: Vec<String>,
@@ -839,7 +859,8 @@ struct RunMetadataArgs {
     min_trades: u32,
     slippage_reject_bps: f64,
     max_top1_pnl_pct: f64,
-    walk_forward_splits: usize,
+    holdout_fraction: f64,
+    holdout_splits: usize,
     gpu: bool,
     tpe: bool,
     tpe_trials: usize,
@@ -851,8 +872,7 @@ struct RunMetadataArgs {
     initial_balance_secrets_path: Option<String>,
     candles_db_dir: String,
     funding_db: String,
-    start_ts_ms: i64,
-    end_ts_ms: i64,
+    validation_windows: ValidationWindowsRecord,
     apply_to_paper: bool,
     restart_paper_services: bool,
     apply_to_live: bool,
@@ -928,7 +948,7 @@ struct RunMetadataInput<'a> {
     balance: &'a BalanceResolution,
     profile: FactoryProfile,
     profile_settings: &'a FactoryProfileSettings,
-    db_window: &'a ResolvedDbWindow,
+    validation_windows: &'a ResolvedValidationWindows,
     validated: &'a [ValidationItem],
     selected: &'a [SelectionCandidate],
 }
@@ -938,7 +958,7 @@ struct ChallengeContext<'a> {
     validation: &'a ValidationSettings,
     selection: &'a SelectionSettings,
     comparison: &'a ComparisonSettings,
-    db_window: &'a ResolvedDbWindow,
+    validation_windows: &'a ResolvedValidationWindows,
     selected: &'a [SelectionCandidate],
     validated: &'a [ValidationItem],
     initial_balance: f64,
@@ -966,6 +986,32 @@ struct ResolvedDbWindow {
     exit_db: PathBuf,
     start_ts_ms: i64,
     end_ts_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedValidationWindows {
+    coverage: ResolvedDbWindow,
+    train: ResolvedDbWindow,
+    holdout: ResolvedDbWindow,
+}
+
+impl ResolvedValidationWindows {
+    fn record(&self) -> ValidationWindowsRecord {
+        ValidationWindowsRecord {
+            coverage: TimeWindowRecord {
+                start_ts_ms: self.coverage.start_ts_ms,
+                end_ts_ms: self.coverage.end_ts_ms,
+            },
+            train: TimeWindowRecord {
+                start_ts_ms: self.train.start_ts_ms,
+                end_ts_ms: self.train.end_ts_ms,
+            },
+            holdout: TimeWindowRecord {
+                start_ts_ms: self.holdout.start_ts_ms,
+                end_ts_ms: self.holdout.end_ts_ms,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1079,7 +1125,9 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         &raw_document,
     )?;
 
-    let db_window = compute_common_time_range(&base_cfg, &paths.candles_db_dir)?;
+    let coverage_window = compute_common_time_range(&base_cfg, &paths.candles_db_dir)?;
+    let validation_windows =
+        resolve_validation_windows(&coverage_window, settings.validation.holdout_fraction)?;
     let sweep_candidates_path = run_dir.join("sweeps/sweep_candidates.jsonl");
     let sweep_results_path = run_dir.join("sweeps/sweep_results.jsonl");
     run_sweep(SweepCommandInput {
@@ -1087,7 +1135,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         profile: &profile_settings,
         config_path: &effective_config_path,
         initial_balance: resolved_balance.amount_usd,
-        db_window: &db_window,
+        db_window: &validation_windows.train,
         output_path: &sweep_candidates_path,
         stderr_path: &run_dir.join("sweeps/sweep.stderr.txt"),
         stdout_path: &run_dir.join("sweeps/sweep.stdout.txt"),
@@ -1113,7 +1161,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
             &raw_document,
             &base_cfg,
             &run_dir,
-            &db_window,
+            &validation_windows,
             candidate,
             resolved_balance.amount_usd,
         )?);
@@ -1128,7 +1176,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         validation: &settings.validation,
         selection: &settings.selection,
         comparison: &settings.comparison,
-        db_window: &db_window,
+        validation_windows: &validation_windows,
         selected: &selected,
         validated: &validated,
         initial_balance: resolved_balance.amount_usd,
@@ -1227,7 +1275,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         balance: &resolved_balance,
         profile: args.profile,
         profile_settings: &profile_settings,
-        db_window: &db_window,
+        validation_windows: &validation_windows,
         validated: &validated,
         selected: &selected,
     })?;
@@ -1694,6 +1742,47 @@ fn compute_common_time_range(
     })
 }
 
+fn clone_db_window_with_range(
+    base: &ResolvedDbWindow,
+    start_ts_ms: i64,
+    end_ts_ms: i64,
+) -> ResolvedDbWindow {
+    ResolvedDbWindow {
+        start_ts_ms,
+        end_ts_ms,
+        ..base.clone()
+    }
+}
+
+fn resolve_validation_windows(
+    coverage: &ResolvedDbWindow,
+    holdout_fraction: f64,
+) -> Result<ResolvedValidationWindows> {
+    if !(0.0 < holdout_fraction && holdout_fraction < 1.0) {
+        bail!(
+            "validation.holdout_fraction must be between 0 and 1 (exclusive), got {}",
+            holdout_fraction
+        );
+    }
+    let total_span = coverage.end_ts_ms - coverage.start_ts_ms;
+    if total_span < 2 {
+        bail!("validation coverage window is too small to split into train and holdout windows");
+    }
+    let holdout_span =
+        ((total_span as f64 * holdout_fraction).ceil() as i64).clamp(1, total_span - 1);
+    let holdout_start_ts_ms = coverage.end_ts_ms - holdout_span;
+    if holdout_start_ts_ms <= coverage.start_ts_ms || holdout_start_ts_ms >= coverage.end_ts_ms {
+        bail!(
+            "failed to derive non-empty train and holdout windows from the common coverage range"
+        );
+    }
+    Ok(ResolvedValidationWindows {
+        coverage: coverage.clone(),
+        train: clone_db_window_with_range(coverage, coverage.start_ts_ms, holdout_start_ts_ms),
+        holdout: clone_db_window_with_range(coverage, holdout_start_ts_ms, coverage.end_ts_ms),
+    })
+}
+
 fn candles_db_path(candles_db_dir: &Path, interval: &str) -> PathBuf {
     candles_db_dir.join(format!("candles_{}.db", interval))
 }
@@ -1845,7 +1934,7 @@ fn validate_candidate(
     base_document: &serde_yaml::Value,
     base_cfg: &StrategyConfig,
     run_dir: &Path,
-    db_window: &ResolvedDbWindow,
+    validation_windows: &ResolvedValidationWindows,
     shortlisted: ShortlistedCandidate,
     initial_balance: f64,
 ) -> Result<ValidationItem> {
@@ -1886,7 +1975,7 @@ fn validate_candidate(
         paths,
         config_path: &candidate_effective_config_path,
         initial_balance,
-        db_window,
+        db_window: &validation_windows.holdout,
         output_path: &replay_path,
         stdout_path: &run_dir
             .join("replays")
@@ -1901,7 +1990,7 @@ fn validate_candidate(
         paths,
         config_path: &candidate_effective_config_path,
         initial_balance,
-        db_window,
+        db_window: &validation_windows.holdout,
         output_path: &slippage_path,
         stdout_path: &run_dir
             .join("replays")
@@ -1911,22 +2000,38 @@ fn validate_candidate(
             .join(format!("{candidate_name}.slippage.stderr.txt")),
         slippage_bps: Some(validation.slippage_bps),
     })?;
-    let walk_forward_summary = build_walk_forward_summary(
+    let train_parity_replay_path =
+        replay_dir.join(format!("{candidate_name}.train_parity.replay.json"));
+    let train_parity_report = run_replay(ReplayCommandInput {
+        paths,
+        config_path: &candidate_effective_config_path,
+        initial_balance,
+        db_window: &validation_windows.train,
+        output_path: &train_parity_replay_path,
+        stdout_path: &run_dir
+            .join("replays")
+            .join(format!("{candidate_name}.train_parity.stdout.txt")),
+        stderr_path: &run_dir
+            .join("replays")
+            .join(format!("{candidate_name}.train_parity.stderr.txt")),
+        slippage_bps: None,
+    })?;
+    let holdout_summary = build_holdout_summary(
         paths,
         &candidate_effective_config_path,
         initial_balance,
-        db_window,
-        validation.walk_forward_splits,
-        &run_dir.join("walk_forward").join(&candidate_name),
+        &validation_windows.holdout,
+        validation.holdout_splits,
+        &run_dir.join("holdout").join(&candidate_name),
     )?;
-    let walk_forward_path = run_dir
-        .join("walk_forward")
+    let holdout_summary_path = run_dir
+        .join("holdout")
         .join(&candidate_name)
         .join("summary.json");
-    write_json(&walk_forward_path, &walk_forward_summary)?;
+    write_json(&holdout_summary_path, &holdout_summary)?;
     let top1_pnl_pct = top1_symbol_share(&replay_report);
     let parity =
-        compare_cpu_replay_to_gpu_candidate(&replay_report, &shortlisted.sweep, validation);
+        compare_cpu_replay_to_gpu_candidate(&train_parity_report, &shortlisted.sweep, validation);
     let mut blocked_reasons = Vec::new();
     if replay_report.total_trades < validation.min_trades {
         blocked_reasons.push(format!(
@@ -1946,10 +2051,10 @@ fn validate_candidate(
             top1_pnl_pct, validation.max_top1_pnl_pct
         ));
     }
-    if walk_forward_summary.median_oos_daily_return <= 0.0 {
+    if holdout_summary.median_holdout_daily_return <= 0.0 {
         blocked_reasons.push(format!(
-            "walk_forward: median_oos_daily_return {:.6} <= 0",
-            walk_forward_summary.median_oos_daily_return
+            "holdout: median_daily_return {:.6} <= 0",
+            holdout_summary.median_holdout_daily_return
         ));
     }
     if validation.parity_enforce && parity.status != "pass" {
@@ -1971,8 +2076,8 @@ fn validate_candidate(
         profit_factor: replay_report.profit_factor,
         rank: shortlisted.rank,
         replay_report_path: replay_path.display().to_string(),
-        replay_stage: "cpu_replay".to_string(),
-        schema_version: 1,
+        replay_stage: "cpu_holdout_replay".to_string(),
+        schema_version: 2,
         shortlist_mode: shortlisted.shortlist_mode.as_str().to_string(),
         slippage_pnl_at_reject_bps: slippage_report.total_pnl,
         slippage_reject_bps: validation.slippage_bps,
@@ -1987,9 +2092,11 @@ fn validate_candidate(
         total_fees: replay_report.total_fees,
         total_pnl: replay_report.total_pnl,
         total_trades: replay_report.total_trades,
-        validation_gate: "candidate->validated".to_string(),
-        walk_forward_summary_path: walk_forward_path.display().to_string(),
-        wf_median_oos_daily_return: walk_forward_summary.median_oos_daily_return,
+        validation_gate: "candidate->validated_holdout".to_string(),
+        validation_windows: validation_windows.record(),
+        train_parity_replay_report_path: train_parity_replay_path.display().to_string(),
+        holdout_summary_path: holdout_summary_path.display().to_string(),
+        holdout_median_daily_return: holdout_summary.median_holdout_daily_return,
         blocked_reasons: blocked_reasons.clone(),
         rejected,
         reject_reason,
@@ -2001,7 +2108,7 @@ fn evaluate_config_performance(
     validation: &ValidationSettings,
     config_path: &Path,
     output_prefix: &Path,
-    db_window: &ResolvedDbWindow,
+    validation_windows: &ResolvedValidationWindows,
     initial_balance: f64,
     role: Option<&str>,
 ) -> Result<PerformanceSummary> {
@@ -2037,7 +2144,7 @@ fn evaluate_config_performance(
         paths,
         config_path: &runtime_config_path,
         initial_balance,
-        db_window,
+        db_window: &validation_windows.holdout,
         output_path: &replay_report_path,
         stdout_path: &output_prefix.with_extension("replay.stdout.txt"),
         stderr_path: &output_prefix.with_extension("replay.stderr.txt"),
@@ -2047,32 +2154,32 @@ fn evaluate_config_performance(
         paths,
         config_path: &runtime_config_path,
         initial_balance,
-        db_window,
+        db_window: &validation_windows.holdout,
         output_path: &output_prefix.with_extension("slippage_20bps.json"),
         stdout_path: &output_prefix.with_extension("slippage.stdout.txt"),
         stderr_path: &output_prefix.with_extension("slippage.stderr.txt"),
         slippage_bps: Some(validation.slippage_bps),
     })?;
-    let walk_forward_dir = output_prefix
+    let holdout_dir = output_prefix
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(
-            "{}_walk_forward",
+            "{}_holdout",
             output_prefix
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("config")
         ));
-    let walk_forward_summary = build_walk_forward_summary(
+    let holdout_summary = build_holdout_summary(
         paths,
         &runtime_config_path,
         initial_balance,
-        db_window,
-        validation.walk_forward_splits,
-        &walk_forward_dir,
+        &validation_windows.holdout,
+        validation.holdout_splits,
+        &holdout_dir,
     )?;
-    let walk_forward_summary_path = walk_forward_dir.join("summary.json");
-    write_json(&walk_forward_summary_path, &walk_forward_summary)?;
+    let holdout_summary_path = holdout_dir.join("summary.json");
+    write_json(&holdout_summary_path, &holdout_summary)?;
     let top1_pnl_pct = top1_symbol_share(&replay);
     let mut blocked_reasons = Vec::new();
     if replay.total_trades < validation.min_trades {
@@ -2093,10 +2200,10 @@ fn evaluate_config_performance(
             top1_pnl_pct, validation.max_top1_pnl_pct
         ));
     }
-    if walk_forward_summary.median_oos_daily_return <= 0.0 {
+    if holdout_summary.median_holdout_daily_return <= 0.0 {
         blocked_reasons.push(format!(
-            "walk_forward: median_oos_daily_return {:.6} <= 0",
-            walk_forward_summary.median_oos_daily_return
+            "holdout: median_daily_return {:.6} <= 0",
+            holdout_summary.median_holdout_daily_return
         ));
     }
     let rejected = !blocked_reasons.is_empty();
@@ -2115,9 +2222,10 @@ fn evaluate_config_performance(
         top1_pnl_pct,
         slippage_pnl_at_reject_bps: slippage_report.total_pnl,
         slippage_reject_bps: validation.slippage_bps,
-        wf_median_oos_daily_return: walk_forward_summary.median_oos_daily_return,
+        validation_windows: validation_windows.record(),
+        holdout_median_daily_return: holdout_summary.median_holdout_daily_return,
         replay_report_path: replay_report_path.display().to_string(),
-        walk_forward_summary_path: walk_forward_summary_path.display().to_string(),
+        holdout_summary_path: holdout_summary_path.display().to_string(),
         rejected,
         reject_reason,
         blocked_reasons,
@@ -2130,7 +2238,7 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
         validation,
         selection,
         comparison,
-        db_window,
+        validation_windows,
         selected,
         validated,
         initial_balance,
@@ -2154,7 +2262,7 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
             &run_dir
                 .join("lane_effective")
                 .join(format!("challenger_{}", target.role.to_ascii_lowercase())),
-            db_window,
+            validation_windows,
             initial_balance,
             Some(target.role.as_str()),
         )?;
@@ -2162,7 +2270,7 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
             paths,
             validation,
             resolve_under_project(&paths.project_dir, &target.yaml_path).as_path(),
-            db_window,
+            validation_windows,
             initial_balance,
             run_dir,
             target.role.as_str(),
@@ -2182,7 +2290,7 @@ fn incumbent_performance(
     paths: &ResolvedPaths,
     validation: &ValidationSettings,
     target_yaml_path: &Path,
-    db_window: &ResolvedDbWindow,
+    validation_windows: &ResolvedValidationWindows,
     initial_balance: f64,
     run_dir: &Path,
     role: &str,
@@ -2200,7 +2308,7 @@ fn incumbent_performance(
         validation,
         &effective_config_path,
         &output_prefix,
-        db_window,
+        validation_windows,
         initial_balance,
         Some(role),
     )?))
@@ -2423,14 +2531,14 @@ fn run_replay(input: ReplayCommandInput<'_>) -> Result<ReplaySummary> {
     Ok(report)
 }
 
-fn build_walk_forward_summary(
+fn build_holdout_summary(
     paths: &ResolvedPaths,
     config_path: &Path,
     initial_balance: f64,
     db_window: &ResolvedDbWindow,
     split_count: usize,
     output_dir: &Path,
-) -> Result<WalkForwardSummary> {
+) -> Result<HoldoutSummary> {
     fs::create_dir_all(output_dir).with_context(|| format!("create {}", output_dir.display()))?;
     let splits = split_time_range(
         (db_window.start_ts_ms, db_window.end_ts_ms),
@@ -2443,11 +2551,7 @@ fn build_walk_forward_summary(
             paths,
             config_path,
             initial_balance,
-            db_window: &ResolvedDbWindow {
-                start_ts_ms,
-                end_ts_ms,
-                ..db_window.clone()
-            },
+            db_window: &clone_db_window_with_range(db_window, start_ts_ms, end_ts_ms),
             output_path: &replay_path,
             stdout_path: &output_dir.join(format!("split{}.stdout.txt", idx + 1)),
             stderr_path: &output_dir.join(format!("split{}.stderr.txt", idx + 1)),
@@ -2459,7 +2563,7 @@ fn build_walk_forward_summary(
         } else {
             ((report.final_balance / report.initial_balance) - 1.0) / days
         };
-        outputs.push(SplitReturn {
+        outputs.push(HoldoutSplit {
             split: idx + 1,
             start_ts_ms,
             end_ts_ms,
@@ -2470,9 +2574,13 @@ fn build_walk_forward_summary(
         });
     }
     let median = median(outputs.iter().map(|item| item.daily_return).collect());
-    Ok(WalkForwardSummary {
+    Ok(HoldoutSummary {
         split_count: outputs.len(),
-        median_oos_daily_return: median,
+        median_holdout_daily_return: median,
+        holdout_window: TimeWindowRecord {
+            start_ts_ms: db_window.start_ts_ms,
+            end_ts_ms: db_window.end_ts_ms,
+        },
         splits: outputs,
     })
 }
@@ -4494,7 +4602,7 @@ fn build_run_metadata(input: RunMetadataInput<'_>) -> Result<RunMetadata> {
         balance,
         profile,
         profile_settings,
-        db_window,
+        validation_windows,
         validated,
         selected,
     } = input;
@@ -4515,7 +4623,8 @@ fn build_run_metadata(input: RunMetadataInput<'_>) -> Result<RunMetadata> {
             min_trades: settings.validation.min_trades,
             slippage_reject_bps: settings.validation.slippage_bps,
             max_top1_pnl_pct: settings.validation.max_top1_pnl_pct,
-            walk_forward_splits: settings.validation.walk_forward_splits,
+            holdout_fraction: settings.validation.holdout_fraction,
+            holdout_splits: settings.validation.holdout_splits,
             gpu: profile_settings.gpu,
             tpe: profile_settings.tpe,
             tpe_trials: profile_settings.tpe_trials,
@@ -4527,8 +4636,7 @@ fn build_run_metadata(input: RunMetadataInput<'_>) -> Result<RunMetadata> {
             initial_balance_secrets_path: balance.secrets_path.clone(),
             candles_db_dir: paths.candles_db_dir.display().to_string(),
             funding_db: paths.funding_db_path.display().to_string(),
-            start_ts_ms: db_window.start_ts_ms,
-            end_ts_ms: db_window.end_ts_ms,
+            validation_windows: validation_windows.record(),
             apply_to_paper: settings.deployment.apply_to_paper,
             restart_paper_services: settings.deployment.restart_services,
             apply_to_live: settings.deployment.apply_to_live,
@@ -4560,7 +4668,7 @@ fn best_overall_candidate(validated: &[ValidationItem]) -> Option<ValidationItem
 fn build_report_markdown(items: &[ValidationItem]) -> String {
     let mut out = String::from("# Factory Report\n\n");
     out.push_str(
-        "| Candidate | Mode | Trades | PnL | PF | DD | Top-1 PnL | WF median | Status |\n",
+        "| Candidate | Mode | Trades | PnL | PF | DD | Top-1 PnL | Holdout median | Status |\n",
     );
     out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---|\n");
     for item in items {
@@ -4576,7 +4684,7 @@ fn build_report_markdown(items: &[ValidationItem]) -> String {
             item.profit_factor,
             item.max_drawdown_pct * 100.0,
             item.top1_pnl_pct * 100.0,
-            item.wf_median_oos_daily_return,
+            item.holdout_median_daily_return,
             if item.rejected {
                 "rejected"
             } else {
@@ -5272,8 +5380,8 @@ symbols:
             profit_factor: pf,
             rank: 1,
             replay_report_path: "/tmp/replay.json".to_string(),
-            replay_stage: "cpu_replay".to_string(),
-            schema_version: 1,
+            replay_stage: "cpu_holdout_replay".to_string(),
+            schema_version: 2,
             shortlist_mode: mode.to_string(),
             slippage_pnl_at_reject_bps: pnl,
             slippage_reject_bps: 20.0,
@@ -5298,9 +5406,24 @@ symbols:
             total_fees: 1.0,
             total_pnl: pnl,
             total_trades: 40,
-            validation_gate: "candidate->validated".to_string(),
-            walk_forward_summary_path: "/tmp/wf.json".to_string(),
-            wf_median_oos_daily_return: 0.01,
+            validation_gate: "candidate->validated_holdout".to_string(),
+            validation_windows: ValidationWindowsRecord {
+                coverage: TimeWindowRecord {
+                    start_ts_ms: 1,
+                    end_ts_ms: 300,
+                },
+                train: TimeWindowRecord {
+                    start_ts_ms: 1,
+                    end_ts_ms: 225,
+                },
+                holdout: TimeWindowRecord {
+                    start_ts_ms: 225,
+                    end_ts_ms: 300,
+                },
+            },
+            train_parity_replay_report_path: "/tmp/train_parity.json".to_string(),
+            holdout_summary_path: "/tmp/holdout.json".to_string(),
+            holdout_median_daily_return: 0.01,
             blocked_reasons: Vec::new(),
             rejected: false,
             reject_reason: String::new(),
@@ -5322,13 +5445,94 @@ symbols:
             top1_pnl_pct: 0.2,
             slippage_pnl_at_reject_bps: pnl,
             slippage_reject_bps: 20.0,
-            wf_median_oos_daily_return: 0.01,
+            validation_windows: ValidationWindowsRecord {
+                coverage: TimeWindowRecord {
+                    start_ts_ms: 1,
+                    end_ts_ms: 300,
+                },
+                train: TimeWindowRecord {
+                    start_ts_ms: 1,
+                    end_ts_ms: 225,
+                },
+                holdout: TimeWindowRecord {
+                    start_ts_ms: 225,
+                    end_ts_ms: 300,
+                },
+            },
+            holdout_median_daily_return: 0.01,
             replay_report_path: "/tmp/replay.json".to_string(),
-            walk_forward_summary_path: "/tmp/wf.json".to_string(),
+            holdout_summary_path: "/tmp/holdout.json".to_string(),
             rejected: false,
             reject_reason: String::new(),
             blocked_reasons: Vec::new(),
         }
+    }
+
+    #[test]
+    fn resolve_validation_windows_splits_trailing_holdout_window() {
+        let coverage = ResolvedDbWindow {
+            main_interval: "1h".to_string(),
+            entry_interval: "1h".to_string(),
+            exit_interval: "1h".to_string(),
+            main_db: PathBuf::from("/tmp/main.db"),
+            entry_db: PathBuf::from("/tmp/entry.db"),
+            exit_db: PathBuf::from("/tmp/exit.db"),
+            start_ts_ms: 100,
+            end_ts_ms: 500,
+        };
+
+        let windows = resolve_validation_windows(&coverage, 0.25).unwrap();
+
+        assert_eq!(windows.coverage.start_ts_ms, 100);
+        assert_eq!(windows.coverage.end_ts_ms, 500);
+        assert_eq!(windows.train.start_ts_ms, 100);
+        assert_eq!(windows.train.end_ts_ms, 400);
+        assert_eq!(windows.holdout.start_ts_ms, 400);
+        assert_eq!(windows.holdout.end_ts_ms, 500);
+        assert_eq!(windows.record().holdout.start_ts_ms, 400);
+    }
+
+    #[test]
+    fn resolve_validation_windows_rejects_invalid_holdout_fraction() {
+        let coverage = ResolvedDbWindow {
+            main_interval: "1h".to_string(),
+            entry_interval: "1h".to_string(),
+            exit_interval: "1h".to_string(),
+            main_db: PathBuf::from("/tmp/main.db"),
+            entry_db: PathBuf::from("/tmp/entry.db"),
+            exit_db: PathBuf::from("/tmp/exit.db"),
+            start_ts_ms: 100,
+            end_ts_ms: 500,
+        };
+
+        assert!(resolve_validation_windows(&coverage, 0.0)
+            .unwrap_err()
+            .to_string()
+            .contains("holdout_fraction"));
+        assert!(resolve_validation_windows(&coverage, 1.0)
+            .unwrap_err()
+            .to_string()
+            .contains("holdout_fraction"));
+    }
+
+    #[test]
+    fn validation_settings_accept_legacy_walk_forward_splits_alias() {
+        let settings: ValidationSettings = serde_yaml::from_str(
+            r#"
+min_trades: 30
+slippage_bps: 20.0
+max_top1_pnl_pct: 0.50
+walk_forward_splits: 4
+parity_abs_eps: 0.001
+parity_rel_eps: 0.000001
+parity_trade_delta_max: 0
+parity_enforce: true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.holdout_splits, 4);
+        assert!((settings.holdout_fraction - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -21,6 +21,35 @@ used by the factory cycle and its operator runbooks.
 | Config evaluation (backtest) | 30 | Below this, statistical significance is insufficient to judge a config |
 | Rolling live performance | 30 | PF, win rate, Sharpe computed over a sliding window of the last 30 trades |
 
+## Candidate Validation Governance
+
+Factory candidate validation is now split into explicit train and holdout
+windows.
+
+- Sweep / TPE search runs on the train window only.
+- Promotion gating runs on the trailing holdout window only.
+- GPU/CPU parity is rechecked on the train window with a dedicated CPU replay so
+  parity does not compare train metrics against holdout metrics.
+
+The validation surface in `config/factory_defaults.yaml` is:
+
+- `validation.holdout_fraction` for the trailing holdout share of common DB coverage
+- `validation.holdout_splits` for the number of equal holdout slices summarised in the artefacts
+
+The financial-grade defaults keep the trailing 25% of common coverage as the
+holdout window and summarise it in 3 equal slices.
+
+Holdout promotion into `validated` still requires:
+
+- Median holdout daily return > 0
+- Slippage stress at 20 bps > 0 on the holdout window
+- Minimum holdout trades >= 30
+- Holdout top-1 PnL share < 50%
+
+Artefacts now record the resolved `coverage`, `train`, and `holdout` windows in
+`run_metadata.json`, candidate validation items, and incumbent/challenger
+performance summaries.
+
 ## Role-Governed Paper Replacement
 
 Before a validated challenger can replace a deployed paper target, it must win
