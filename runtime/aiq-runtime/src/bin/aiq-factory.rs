@@ -1873,6 +1873,20 @@ fn compare_challenger_to_incumbent(
     incumbent: Option<PerformanceSummary>,
 ) -> DeploymentChallenge {
     let (decision, reason) = match incumbent.as_ref() {
+        Some(_) if challenger.rejected => (
+            "incumbent_holds".to_string(),
+            format!(
+                "lane-effective challenger fails the validation suite: {}",
+                challenger.reject_reason
+            ),
+        ),
+        None if challenger.rejected => (
+            "challenger_rejected".to_string(),
+            format!(
+                "lane-effective challenger fails the validation suite: {}",
+                challenger.reject_reason
+            ),
+        ),
         None => (
             "no_incumbent".to_string(),
             "no incumbent config deployed on target".to_string(),
@@ -3061,12 +3075,12 @@ fn deploy_selected_configs(
         let existing_marker = load_paper_soak_marker(project_dir, challenge.role.as_str())?;
         if matches!(
             challenge.decision.as_str(),
-            "same_config" | "incumbent_holds"
+            "same_config" | "incumbent_holds" | "challenger_rejected"
         ) {
             passthrough_events.push(DeploymentEvent {
                 role: challenge.role.clone(),
                 slot: challenge.slot,
-                source_config_path: challenge.challenger.config_path.clone(),
+                source_config_path: challenge.source_config_path.clone(),
                 config_id: challenge.challenger.config_id.clone(),
                 config_sha256: challenge.challenger.config_sha256.clone(),
                 promoted_config_path: String::new(),
@@ -3078,10 +3092,9 @@ fn deploy_selected_configs(
                         .to_string()
                 }),
                 restarted_service: false,
-                status: if challenge.decision == "same_config" {
-                    "already_applied".to_string()
-                } else {
-                    challenge.decision.clone()
+                status: match challenge.decision.as_str() {
+                    "same_config" => "already_applied".to_string(),
+                    other => other.to_string(),
                 },
             });
             continue;
@@ -3752,25 +3765,6 @@ symbols:
         }
     }
 
-    fn challenge_for(
-        target: &PaperTarget,
-        decision: &str,
-        challenger: PerformanceSummary,
-        incumbent: Option<PerformanceSummary>,
-    ) -> DeploymentChallenge {
-        DeploymentChallenge {
-            role: target.role.clone(),
-            slot: target.slot,
-            service: target.service.clone(),
-            target_yaml_path: target.yaml_path.display().to_string(),
-            source_config_path: challenger.config_path.clone(),
-            decision: decision.to_string(),
-            reason: "test".to_string(),
-            incumbent,
-            challenger,
-        }
-    }
-
     fn validation_item(mode: &str, config_id: &str, pnl: f64, pf: f64, dd: f64) -> ValidationItem {
         ValidationItem {
             candidate_mode: true,
@@ -4090,6 +4084,26 @@ symbols:
     }
 
     #[test]
+    fn rejected_lane_effective_challenger_never_deploys_without_incumbent() {
+        let target = paper_target_primary();
+        let mut challenger = performance_summary("challenger", 100.0, 1.2, 0.3);
+        challenger.rejected = true;
+        challenger.reject_reason = "lane validation failed".to_string();
+        let source_config_path = challenger.config_path.clone();
+
+        let report = compare_challenger_to_incumbent(
+            &target,
+            &ComparisonSettings::default(),
+            source_config_path.as_str(),
+            challenger,
+            None,
+        );
+
+        assert_eq!(report.decision, "challenger_rejected");
+        assert!(report.reason.contains("lane-effective challenger fails"));
+    }
+
+    #[test]
     fn promote_primary_live_updates_live_yaml_and_writes_deploy_artefacts() {
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path();
@@ -4398,12 +4412,25 @@ symbols:
         };
         write_json(&paper_soak_marker_path(project_dir, "primary"), &old_marker).unwrap();
 
-        let challenge = challenge_for(
-            &paper_target_primary(),
-            "same_config",
-            performance_summary(&config_id, 100.0, 1.2, 0.3),
-            Some(performance_summary(&config_id, 90.0, 1.1, 0.4)),
-        );
+        let runtime_config = run_dir
+            .join("lane_effective")
+            .join("challenger_primary.runtime.yaml");
+        fs::create_dir_all(runtime_config.parent().unwrap()).unwrap();
+        fs::write(&runtime_config, &yaml).unwrap();
+        let challenge = DeploymentChallenge {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            target_yaml_path: paper_target_primary().yaml_path.display().to_string(),
+            source_config_path: source_config.display().to_string(),
+            decision: "same_config".to_string(),
+            reason: "test".to_string(),
+            incumbent: Some(performance_summary(&config_id, 90.0, 1.1, 0.4)),
+            challenger: PerformanceSummary {
+                config_path: runtime_config.display().to_string(),
+                ..performance_summary(&config_id, 100.0, 1.2, 0.3)
+            },
+        };
         let events = deploy_selected_configs(
             project_dir,
             "run-new",
@@ -4422,6 +4449,10 @@ symbols:
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].status, "already_applied");
+        assert_eq!(
+            events[0].source_config_path,
+            source_config.display().to_string()
+        );
         let marker = load_paper_soak_marker(project_dir, "primary")
             .unwrap()
             .unwrap();
