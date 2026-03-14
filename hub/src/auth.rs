@@ -1,9 +1,10 @@
 use anyhow::{bail, Result};
-use axum::extract::Request;
+use axum::extract::{ConnectInfo, Request};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::config::HubConfig;
 
@@ -86,7 +87,8 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
         .unwrap_or("");
     match scope {
         AuthScope::Read => {
-            if matches_query_token(&request, expected_token)
+            if read_auth_bypassed(&request)
+                || matches_query_token(&request, expected_token)
                 || matches_bearer_token(auth_header, expected_token)
                 || (!config.admin_token.is_empty()
                     && (matches_query_token(&request, &config.admin_token)
@@ -108,6 +110,73 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
 fn auth_error(status: StatusCode, message: &str) -> Response {
     let body = json!({ "error": message });
     (status, axum::Json(body)).into_response()
+}
+
+fn read_auth_bypassed(request: &Request) -> bool {
+    request_client_ip(request)
+        .map(is_trusted_read_ip)
+        .unwrap_or(false)
+}
+
+fn request_client_ip(request: &Request) -> Option<IpAddr> {
+    let connect_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|value| value.0.ip());
+    match connect_ip {
+        Some(ip) if ip.is_loopback() => forwarded_client_ip(request),
+        Some(ip) => Some(ip),
+        None => None,
+    }
+}
+
+fn forwarded_client_ip(request: &Request) -> Option<IpAddr> {
+    request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .and_then(parse_ip_like)
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_ip_like)
+        })
+}
+
+fn parse_ip_like(value: &str) -> Option<IpAddr> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    value
+        .parse::<IpAddr>()
+        .ok()
+        .or_else(|| value.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+}
+
+fn is_trusted_read_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => is_trusted_read_ipv4(ipv4),
+        IpAddr::V6(ipv6) => is_trusted_read_ipv6(ipv6),
+    }
+}
+
+fn is_trusted_read_ipv4(ip: Ipv4Addr) -> bool {
+    if ip.is_private() || ip.is_link_local() {
+        return true;
+    }
+    let octets = ip.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn is_trusted_read_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_unique_local() || ip.is_unicast_link_local() {
+        return true;
+    }
+    ip.segments()[0] == 0xfd7a && ip.segments()[1] == 0x115c && ip.segments()[2] == 0xa1e0
 }
 
 fn matches_bearer_token(auth_header: &str, token: &str) -> bool {
@@ -237,6 +306,75 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[test]
+    fn trusted_read_ip_accepts_rfc1918_and_tailscale_ranges() {
+        assert!(is_trusted_read_ip(IpAddr::V4(Ipv4Addr::new(
+            192, 168, 1, 20
+        ))));
+        assert!(is_trusted_read_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42))));
+        assert!(is_trusted_read_ip(IpAddr::V4(Ipv4Addr::new(
+            100, 101, 102, 103
+        ))));
+        assert!(is_trusted_read_ip(
+            "fd7a:115c:a1e0::1234".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_trusted_read_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(!is_trusted_read_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn request_client_ip_prefers_forwarded_header_only_from_loopback_proxy() {
+        let mut proxied = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        proxied
+            .headers_mut()
+            .insert("x-forwarded-for", "100.88.1.9".parse().unwrap());
+        proxied
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        assert_eq!(
+            request_client_ip(&proxied),
+            Some(IpAddr::V4(Ipv4Addr::new(100, 88, 1, 9)))
+        );
+
+        let mut spoofed = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        spoofed
+            .headers_mut()
+            .insert("x-forwarded-for", "192.168.1.9".parse().unwrap());
+        spoofed
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([8, 8, 8, 8], 12345))));
+        assert_eq!(
+            request_client_ip(&spoofed),
+            Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+        );
+    }
+
+    #[test]
+    fn request_client_ip_does_not_trust_bare_loopback_proxy() {
+        let mut proxied = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        proxied
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        assert_eq!(request_client_ip(&proxied), None);
+    }
+
+    #[test]
+    fn request_client_ip_uses_x_real_ip_from_loopback_proxy() {
+        let mut proxied = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        proxied
+            .headers_mut()
+            .insert("x-real-ip", "100.77.1.9".parse().unwrap());
+        proxied
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        assert_eq!(
+            request_client_ip(&proxied),
+            Some(IpAddr::V4(Ipv4Addr::new(100, 77, 1, 9)))
+        );
+    }
+
     #[tokio::test]
     async fn startup_validation_rejects_shared_read_and_admin_tokens() {
         let config = HubAuthConfig {
@@ -263,6 +401,83 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
         )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn read_auth_allows_trusted_lan_without_token() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 23456))));
+
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn read_auth_keeps_token_for_loopback_without_forwarded_ip() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
+
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn read_auth_allows_trusted_tailscale_ipv6_without_token() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "fd7a:115c:a1e0::42".parse::<IpAddr>().unwrap(),
+            23456,
+        )));
+
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_still_requires_token_from_trusted_lan() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([100, 90, 12, 34], 23456))));
+
+        let response = admin_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(request)
         .await
         .unwrap();
 
