@@ -104,6 +104,23 @@ Read the current `LIVE_LOCK_ID` from `GET /api/config/raw?file=live` before an
 apply request. The response exposes the raw-text lock boundary through
 `x-aiq-config-lock-id` and `ETag`.
 
+### Reload Semantics Retired
+
+The old `POST /api/config/reload` surface is now retired and fails closed with
+explicit guidance instead of touching file mtime. The product no longer claims
+that strategy YAML changes are hot-reloaded into running Rust daemons.
+
+Operator-facing config semantics are now:
+
+- non-live files: `Save` writes YAML only
+- live file: `Apply to Live` previews restart impact, then runs the supervised
+  `apply-live` contract
+
+When the resolved live `config_id` changes, the config editor now tells the
+operator that a restart is required before confirmation. When the `config_id`
+does not change, the editor still warns that stale or stopped lanes may be
+supervised during apply.
+
 ## Snapshot Operations
 
 ```bash

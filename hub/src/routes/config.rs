@@ -966,44 +966,15 @@ async fn put_config(
     })))
 }
 
-/// POST /api/config/reload — Touch the config file mtime to trigger hot-reload.
+/// POST /api/config/reload — Retired false-reload surface kept only to fail closed.
 async fn post_config_reload(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Query(q): Query<ConfigQuery>,
 ) -> Result<Json<Value>, HubError> {
-    let path = resolve_config_path_for_state(&state, variant(&q))?;
-    if !path.exists() {
-        return Err(HubError::NotFound(format!(
-            "config file not found: {}",
-            path.display()
-        )));
-    }
-
-    // Touch mtime by opening and syncing.
-    let file = fs::OpenOptions::new().write(true).open(&path)?;
-    file.sync_all()?;
-
-    drop(file);
-
-    // Set mtime via libc utimensat for reliability.
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|e| HubError::Internal(e.to_string()))?;
-        unsafe {
-            libc::utimensat(
-                libc::AT_FDCWD,
-                c_path.as_ptr(),
-                std::ptr::null(), // null = set to current time
-                0,
-            );
-        }
-    }
-
-    Ok(Json(
-        serde_json::json!({ "ok": true, "reloaded": variant(&q) }),
-    ))
+    let file_variant = variant(&q);
+    Err(HubError::BadRequest(format!(
+        "reload semantics were retired for {file_variant}; save non-live YAML directly, use /api/config/actions/apply-live for live changes, or restart the affected service explicitly"
+    )))
 }
 
 /// POST /api/config/actions/apply-live — Transactionally apply a live YAML change and prove runtime health.
@@ -1039,6 +1010,7 @@ async fn post_apply_live(
     )?;
     let candidate =
         validate_candidate_config_write(&state, "live", &state.config.live_yaml_path, &body.yaml)?;
+    let preview_restart_required = candidate.config_id != incumbent.config_id;
     let apply_dir = build_action_dir(&state.config.artifacts_dir.join("applies").join("live"))?;
     let transaction = execute_live_config_transaction(
         &state,
@@ -1069,7 +1041,8 @@ async fn post_apply_live(
         "config_id": candidate.config_id,
         "previous_lock_id": current.lock_id,
         "previous_config_id": incumbent.config_id,
-        "restart_required": transaction.restart_required,
+        "restart_required": if dry_run { preview_restart_required } else { transaction.restart_required },
+        "service": state.config.live_service,
         "restart": {
             "mode": restart_mode.as_str(),
             "result": transaction.runtime_result,
@@ -1558,6 +1531,32 @@ fi
     }
 
     #[tokio::test]
+    async fn post_config_reload_retires_false_reload_semantics() {
+        let dir = tempdir().unwrap();
+        write_main_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let state = test_state(dir.path());
+
+        let err = post_config_reload(
+            State(Arc::clone(&state)),
+            Query(ConfigQuery {
+                file: Some("main".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            HubError::BadRequest(message) => {
+                assert!(message.contains("reload semantics were retired"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn put_config_rejects_runtime_invalid_yaml_before_write() {
         let dir = tempdir().unwrap();
         let config_path = write_main_config(
@@ -1757,6 +1756,36 @@ fi
             event["what"]["candidate_config_id"],
             Value::String(candidate.config_id)
         );
+    }
+
+    #[tokio::test]
+    async fn apply_live_dry_run_reports_restart_requirement_without_mutating_file() {
+        let dir = tempdir().unwrap();
+        let live_yaml =
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n";
+        let live_path = write_live_config(dir.path(), live_yaml);
+        let candidate_yaml =
+            "global:\n  engine:\n    interval: 15m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n";
+        let state = admin_test_state(dir.path(), Path::new("/bin/true"));
+        let current = resolve_current_config_state(&state, "live").unwrap();
+
+        let Json(response) = post_apply_live(
+            State(Arc::clone(&state)),
+            if_match_headers(&current.lock_id),
+            Json(ApplyLiveBody {
+                yaml: candidate_yaml.to_string(),
+                expected_config_id: None,
+                reason: Some("preview".to_string()),
+                restart: Some("auto".to_string()),
+                dry_run: Some(true),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["ok"], Value::Bool(true));
+        assert_eq!(response["restart_required"], Value::Bool(true));
+        assert_eq!(fs::read_to_string(&live_path).unwrap(), live_yaml);
     }
 
     #[tokio::test]
