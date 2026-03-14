@@ -8,6 +8,9 @@ mod hyperliquid;
 #[path = "../../runtime/aiq-runtime/src/live_hyperliquid.rs"]
 mod live_hyperliquid;
 #[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/live_lane.rs"]
+mod live_lane;
+#[allow(dead_code)]
 #[path = "../../runtime/aiq-runtime/src/live_risk.rs"]
 mod live_risk;
 #[allow(dead_code)]
@@ -16,6 +19,12 @@ mod live_safety;
 #[path = "../../runtime/aiq-runtime/src/live_secrets.rs"]
 mod live_secrets;
 mod manual_trade;
+#[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/paper_config.rs"]
+mod paper_config;
+#[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/paper_lane.rs"]
+mod paper_lane;
 mod routes;
 mod sidecar;
 mod state;
@@ -25,7 +34,7 @@ mod subprocess;
 mod test_support;
 mod ws;
 
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::middleware;
 use axum::Router;
 use chrono::Utc;
@@ -110,7 +119,17 @@ async fn health() -> axum::Json<serde_json::Value> {
 fn build_cors_layer(config: &HubConfig) -> Result<CorsLayer, String> {
     let layer = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::IF_MATCH,
+        ])
+        .expose_headers([
+            header::ETAG,
+            HeaderName::from_static("x-aiq-config-id"),
+            HeaderName::from_static("x-aiq-config-id-source"),
+            HeaderName::from_static("x-aiq-config-lock-id"),
+        ]);
 
     if config.cors_allowed_origins.is_empty() {
         return Ok(layer);
@@ -189,6 +208,84 @@ mod tests {
                 .unwrap(),
             "https://console.example"
         );
+    }
+
+    #[tokio::test]
+    async fn cors_exposes_config_identity_headers_for_allowed_origins() {
+        let mut config = HubConfig::from_env();
+        config.cors_allowed_origins = vec!["https://console.example".to_string()];
+        let app = Router::new()
+            .route(
+                "/test",
+                axum::routing::get(|| async {
+                    let mut response = axum::response::Response::new(Body::empty());
+                    response
+                        .headers_mut()
+                        .insert(header::ETAG, HeaderValue::from_static("\"abc123\""));
+                    response.headers_mut().insert(
+                        HeaderName::from_static("x-aiq-config-lock-id"),
+                        HeaderValue::from_static("abc123"),
+                    );
+                    response
+                }),
+            )
+            .layer(build_cors_layer(&config).unwrap());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test")
+                    .header(header::ORIGIN, "https://console.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let expose = response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(expose.contains("etag"));
+        assert!(expose.contains("x-aiq-config-lock-id"));
+    }
+
+    #[tokio::test]
+    async fn cors_allows_if_match_for_cross_origin_config_saves() {
+        let mut config = HubConfig::from_env();
+        config.cors_allowed_origins = vec!["https://console.example".to_string()];
+        let app = Router::new()
+            .route("/test", axum::routing::put(ok_handler))
+            .layer(build_cors_layer(&config).unwrap());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/test")
+                    .header(header::ORIGIN, "https://console.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "if-match,content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let allowed_headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(allowed_headers.contains("if-match"));
     }
 }
 

@@ -13,16 +13,18 @@ factory = []
 
 [dependencies]
 anyhow = "1"
+aiq-runtime-core = { path = "../runtime/aiq-runtime-core" }
 axum = { version = "0.8", features = ["ws"] }
+bt-core = { path = "../backtester/crates/bt-core" }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.25"
+r2d2_sqlite = "0.26"
 askama = "0.12"
 askama_axum = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -36,6 +38,7 @@ libc = "0.2"
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 rmpv = "1.3"
+sha2 = "0.10"
 sha3 = "0.10"
 
 [workspace]

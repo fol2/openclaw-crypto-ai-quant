@@ -5,6 +5,7 @@
   let selectedFile = $state('main');
   let yamlText = $state('');
   let originalText = $state('');
+  let currentLockId = $state<string | null>(null);
   let dirty = $derived(yamlText !== originalText);
   let saving = $state(false);
   let loading = $state(false);
@@ -28,9 +29,10 @@
     loading = true;
     error = '';
     try {
-      const raw = await getConfigRaw(selectedFile);
-      yamlText = raw;
-      originalText = raw;
+      const res = await getConfigRaw(selectedFile);
+      yamlText = res.raw;
+      originalText = res.raw;
+      currentLockId = res.configId;
     } catch (e: any) {
       error = e.message || 'Failed to load config';
     } finally {
@@ -41,12 +43,18 @@
   async function save() {
     saving = true; error = ''; success = '';
     try {
-      const res = await putConfig(yamlText, selectedFile);
+      const res = await putConfig(yamlText, selectedFile, currentLockId);
       originalText = yamlText;
+      currentLockId = res.lock_id || currentLockId;
       success = `Saved! Backup: ${res.backup || 'none'}`;
       setTimeout(() => { success = ''; }, 5000);
     } catch (e: any) {
-      error = e.message || 'Failed to save';
+      const message = e.message || 'Failed to save';
+      if (message.includes('409')) {
+        error = 'This config changed since you loaded it. Reload the latest version and try again.';
+      } else {
+        error = message;
+      }
     } finally {
       saving = false;
     }
