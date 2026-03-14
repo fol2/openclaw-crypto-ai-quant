@@ -53,6 +53,19 @@ review flow, merge sequencing, or cleanup duties.
   `plans/archived/` when appropriate, and refresh any active/archived plan
   indexes in the same atomic change.
 
+## Long-Running Plan Hygiene
+
+- When a plan spans many PRs or many hours, refresh from the latest `master`
+  before starting the next atomic PR instead of assuming the earlier baseline is
+  still valid.
+- If concurrent merges changed auth, routing, or control-plane contracts, treat
+  any older worktree as stale until you re-check the new `master` state.
+- Prefer opening a fresh worktree from the latest `master` for the next PR over
+  stacking more changes onto an old worktree when the baseline has shifted.
+- If prototype work happened on a stale worktree, re-apply only the still-valid
+  slices onto a fresh branch and discard the stale branch after the replacement
+  PR lands.
+
 ## Safety Rules
 
 - Never disable kill switches or weaken live guardrails without explicit user

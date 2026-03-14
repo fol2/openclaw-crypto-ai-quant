@@ -8,3 +8,4 @@ Current archived items:
 - `backtester/gpu-decision-codegen.md`
 - `runtime/factory-financial-grade-hardening.md`
 - `runtime/rust-runtime-final-cleanup-plan.md`
+- `runtime/shared-config-financial-grade-hardening.md`
