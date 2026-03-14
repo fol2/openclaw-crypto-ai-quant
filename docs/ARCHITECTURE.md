@@ -53,6 +53,12 @@ Rust-owned surfaces directly.
 3. `bt-cli` replays the same strategy/config contract offline
 4. `hub` exposes service state, backtest controls, logs, and monitoring views
 
+Hub symbol-detail transaction views use the trading DB as the primary source of
+position entries and fall back to the latest reconstructed trade journey when a
+live-authoritative position has no ledger `open_trade_id`. This keeps
+`OPEN`/`ADD`/`REDUCE`/`CLOSE` legs visible in detail and journey review flows
+even when the live snapshot is authoritative.
+
 ## Behaviour-Modular Contract
 
 Behaviour-level configuration lives under

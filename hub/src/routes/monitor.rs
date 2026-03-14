@@ -520,6 +520,34 @@ fn synthetic_open_position_from_live_snapshot(
     }
 }
 
+fn journey_remaining_size(journey: &trading::TradeJourney) -> f64 {
+    journey.legs.iter().fold(0.0, |size, leg| {
+        match leg.action.as_str() {
+            "OPEN" | "ADD" => size + leg.size,
+            "REDUCE" | "CLOSE" => (size - leg.size).max(0.0),
+            _ => size,
+        }
+    })
+}
+
+fn approx_equal(left: f64, right: f64, relative_tol: f64) -> bool {
+    if !left.is_finite() || !right.is_finite() {
+        return false;
+    }
+    let scale = left.abs().max(right.abs()).max(1e-9);
+    (left - right).abs() <= scale * relative_tol
+}
+
+fn journey_matches_synthetic_position(
+    journey: &trading::TradeJourney,
+    position: &trading::OpenPosition,
+) -> bool {
+    journey.is_open
+        && journey.pos_type.eq_ignore_ascii_case(&position.pos_type)
+        && approx_equal(journey.entry_price, position.entry_price, 0.005)
+        && approx_equal(journey_remaining_size(journey), position.size, 0.01)
+}
+
 fn merge_positions_with_live_snapshot(
     ledger_positions: &[trading::OpenPosition],
     live_positions: &HashMap<String, HlPositionSnapshot>,
@@ -1026,7 +1054,7 @@ async fn api_marks(
     let conn = pool.get()?;
 
     let ledger_pos = trading::open_position_for_symbol(&conn, &sym)?;
-    let entries = if let Some(ref p) = ledger_pos {
+    let mut entries = if let Some(ref p) = ledger_pos {
         if p.open_trade_id > 0 {
             trading::position_entries(&conn, &sym, p.open_trade_id)?
         } else {
@@ -1098,6 +1126,20 @@ async fn api_marks(
                 .map(synthetic_open_position_from_live_snapshot)
         })
     };
+    if entries.is_empty() {
+        let latest_journey = trading::trade_journeys(&conn, 1, 0, Some(&sym))?
+            .into_iter()
+            .next();
+        let fallback_journey = latest_journey.filter(|journey| {
+            pos.as_ref()
+                .filter(|position| position.open_trade_id <= 0)
+                .map(|position| journey_matches_synthetic_position(journey, position))
+                .unwrap_or(true)
+        });
+        if let Some(journey) = fallback_journey {
+            entries = trading::trade_entries_from_journey(journey);
+        }
+    }
 
     let position_json = pos.as_ref().map(|p| {
         let live_override = live_position_override_for(p, &live_positions);
@@ -1827,5 +1869,174 @@ mod tests {
         assert_eq!(merged[0].open_trade_id, 11904);
         assert!((merged[0].size - 1692.0).abs() < 1e-9);
         assert!((merged[0].entry_price - 0.094602).abs() < 1e-9);
+    }
+
+    #[test]
+    fn journey_matches_synthetic_position_rejects_closed_journey() {
+        let journey = trading::TradeJourney {
+            id: 7,
+            symbol: "SOL".to_string(),
+            pos_type: "LONG".to_string(),
+            source: "manual".to_string(),
+            manual_leg_count: 2,
+            open_ts: "2026-03-01T00:00:00Z".to_string(),
+            close_ts: Some("2026-03-01T00:05:00Z".to_string()),
+            entry_price: 150.0,
+            exit_price: Some(151.0),
+            peak_size: 2.0,
+            total_pnl: 2.0,
+            total_fees: 0.2,
+            is_open: false,
+            legs: vec![
+                trading::JourneyLeg {
+                    id: 7,
+                    timestamp: "2026-03-01T00:00:00Z".to_string(),
+                    action: "OPEN".to_string(),
+                    source: "manual".to_string(),
+                    price: 150.0,
+                    size: 2.0,
+                    pnl: 0.0,
+                    reason: "manual_trade".to_string(),
+                    confidence: "MANUAL".to_string(),
+                },
+                trading::JourneyLeg {
+                    id: 8,
+                    timestamp: "2026-03-01T00:05:00Z".to_string(),
+                    action: "CLOSE".to_string(),
+                    source: "manual".to_string(),
+                    price: 151.0,
+                    size: 2.0,
+                    pnl: 2.0,
+                    reason: "manual_trade".to_string(),
+                    confidence: "MANUAL".to_string(),
+                },
+            ],
+        };
+        let position = trading::OpenPosition {
+            symbol: "SOL".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 0,
+            open_timestamp: None,
+            entry_price: 150.0,
+            size: 2.0,
+            confidence: None,
+            entry_atr: 0.0,
+            leverage: 3.0,
+            margin_used: 100.0,
+        };
+
+        assert!(!journey_matches_synthetic_position(&journey, &position));
+    }
+
+    #[test]
+    fn journey_matches_synthetic_position_accepts_matching_open_journey() {
+        let journey = trading::TradeJourney {
+            id: 9,
+            symbol: "SOL".to_string(),
+            pos_type: "LONG".to_string(),
+            source: "manual".to_string(),
+            manual_leg_count: 2,
+            open_ts: "2026-03-01T00:00:00Z".to_string(),
+            close_ts: None,
+            entry_price: 150.0,
+            exit_price: None,
+            peak_size: 3.0,
+            total_pnl: 0.5,
+            total_fees: 0.2,
+            is_open: true,
+            legs: vec![
+                trading::JourneyLeg {
+                    id: 9,
+                    timestamp: "2026-03-01T00:00:00Z".to_string(),
+                    action: "OPEN".to_string(),
+                    source: "manual".to_string(),
+                    price: 150.0,
+                    size: 2.0,
+                    pnl: 0.0,
+                    reason: "manual_trade".to_string(),
+                    confidence: "MANUAL".to_string(),
+                },
+                trading::JourneyLeg {
+                    id: 10,
+                    timestamp: "2026-03-01T00:01:00Z".to_string(),
+                    action: "ADD".to_string(),
+                    source: "manual".to_string(),
+                    price: 150.0,
+                    size: 1.0,
+                    pnl: 0.0,
+                    reason: "manual_trade".to_string(),
+                    confidence: "MANUAL".to_string(),
+                },
+                trading::JourneyLeg {
+                    id: 11,
+                    timestamp: "2026-03-01T00:02:00Z".to_string(),
+                    action: "REDUCE".to_string(),
+                    source: "manual".to_string(),
+                    price: 150.5,
+                    size: 1.0,
+                    pnl: 0.5,
+                    reason: "manual_trade".to_string(),
+                    confidence: "MANUAL".to_string(),
+                },
+            ],
+        };
+        let position = trading::OpenPosition {
+            symbol: "SOL".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 0,
+            open_timestamp: None,
+            entry_price: 150.0,
+            size: 2.0,
+            confidence: None,
+            entry_atr: 0.0,
+            leverage: 3.0,
+            margin_used: 100.0,
+        };
+
+        assert!(journey_matches_synthetic_position(&journey, &position));
+    }
+
+    #[test]
+    fn journey_matches_synthetic_position_rejects_sub_dollar_entry_mismatch() {
+        let journey = trading::TradeJourney {
+            id: 12,
+            symbol: "PENGU".to_string(),
+            pos_type: "LONG".to_string(),
+            source: "manual".to_string(),
+            manual_leg_count: 1,
+            open_ts: "2026-03-01T00:00:00Z".to_string(),
+            close_ts: None,
+            entry_price: 0.0071,
+            exit_price: None,
+            peak_size: 14003.0,
+            total_pnl: 0.0,
+            total_fees: 0.02,
+            is_open: true,
+            legs: vec![trading::JourneyLeg {
+                id: 12,
+                timestamp: "2026-03-01T00:00:00Z".to_string(),
+                action: "OPEN".to_string(),
+                source: "manual".to_string(),
+                price: 0.0071,
+                size: 14003.0,
+                pnl: 0.0,
+                reason: "manual_trade".to_string(),
+                confidence: "MANUAL".to_string(),
+            }],
+        };
+        let position = trading::OpenPosition {
+            symbol: "PENGU".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 0,
+            open_timestamp: None,
+            entry_price: 0.0078,
+            size: 14003.0,
+            confidence: None,
+            entry_atr: 0.0,
+            leverage: 3.0,
+            margin_used: 32.0,
+        };
+
+        assert!(!journey_matches_synthetic_position(&journey, &position));
     }
 }

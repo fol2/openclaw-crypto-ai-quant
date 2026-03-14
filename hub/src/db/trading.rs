@@ -717,6 +717,31 @@ pub fn position_entries(
     Ok(rows)
 }
 
+pub fn latest_journey_entries(conn: &Connection, symbol: &str) -> Result<Vec<TradeEntry>, HubError> {
+    let Some(journey) = trade_journeys(conn, 1, 0, Some(symbol))?.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    Ok(trade_entries_from_journey(journey))
+}
+
+pub fn trade_entries_from_journey(journey: TradeJourney) -> Vec<TradeEntry> {
+    let pos_type = journey.pos_type.clone();
+    journey
+        .legs
+        .into_iter()
+        .map(|leg| TradeEntry {
+            id: leg.id,
+            timestamp: Some(leg.timestamp),
+            action: Some(leg.action),
+            trade_type: Some(pos_type.clone()),
+            source: leg.source,
+            price: Some(leg.price),
+            size: Some(leg.size),
+            confidence: (!leg.confidence.is_empty()).then_some(leg.confidence),
+        })
+        .collect()
+}
+
 // ── Trade Journeys ──────────────────────────────────────────────────────
 
 /// Enrich generic "Signal Trigger" entry reasons using audit tags from meta_json.
@@ -968,8 +993,9 @@ pub fn trade_journeys(
                 // Ignore ADD without a preceding OPEN
             }
             "REDUCE" => {
-                if let Some(ip) = in_progress.get_mut(&sym_upper) {
-                    ip.current_size = (ip.current_size - size).max(0.0);
+                if let Some(mut ip) = in_progress.remove(&sym_upper) {
+                    let remaining_size = (ip.current_size - size).max(0.0);
+                    ip.current_size = remaining_size;
                     ip.journey.source = merged_journey_source(&ip.journey.source, &source);
                     if source == "manual" {
                         ip.journey.manual_leg_count += 1;
@@ -978,7 +1004,7 @@ pub fn trade_journeys(
                     ip.journey.total_fees += fee.abs();
                     ip.journey.legs.push(JourneyLeg {
                         id,
-                        timestamp: ts,
+                        timestamp: ts.clone(),
                         action: action_upper,
                         source: source.clone(),
                         price,
@@ -987,6 +1013,14 @@ pub fn trade_journeys(
                         reason: reason.clone(),
                         confidence: confidence.clone(),
                     });
+                    if remaining_size <= 1e-9 {
+                        ip.journey.close_ts = Some(ts);
+                        ip.journey.exit_price = Some(price);
+                        ip.journey.is_open = false;
+                        completed.push(ip.journey);
+                    } else {
+                        in_progress.insert(sym_upper, ip);
+                    }
                 }
             }
             "CLOSE" => {
@@ -1232,6 +1266,112 @@ mod tests {
         assert_eq!(journeys[0].manual_leg_count, 2);
         assert_eq!(journeys[0].legs[1].source, "manual");
         assert_eq!(journeys[0].legs[2].source, "manual");
+    }
+
+    #[test]
+    fn latest_journey_entries_include_closed_legs_for_flat_symbol() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+
+        let rows = [
+            (
+                "2026-03-01T00:00:00Z",
+                "SOL",
+                "LONG",
+                "OPEN",
+                150.0,
+                2.0,
+                "Signal Trigger",
+                "high",
+                0.0,
+                0.2,
+                "{}",
+            ),
+            (
+                "2026-03-01T00:05:00Z",
+                "SOL",
+                "LONG",
+                "CLOSE",
+                152.0,
+                2.0,
+                "Take Profit",
+                "n/a",
+                4.0,
+                0.2,
+                "{}",
+            ),
+        ];
+
+        for row in rows {
+            conn.execute(
+                "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+                    row.10
+                ],
+            )
+            .unwrap();
+        }
+
+        let entries = latest_journey_entries(&conn, "SOL").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].action.as_deref(), Some("OPEN"));
+        assert_eq!(entries[1].action.as_deref(), Some("CLOSE"));
+    }
+
+    #[test]
+    fn trade_journeys_close_when_reduce_flattens_position() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+
+        let rows = [
+            (
+                "2026-03-01T00:00:00Z",
+                "ATOM",
+                "LONG",
+                "OPEN",
+                10.0,
+                5.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-01T00:05:00Z",
+                "ATOM",
+                "LONG",
+                "REDUCE",
+                10.5,
+                5.0,
+                "manual_trade",
+                "MANUAL",
+                2.5,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+        ];
+
+        for row in rows {
+            conn.execute(
+                "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+                    row.10
+                ],
+            )
+            .unwrap();
+        }
+
+        let journeys = trade_journeys(&conn, 10, 0, Some("ATOM")).unwrap();
+        assert_eq!(journeys.len(), 1);
+        assert!(!journeys[0].is_open);
+        assert_eq!(journeys[0].close_ts.as_deref(), Some("2026-03-01T00:05:00Z"));
+        assert_eq!(journeys[0].exit_price, Some(10.5));
+        assert_eq!(journeys[0].legs[1].action, "REDUCE");
     }
 
     #[test]
