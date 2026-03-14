@@ -27,14 +27,25 @@ Progress recorded on 2026-03-14:
   optimistic-lock proof via `expected_config_id` / `If-Match`, surfaced config
   identity headers to the editor, and added stale-edit rejection for raw YAML
   changes including comment-only edits.
+- PR 5 implementation completed on 2026-03-14
+  (`hub: make live apply and rollback transactional`).
+  This added a dedicated `POST /api/config/actions/apply-live` contract,
+  routed both live apply and live rollback through runtime-supervised
+  `aiq-runtime live service apply --json` verification, snapshotting the
+  incumbent YAML before mutation, restoring it automatically when apply proof
+  failed, and recording before/after `config_id` identities in the emitted live
+  apply / rollback artefacts. At the time of this documentation pass the PR is
+  implementation-complete on branch
+  `codex/shared-config-pr5-transactional-apply-v2` and is awaiting the
+  required review / merge flow.
 
-Sequence status after those merges:
+Sequence status after those merges and the current PR 5 implementation pass:
 
 - PR 1: complete
 - PR 2: complete
 - PR 3: complete
-- PR 5: next active implementation stage
-- PR 6: pending after PR 5
+- PR 5: implementation complete; review / merge pending
+- PR 6: next planned implementation stage after PR 5 merges
 - PR 4: pending after PR 6
 - PR 7: pending
 - PR 8: pending
@@ -44,32 +55,23 @@ Sequence status after those merges:
 
 Current execution stage as of 2026-03-14:
 
-- Work has advanced into PR 5 planning and implementation prep
-  (`Make rollback and apply transactional`).
-- The operator explicitly chose to introduce a new, honest `apply` /
-  `restart` contract rather than reusing the legacy `reload` endpoint wording.
-- No PR 5 branch has been opened for review yet because the transactional apply
-  path still needs its runtime health/config-identity verification boundary
-  fixed before coding continues.
+- PR 5 implementation is complete and the documentation pass is now describing
+  the post-change contract rather than an implementation blocker.
+- The Hub now owns the live apply proof boundary by invoking
+  `aiq-runtime live service apply --json` and refusing success unless the final
+  runtime proof is healthy, running, contract-matched, and on the intended
+  `config_id`.
+- Live rollback now shares that same transactional boundary: it snapshots the
+  incumbent live YAML before mutation, stages the restored payload, and
+  automatically restores the incumbent YAML plus a supervised recovery restart
+  if the rollback proof fails.
+- PR 6 (`Launch daemons from immutable config artefacts`) is the next active
+  implementation stage once PR 5 finishes review and merge.
 
 Current blocker:
 
-- PR 5 requires the Hub apply path to report success only after the target live
-  runtime is healthy on the intended config identity.
-- The repository already has runtime-side `live manifest`, `live status`, and
-  `live service apply` contracts that can prove config identity and daemon
-  health, but the current Hub config route does not yet own that verification
-  boundary.
-- The endpoint direction is already decided: PR 5 will use the new explicit
-  `apply` / `restart` contract.
-- The remaining open decision is only the delivery boundary for post-apply
-  proof:
-  `1.` pull the runtime-side health/config-identity proof into the new Hub
-  apply path as part of PR 5
-  `2.` land the minimum runtime-status/config-identity primitives from PR 6
-  first, then return to PR 5 with those proofs available
-- Until that dependency is resolved, the plan is intentionally paused at the PR
-  5 boundary rather than landing a false-success apply contract.
+- None at the documentation-pass stage. The next action is reviewer coverage
+  for PR 5, followed by merge and cleanup before opening PR 6.
 
 ## Objective
 
