@@ -64,6 +64,8 @@ pub(crate) struct ExecutionMetadata {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ProjectionInput<'a> {
+    pub(crate) config_fingerprint: &'a str,
+    pub(crate) run_fingerprint: &'a str,
     pub(crate) symbol: &'a str,
     pub(crate) pre_state: &'a StrategyState,
     pub(crate) prior_position: Option<&'a PaperPositionState>,
@@ -281,6 +283,8 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
     } else {
         {
             let projection = ProjectionInput {
+                config_fingerprint: input.runtime_bootstrap.config_fingerprint.as_str(),
+                run_fingerprint: "paper_run_once",
                 symbol: &symbol,
                 pre_state: &pre_state,
                 prior_position: prior_position.as_ref(),
@@ -1111,9 +1115,22 @@ pub(crate) fn apply_decision_projection_with_tx(
             ],
         )?;
         trades_written += 1;
+        let trade_id = tx.last_insert_rowid();
+        if table_exists_in_tx(tx, "decision_events")? {
+            tx.execute(
+                "INSERT INTO decision_events (id, trade_id, event_type, status, config_fingerprint, run_fingerprint)
+                 VALUES (?1, ?2, 'fill', 'executed', ?3, ?4)",
+                params![
+                    format!("{}:{}:{trade_id}", input.run_fingerprint, idx),
+                    trade_id,
+                    input.config_fingerprint,
+                    input.run_fingerprint,
+                ],
+            )?;
+        }
 
         if action == "OPEN" {
-            active_open_trade_id = Some(tx.last_insert_rowid());
+            active_open_trade_id = Some(trade_id);
         }
         if action == "CLOSE" {
             active_open_trade_id = None;
@@ -1656,6 +1673,8 @@ mod tests {
             entry_adx_threshold: 22.0,
         };
         let projection = ProjectionInput {
+            config_fingerprint: "cfg",
+            run_fingerprint: "run",
             symbol: "ETH",
             pre_state: &pre_state,
             prior_position: None,
@@ -1865,6 +1884,8 @@ mod tests {
             entry_adx_threshold: 22.0,
         };
         let projection = ProjectionInput {
+            config_fingerprint: "cfg",
+            run_fingerprint: "run",
             symbol: "ETH",
             pre_state: &pre_state,
             prior_position: Some(&prior_position),
@@ -1979,6 +2000,8 @@ mod tests {
             entry_adx_threshold: 22.0,
         };
         let projection = ProjectionInput {
+            config_fingerprint: "cfg",
+            run_fingerprint: "run",
             symbol: "ETH",
             pre_state: &pre_state,
             prior_position: Some(&prior_position),

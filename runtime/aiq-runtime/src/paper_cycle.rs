@@ -8,8 +8,9 @@ use bt_core::signals::behaviour::BehaviourTrace;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::time::Instant;
 
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_export;
@@ -93,6 +94,119 @@ struct ExecutedStep {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PaperRuntimeMetricsRecord<'a> {
+    step_id: &'a str,
+    config_fingerprint: &'a str,
+    step_close_ts_ms: i64,
+    cycle_latency_ms: i64,
+    intent_count: usize,
+    fill_count: usize,
+    rejected_intent_count: usize,
+    warning_count: usize,
+    error_count: usize,
+    median_slippage_bps: f64,
+    max_slippage_bps: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PaperEquitySnapshotRecord<'a> {
+    step_id: &'a str,
+    config_fingerprint: &'a str,
+    step_close_ts_ms: i64,
+    cash_usd: f64,
+    margin_used_usd: f64,
+    unrealised_pnl_usd: f64,
+    equity_est_usd: f64,
+    open_position_count: usize,
+}
+
+fn position_unrealised_pnl(position: &bt_core::decision_kernel::Position, mark_price: f64) -> f64 {
+    let gross = if position.side == bt_core::decision_kernel::PositionSide::Long {
+        (mark_price - position.avg_entry_price) * position.quantity
+    } else {
+        (position.avg_entry_price - mark_price) * position.quantity
+    };
+    gross.max(-position.margin_usd)
+}
+
+fn build_equity_snapshot_record<'a>(
+    step_id: &'a str,
+    config_fingerprint: &'a str,
+    step_close_ts_ms: i64,
+    state: &StrategyState,
+    latest_prices: &HashMap<String, f64>,
+) -> PaperEquitySnapshotRecord<'a> {
+    let cash_usd = state.cash_usd;
+    let mut margin_used_usd = 0.0;
+    let mut unrealised_pnl_usd = 0.0;
+    for (symbol, position) in &state.positions {
+        let mark_price = latest_prices
+            .get(symbol)
+            .copied()
+            .unwrap_or(position.avg_entry_price);
+        margin_used_usd += position.margin_usd.max(0.0);
+        unrealised_pnl_usd += position_unrealised_pnl(position, mark_price);
+    }
+    PaperEquitySnapshotRecord {
+        step_id,
+        config_fingerprint,
+        step_close_ts_ms,
+        cash_usd,
+        margin_used_usd,
+        unrealised_pnl_usd,
+        equity_est_usd: cash_usd + margin_used_usd + unrealised_pnl_usd,
+        open_position_count: state.positions.len(),
+    }
+}
+
+fn slippage_stats(executed_steps: &[ExecutedStep]) -> (f64, f64) {
+    let mut slippages = Vec::new();
+    for execution in executed_steps {
+        for fill in &execution.decision.fills {
+            let reference_price = execution.prepared.snap.close.abs().max(1e-12);
+            let slippage_bps =
+                ((fill.price - execution.prepared.snap.close).abs() / reference_price) * 10_000.0;
+            slippages.push(slippage_bps);
+        }
+    }
+    if slippages.is_empty() {
+        return (0.0, 0.0);
+    }
+    slippages.sort_by(|left, right| left.total_cmp(right));
+    let median = if slippages.len() % 2 == 1 {
+        slippages[slippages.len() / 2]
+    } else {
+        let upper = slippages.len() / 2;
+        (slippages[upper - 1] + slippages[upper]) / 2.0
+    };
+    let max = slippages.into_iter().fold(0.0_f64, f64::max);
+    (median, max)
+}
+
+fn detect_manual_kill_switch() -> Option<(String, String)> {
+    let path = std::env::var("AI_QUANT_KILL_SWITCH_FILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/ai-quant-kill"));
+    if !path.exists() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let value = raw.trim().to_ascii_lowercase();
+    if value.is_empty() || matches!(value.as_str(), "clear" | "resume" | "off" | "unpause") {
+        return None;
+    }
+    let event = if value.contains("halt") || value.contains("full") {
+        "RISK_KILL_HALT_ALL"
+    } else {
+        "RISK_KILL_CLOSE_ONLY"
+    };
+    Some((event.to_string(), path.display().to_string()))
+}
+
 pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     if !input.paper_db.exists() {
         anyhow::bail!("paper db not found: {}", input.paper_db.display());
@@ -104,6 +218,7 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         anyhow::bail!("step_close_ts_ms must be positive");
     }
 
+    let cycle_started = Instant::now();
     let exported_at_ms = input
         .exported_at_ms
         .unwrap_or_else(|| Utc::now().timestamp_millis());
@@ -177,6 +292,7 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     let mut interval: Option<String> = None;
     let mut candidate_entries = Vec::new();
     let mut executed_steps = Vec::new();
+    let mut latest_prices = HashMap::new();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
 
@@ -239,6 +355,7 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             lookback_bars: input.lookback_bars,
             step_close_ts_ms: Some(input.step_close_ts_ms),
         })?;
+        latest_prices.insert(symbol.clone(), prepared.snap.close);
         let pre_state = current_state.clone();
         let (decision, execution_plan) = crate::paper_run_once::execute_prepared_symbol_step(
             &pre_state,
@@ -438,6 +555,8 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         if projection_enabled {
             for execution in &executed_steps {
                 let projection = ProjectionInput {
+                    config_fingerprint: input.runtime_bootstrap.config_fingerprint.as_str(),
+                    run_fingerprint: &step_id,
                     symbol: &execution.symbol,
                     pre_state: &execution.pre_state,
                     prior_position: execution.prepared.prior_position.as_ref(),
@@ -451,6 +570,54 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
                 let (written, _, _) = apply_decision_projection_with_tx(&tx, &projection)?;
                 trades_written += written;
             }
+        }
+
+        let intent_count = executed_steps
+            .iter()
+            .map(|execution| execution.decision.intents.len())
+            .sum::<usize>();
+        let fill_count = executed_steps
+            .iter()
+            .map(|execution| execution.decision.fills.len())
+            .sum::<usize>();
+        let (median_slippage_bps, max_slippage_bps) = slippage_stats(&executed_steps);
+        let metrics = PaperRuntimeMetricsRecord {
+            step_id: &step_id,
+            config_fingerprint: input.runtime_bootstrap.config_fingerprint.as_str(),
+            step_close_ts_ms: input.step_close_ts_ms,
+            cycle_latency_ms: cycle_started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            intent_count,
+            fill_count,
+            rejected_intent_count: intent_count.saturating_sub(fill_count),
+            warning_count: warnings.len(),
+            error_count: errors.len(),
+            median_slippage_bps,
+            max_slippage_bps,
+        };
+        record_paper_runtime_metrics(&tx, &metrics)?;
+
+        let equity = build_equity_snapshot_record(
+            &step_id,
+            input.runtime_bootstrap.config_fingerprint.as_str(),
+            input.step_close_ts_ms,
+            &current_state,
+            &latest_prices,
+        );
+        record_paper_equity_snapshot(&tx, &equity)?;
+
+        if let Some((event, source_path)) = detect_manual_kill_switch() {
+            record_audit_event(
+                &tx,
+                input.step_close_ts_ms,
+                &event,
+                "warn",
+                &serde_json::json!({
+                    "source": source_path,
+                    "step_id": step_id,
+                    "config_fingerprint": input.runtime_bootstrap.config_fingerprint,
+                }),
+                &step_id,
+            )?;
         }
 
         let cycle_step = CycleStepRecord {
@@ -756,6 +923,48 @@ fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             trades_written INTEGER NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS decision_events (
+            id TEXT PRIMARY KEY,
+            trade_id INTEGER,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            config_fingerprint TEXT,
+            run_fingerprint TEXT
+        );
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER,
+            timestamp TEXT NOT NULL,
+            event TEXT NOT NULL,
+            level TEXT NOT NULL,
+            data_json TEXT,
+            run_fingerprint TEXT
+        );
+        CREATE TABLE IF NOT EXISTS paper_runtime_metrics (
+            step_id TEXT PRIMARY KEY,
+            config_fingerprint TEXT NOT NULL,
+            step_close_ts_ms INTEGER NOT NULL,
+            cycle_latency_ms INTEGER NOT NULL,
+            intent_count INTEGER NOT NULL,
+            fill_count INTEGER NOT NULL,
+            rejected_intent_count INTEGER NOT NULL,
+            warning_count INTEGER NOT NULL,
+            error_count INTEGER NOT NULL,
+            median_slippage_bps REAL NOT NULL,
+            max_slippage_bps REAL NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+            step_id TEXT PRIMARY KEY,
+            config_fingerprint TEXT NOT NULL,
+            step_close_ts_ms INTEGER NOT NULL,
+            cash_usd REAL NOT NULL,
+            margin_used_usd REAL NOT NULL,
+            unrealised_pnl_usd REAL NOT NULL,
+            equity_est_usd REAL NOT NULL,
+            open_position_count INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())
@@ -795,6 +1004,82 @@ fn record_cycle_step(tx: &rusqlite::Transaction<'_>, record: &CycleStepRecord<'_
             record.execution_count as i64,
             record.trades_written as i64,
             iso_from_ms(record.snapshot_exported_at_ms),
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_paper_runtime_metrics(
+    tx: &rusqlite::Transaction<'_>,
+    record: &PaperRuntimeMetricsRecord<'_>,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO paper_runtime_metrics (
+             step_id, config_fingerprint, step_close_ts_ms, cycle_latency_ms,
+             intent_count, fill_count, rejected_intent_count, warning_count,
+             error_count, median_slippage_bps, max_slippage_bps, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            record.step_id,
+            record.config_fingerprint,
+            record.step_close_ts_ms,
+            record.cycle_latency_ms,
+            record.intent_count as i64,
+            record.fill_count as i64,
+            record.rejected_intent_count as i64,
+            record.warning_count as i64,
+            record.error_count as i64,
+            record.median_slippage_bps,
+            record.max_slippage_bps,
+            iso_from_ms(record.step_close_ts_ms),
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_paper_equity_snapshot(
+    tx: &rusqlite::Transaction<'_>,
+    record: &PaperEquitySnapshotRecord<'_>,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO paper_equity_snapshots (
+             step_id, config_fingerprint, step_close_ts_ms, cash_usd,
+             margin_used_usd, unrealised_pnl_usd, equity_est_usd,
+             open_position_count, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            record.step_id,
+            record.config_fingerprint,
+            record.step_close_ts_ms,
+            record.cash_usd,
+            record.margin_used_usd,
+            record.unrealised_pnl_usd,
+            record.equity_est_usd,
+            record.open_position_count as i64,
+            iso_from_ms(record.step_close_ts_ms),
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_audit_event(
+    tx: &rusqlite::Transaction<'_>,
+    ts_ms: i64,
+    event: &str,
+    level: &str,
+    data_json: &serde_json::Value,
+    run_fingerprint: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO audit_events (ts_ms, timestamp, event, level, data_json, run_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            ts_ms,
+            iso_from_ms(ts_ms),
+            event,
+            level,
+            serde_json::to_string(data_json)?,
+            run_fingerprint,
         ],
     )?;
     Ok(())
