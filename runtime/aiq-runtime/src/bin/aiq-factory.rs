@@ -2783,9 +2783,9 @@ fn assess_primary_paper_promotion_gate(
             )],
         ));
     }
-    let current_target_config_id =
+    let marker_target_config_id =
         current_target_config_id(target_yaml_path.as_path(), target.role.as_str())?;
-    if current_target_config_id.as_deref() != Some(marker.config_id.as_str()) {
+    if marker_target_config_id.as_deref() != Some(marker.config_id.as_str()) {
         return Ok(blocked_paper_promotion_gate(
             &paper_db_path,
             primary_candidate,
