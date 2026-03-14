@@ -14,22 +14,22 @@ Progress as of 2026-03-14:
 - Activated on `master` by PR #991.
 - Completed on `master`:
   - PR 1 via PR #993: preserve lane-effective configs and full YAML roots.
+  - PR 2 via PR #1000: deterministic role-governed selection, role materiality
+    thresholds, and truthful partial-advancement reporting.
   - PR 4 via PR #995, with follow-up fix PR #996: fail-closed paper execution
     evidence, marker rollback hardening, and paper promotion truthfulness.
   - PR 5 via PR #998: manifest-driven `live_small` / `live_full` governance
     with persisted live governance state.
 - In progress:
-  - PR 2 via PR #1000: deterministic role-governed selection, role materiality
-    thresholds, and truthful partial-advancement reporting. Implementation,
-    local tests, and documentation refresh are complete; reviewer flow and
-    merge are still pending.
+  - PR 3: explicit train/holdout validation windows, holdout artefacts, and
+    train-window parity replays. Implementation, local validation, and
+    documentation refresh are complete; PR/reviewer flow is still pending.
 - Pending:
-  - PR 3.
   - PR 6.
 
 The `Current State` and `Confirmed Gaps` sections below are the baseline taken
 when this plan was prepared. Gaps 1, 3, 4, and 5 are now closed on `master`.
-Gap 6 is partially addressed by the open PR 2 work, while Gap 2 and the
+Gap 2 is being closed by the current PR 3 train/holdout work, while the
 remaining Gap 6 scheduler/parity items are still open.
 
 ## Objective
