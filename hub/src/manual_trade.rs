@@ -18,6 +18,7 @@ const DEFAULT_MAX_NOTIONAL_USD: f64 = 5_000.0;
 const MIN_NOTIONAL_USD: f64 = 10.0;
 const FILL_POLL_TIMEOUT: Duration = Duration::from_secs(8);
 const FILL_POLL_INTERVAL: Duration = Duration::from_millis(800);
+const ACTIVE_RECONCILE_ABSENCE_GRACE: Duration = Duration::from_secs(30);
 const MANUAL_CONFIRM_TTL_MS: i64 = 60_000;
 const MANUAL_CONFIRM_RETENTION_MS: i64 = 86_400_000;
 const MANUAL_CLOID_PREFIX: &[u8] = b"man_";
@@ -139,6 +140,35 @@ struct FillWriteSummary {
     parsed_trade_rows: usize,
     parse_failures: usize,
     filled_size: f64,
+}
+
+struct ManualFillProgress {
+    observed_fills: usize,
+    parsed_trade_rows: usize,
+    parse_failures: usize,
+    filled_size: f64,
+}
+
+struct ManualOpenOrderSnapshot<'a> {
+    intent_id: &'a str,
+    last_seen_ts_ms: i64,
+    symbol: &'a str,
+    side: &'a str,
+    price: Option<f64>,
+    remaining_size: Option<f64>,
+    reduce_only: bool,
+    client_order_id: &'a str,
+    exchange_order_id: Option<String>,
+    raw_json: String,
+}
+
+#[derive(Default)]
+struct ManualReconcileCounters {
+    scanned: usize,
+    recovered_fills: usize,
+    recovered_open_orders: usize,
+    status_updates: usize,
+    open_order_clears: usize,
 }
 
 #[derive(Clone)]
@@ -446,6 +476,23 @@ pub fn execute_open(
             raw_json: response_text.clone(),
         },
     )?;
+    if !embedded_reject && prepared.order_type == ParsedOrderType::LimitGtc {
+        upsert_manual_open_order_snapshot(
+            &conn,
+            ManualOpenOrderSnapshot {
+                intent_id: &intent_id,
+                last_seen_ts_ms: chrono::Utc::now().timestamp_millis(),
+                symbol: &prepared.symbol,
+                side: &prepared.side,
+                price: prepared.limit_price,
+                remaining_size: Some(prepared.est_size),
+                reduce_only: false,
+                client_order_id: &cloid,
+                exchange_order_id: exchange_order_id.clone(),
+                raw_json: response_text.clone(),
+            },
+        )?;
+    }
     if embedded_reject {
         write_manual_runtime_log(
             &conn,
@@ -867,6 +914,23 @@ pub fn execute_close(
             raw_json: response_text.clone(),
         },
     )?;
+    if !embedded_reject && prepared.order_type == ParsedOrderType::LimitGtc {
+        upsert_manual_open_order_snapshot(
+            &conn,
+            ManualOpenOrderSnapshot {
+                intent_id: &intent_id,
+                last_seen_ts_ms: chrono::Utc::now().timestamp_millis(),
+                symbol: &prepared.symbol,
+                side,
+                price: prepared.limit_price,
+                remaining_size: Some(prepared.close_size),
+                reduce_only: true,
+                client_order_id: &cloid,
+                exchange_order_id: exchange_order_id.clone(),
+                raw_json: response_text.clone(),
+            },
+        )?;
+    }
     if embedded_reject {
         write_manual_runtime_log(
             &conn,
@@ -1148,11 +1212,8 @@ pub fn cancel_order(
             .trim()
             .parse::<u64>()
             .map_err(|_| HubError::BadRequest("oid must be a positive integer".into()))?;
-        let cancel_context = load_manual_cancel_context_by_exchange_order_id(
-            &conn,
-            &symbol,
-            &order_id_text,
-        )?;
+        let cancel_context =
+            load_manual_cancel_context_by_exchange_order_id(&conn, &symbol, &order_id_text)?;
         write_manual_runtime_log(
             &conn,
             "INFO",
@@ -1191,9 +1252,13 @@ pub fn cancel_order(
                             .as_ref()
                             .and_then(|item| item.intent_id.as_deref()),
                         symbol: &symbol,
-                        side: cancel_context.as_ref().and_then(|item| item.side.as_deref()),
+                        side: cancel_context
+                            .as_ref()
+                            .and_then(|item| item.side.as_deref()),
                         order_type: "cancel_by_oid",
-                        requested_size: cancel_context.as_ref().and_then(|item| item.requested_size),
+                        requested_size: cancel_context
+                            .as_ref()
+                            .and_then(|item| item.requested_size),
                         reduce_only: cancel_context.as_ref().and_then(|item| item.reduce_only),
                         client_order_id: cancel_context
                             .as_ref()
@@ -1237,7 +1302,9 @@ pub fn cancel_order(
                         .as_ref()
                         .and_then(|item| item.intent_id.as_deref()),
                     symbol: &symbol,
-                    side: cancel_context.as_ref().and_then(|item| item.side.as_deref()),
+                    side: cancel_context
+                        .as_ref()
+                        .and_then(|item| item.side.as_deref()),
                     order_type: "cancel_by_oid",
                     requested_size: cancel_context.as_ref().and_then(|item| item.requested_size),
                     reduce_only: cancel_context.as_ref().and_then(|item| item.reduce_only),
@@ -1280,7 +1347,9 @@ pub fn cancel_order(
                     .as_ref()
                     .and_then(|item| item.intent_id.as_deref()),
                 symbol: &symbol,
-                side: cancel_context.as_ref().and_then(|item| item.side.as_deref()),
+                side: cancel_context
+                    .as_ref()
+                    .and_then(|item| item.side.as_deref()),
                 order_type: "cancel_by_oid",
                 requested_size: cancel_context.as_ref().and_then(|item| item.requested_size),
                 reduce_only: cancel_context.as_ref().and_then(|item| item.reduce_only),
@@ -1430,7 +1499,7 @@ pub fn cancel_order(
                 "ERROR",
                 &format!(
                     "manual_trade cancel_rejected symbol={} intent_id={} response={}",
-                        effective_symbol, intent_id, response_text
+                    effective_symbol, intent_id, response_text
                 ),
             )?;
             write_manual_audit_event(
@@ -1495,26 +1564,27 @@ pub fn cancel_order(
     ))
 }
 
-pub fn recover_unknown_manual_intents(
-    cfg: &HubConfig,
-    limit: usize,
-) -> Result<Value, HubError> {
+pub fn reconcile_active_manual_intents(cfg: &HubConfig, limit: usize) -> Result<Value, HubError> {
     if limit == 0 {
         return Ok(json!({
             "ok": true,
             "scanned": 0,
             "recovered_fills": 0,
             "recovered_open_orders": 0,
+            "status_updates": 0,
+            "open_order_clears": 0,
         }));
     }
     let mut conn = open_manual_trade_db(&cfg.live_db)?;
-    let intents = load_unknown_manual_intents(&conn, limit)?;
+    let intents = load_active_manual_intents(&conn, limit)?;
     if intents.is_empty() {
         return Ok(json!({
             "ok": true,
             "scanned": 0,
             "recovered_fills": 0,
             "recovered_open_orders": 0,
+            "status_updates": 0,
+            "open_order_clears": 0,
         }));
     }
 
@@ -1522,171 +1592,19 @@ pub fn recover_unknown_manual_intents(
     let open_orders = client
         .open_orders()
         .map_err(|error| HubError::Internal(format!("failed to inspect open orders: {error}")))?;
-    let mut recovered_fills = 0usize;
-    let mut recovered_open_orders = 0usize;
-    let mut scanned = 0usize;
-
+    let mut counters = ManualReconcileCounters::default();
     for intent in intents {
-        scanned += 1;
-        let cloid = existing_intent_cloid(&intent);
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let fills = collect_matching_fills_once(
-            &client,
-            &intent.symbol,
-            intent.created_ts_ms.saturating_sub(5_000),
-            now_ms,
-            &cloid,
-            intent.exchange_order_id.as_deref(),
-        )?;
-        if !fills.is_empty() {
-            let account_value_usd = client
-                .account_snapshot()
-                .map_err(|error| HubError::Internal(error.to_string()))?
-                .account_value_usd;
-            let fill_summary = record_manual_fill_batch(
-                &mut conn,
-                &fills,
-                &intent.symbol,
-                &intent.intent_id,
-                &cloid,
-                account_value_usd,
-                intent.leverage.unwrap_or(1.0).max(1.0),
-            )?;
-            let requested_size = intent.requested_size.unwrap_or(fill_summary.filled_size);
-            let status = if fill_summary.parse_failures > 0 {
-                "UNKNOWN_RECONCILED"
-            } else if fill_summary.filled_size + 1e-9 >= requested_size {
-                "FILLED"
-            } else {
-                "PARTIAL"
-            };
-            let last_error = if fill_summary.parse_failures > 0 {
-                "one_or_more_fills_failed_to_parse_into_trades"
-            } else {
-                ""
-            };
-            update_manual_intent_status(&conn, &intent.intent_id, status, last_error)?;
-            write_manual_runtime_log(
-                &conn,
-                if fill_summary.parse_failures > 0 {
-                    "WARN"
-                } else {
-                    "INFO"
-                },
-                &format!(
-                    "manual_trade unknown_recovered_fills intent_id={} symbol={} observed_fills={} parsed_trade_rows={} filled_size={} status={}",
-                    intent.intent_id,
-                    intent.symbol,
-                    fill_summary.observed_fills,
-                    fill_summary.parsed_trade_rows,
-                    fill_summary.filled_size,
-                    status
-                ),
-            )?;
-            write_manual_audit_event(
-                &conn,
-                Some(&intent.symbol),
-                "MANUAL_FILLS_RECORDED",
-                if fill_summary.parse_failures > 0 {
-                    "WARN"
-                } else {
-                    "INFO"
-                },
-                json!({
-                    "intent_id": &intent.intent_id,
-                    "action": &intent.action,
-                    "status": status,
-                    "observed_fills": fill_summary.observed_fills,
-                    "parsed_trade_rows": fill_summary.parsed_trade_rows,
-                    "filled_size": fill_summary.filled_size,
-                    "source": "unknown_recovery",
-                }),
-            )?;
-            write_manual_reconcile_event(
-                &conn,
-                "manual_unknown_recovery",
-                Some(&intent.symbol),
-                if fill_summary.parse_failures > 0 {
-                    "fills_parse_failed"
-                } else {
-                    "fills_recovered"
-                },
-                json!({
-                    "intent_id": &intent.intent_id,
-                    "status": status,
-                    "observed_fills": fill_summary.observed_fills,
-                    "parse_failures": fill_summary.parse_failures,
-                }),
-            )?;
-            recovered_fills += 1;
-            continue;
-        }
-
-        if let Some(order) = find_matching_open_order(&open_orders, &intent, &cloid) {
-            let exchange_order_id = order
-                .get("oid")
-                .and_then(parse_json_integer)
-                .map(|value| value.to_string());
-            record_manual_order_submission(
-                &conn,
-                ManualOrderSubmission {
-                    intent_id: &intent.intent_id,
-                    sent_ts_ms: now_ms,
-                    symbol: &intent.symbol,
-                    side: &intent.side,
-                    order_type: "recovered_unknown_open_order",
-                    requested_size: intent.requested_size.unwrap_or(0.0),
-                    reduce_only: matches!(intent.action.as_str(), "CLOSE" | "REDUCE"),
-                    client_order_id: &cloid,
-                    exchange_order_id: exchange_order_id.as_deref(),
-                    status: "SENT",
-                    last_error: "",
-                    raw_json: order.to_string(),
-                },
-            )?;
-            write_manual_runtime_log(
-                &conn,
-                "INFO",
-                &format!(
-                    "manual_trade unknown_recovered_open_order intent_id={} symbol={} exchange_order_id={}",
-                    intent.intent_id,
-                    intent.symbol,
-                    exchange_order_id.as_deref().unwrap_or("unknown")
-                ),
-            )?;
-            write_manual_audit_event(
-                &conn,
-                Some(&intent.symbol),
-                "MANUAL_ORDER_SUBMITTED",
-                "INFO",
-                json!({
-                    "intent_id": &intent.intent_id,
-                    "action": &intent.action,
-                    "exchange_order_id": &exchange_order_id,
-                    "client_order_id": &cloid,
-                    "order_type": "recovered_unknown_open_order",
-                    "source": "unknown_recovery",
-                }),
-            )?;
-            write_manual_reconcile_event(
-                &conn,
-                "manual_unknown_recovery",
-                Some(&intent.symbol),
-                "open_order_recovered",
-                json!({
-                    "intent_id": &intent.intent_id,
-                    "exchange_order_id": &exchange_order_id,
-                }),
-            )?;
-            recovered_open_orders += 1;
-        }
+        counters.scanned += 1;
+        reconcile_active_manual_intent(&client, &mut conn, &intent, &open_orders, &mut counters)?;
     }
 
     Ok(json!({
         "ok": true,
-        "scanned": scanned,
-        "recovered_fills": recovered_fills,
-        "recovered_open_orders": recovered_open_orders,
+        "scanned": counters.scanned,
+        "recovered_fills": counters.recovered_fills,
+        "recovered_open_orders": counters.recovered_open_orders,
+        "status_updates": counters.status_updates,
+        "open_order_clears": counters.open_order_clears,
     }))
 }
 
@@ -1799,6 +1717,23 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
         );
         CREATE INDEX IF NOT EXISTS idx_oms_orders_intent ON oms_orders(intent_id);
         CREATE INDEX IF NOT EXISTS idx_oms_orders_symbol ON oms_orders(symbol, created_ts_ms);
+
+        CREATE TABLE IF NOT EXISTS oms_open_orders (
+            intent_id TEXT PRIMARY KEY,
+            last_seen_ts_ms INTEGER NOT NULL,
+            symbol TEXT,
+            side TEXT,
+            price REAL,
+            remaining_size REAL,
+            reduce_only INTEGER,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
+            raw_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oms_open_orders_last_seen
+            ON oms_open_orders(last_seen_ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_oms_open_orders_symbol_last_seen
+            ON oms_open_orders(symbol, last_seen_ts_ms);
 
         CREATE TABLE IF NOT EXISTS oms_fills (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1999,7 +1934,7 @@ fn load_existing_manual_intent_by_dedupe_key(
     }
 }
 
-fn load_unknown_manual_intents(
+fn load_active_manual_intents(
     conn: &Connection,
     limit: usize,
 ) -> Result<Vec<ExistingManualIntent>, HubError> {
@@ -2007,7 +1942,8 @@ fn load_unknown_manual_intents(
         "SELECT intent_id, created_ts_ms, symbol, action, side, status, requested_size, leverage,
                 dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms, meta_json
          FROM oms_intents
-         WHERE reason = 'manual_trade' AND status = 'UNKNOWN'
+         WHERE reason = 'manual_trade'
+           AND status IN ('NEW', 'SENT', 'PARTIAL', 'UNKNOWN')
          ORDER BY created_ts_ms DESC
          LIMIT ?1",
     )?;
@@ -2035,6 +1971,57 @@ fn load_unknown_manual_intents(
     Ok(rows)
 }
 
+fn load_manual_fill_progress(
+    conn: &Connection,
+    intent_id: &str,
+) -> Result<ManualFillProgress, HubError> {
+    conn.query_row(
+        "SELECT
+            COUNT(*) AS observed_fills,
+            COALESCE(SUM(CASE WHEN size IS NOT NULL THEN 1 ELSE 0 END), 0) AS parsed_trade_rows,
+            COALESCE(SUM(CASE WHEN size IS NULL THEN 1 ELSE 0 END), 0) AS parse_failures,
+            COALESCE(SUM(CASE WHEN size IS NOT NULL THEN size ELSE 0 END), 0.0) AS filled_size
+         FROM oms_fills
+         WHERE intent_id = ?1",
+        [intent_id],
+        |row| {
+            Ok(ManualFillProgress {
+                observed_fills: row.get::<_, i64>(0)? as usize,
+                parsed_trade_rows: row.get::<_, i64>(1)? as usize,
+                parse_failures: row.get::<_, i64>(2)? as usize,
+                filled_size: row.get(3)?,
+            })
+        },
+    )
+    .map_err(HubError::from)
+}
+
+fn unseen_manual_fills(
+    conn: &Connection,
+    fills: Vec<HyperliquidFill>,
+) -> Result<Vec<HyperliquidFill>, HubError> {
+    let mut fresh = Vec::new();
+    for fill in fills {
+        let fill_hash = fill.raw.get("hash").and_then(|value| value.as_str());
+        let fill_tid = fill.raw.get("tid").and_then(|value| value.as_i64());
+        let exists = conn.query_row(
+            "SELECT 1
+             FROM oms_fills
+             WHERE ((fill_hash = ?1) OR (fill_hash IS NULL AND ?1 IS NULL))
+               AND ((fill_tid = ?2) OR (fill_tid IS NULL AND ?2 IS NULL))
+             LIMIT 1",
+            params![fill_hash, fill_tid],
+            |_| Ok(()),
+        );
+        match exists {
+            Ok(()) => {}
+            Err(rusqlite::Error::QueryReturnedNoRows) => fresh.push(fill),
+            Err(error) => return Err(HubError::Db(error.to_string())),
+        }
+    }
+    Ok(fresh)
+}
+
 fn load_manual_cancel_context_by_intent_id(
     conn: &Connection,
     intent_id: &str,
@@ -2050,10 +2037,7 @@ fn load_manual_cancel_context_by_intent_id(
         Ok(ManualCancelContext {
             intent_exists: true,
             intent_id: Some(intent_id.to_string()),
-            symbol: row
-                .get::<_, String>(0)?
-                .trim()
-                .to_ascii_uppercase(),
+            symbol: row.get::<_, String>(0)?.trim().to_ascii_uppercase(),
             side: row.get(1)?,
             current_status: row.get(2)?,
             requested_size: row.get(3)?,
@@ -2107,9 +2091,7 @@ fn load_manual_cancel_context_by_exchange_order_id(
 }
 
 fn cancelled_intent_status(current_status: Option<&str>) -> Option<&'static str> {
-    let status = current_status?
-        .trim()
-        .to_ascii_uppercase();
+    let status = current_status?.trim().to_ascii_uppercase();
     match status.as_str() {
         "PARTIAL" => Some("PARTIAL_CANCELLED"),
         "NEW" | "SENT" | "UNKNOWN" => Some("CANCELLED"),
@@ -2320,8 +2302,92 @@ fn find_matching_open_order<'a>(
             .or_else(|| order.get("client_order_id"))
             .and_then(|value| value.as_str())
             .map(str::trim);
-        order_cloid == Some(cloid)
+        if order_cloid == Some(cloid) {
+            return true;
+        }
+        if let Some(expected_oid) = existing.exchange_order_id.as_deref() {
+            let order_oid = order
+                .get("oid")
+                .map(|value| value.to_string().trim_matches('"').to_string());
+            return order_oid.as_deref() == Some(expected_oid);
+        }
+        false
     })
+}
+
+fn open_order_snapshot_from_value<'a>(
+    intent: &'a ExistingManualIntent,
+    cloid: &'a str,
+    order: &'a Value,
+    now_ms: i64,
+) -> ManualOpenOrderSnapshot<'a> {
+    let price = order
+        .get("limitPx")
+        .or_else(|| order.get("price"))
+        .and_then(parse_json_number);
+    let remaining_size = order
+        .get("sz")
+        .or_else(|| order.get("origSz"))
+        .and_then(parse_json_number);
+    let exchange_order_id = order
+        .get("oid")
+        .and_then(parse_json_integer)
+        .map(|value| value.to_string());
+    ManualOpenOrderSnapshot {
+        intent_id: &intent.intent_id,
+        last_seen_ts_ms: now_ms,
+        symbol: &intent.symbol,
+        side: &intent.side,
+        price,
+        remaining_size,
+        reduce_only: matches!(intent.action.as_str(), "CLOSE" | "REDUCE"),
+        client_order_id: cloid,
+        exchange_order_id,
+        raw_json: order.to_string(),
+    }
+}
+
+fn should_finalise_absent_active_intent(reference_ts_ms: i64, now_ms: i64) -> bool {
+    now_ms.saturating_sub(reference_ts_ms) >= ACTIVE_RECONCILE_ABSENCE_GRACE.as_millis() as i64
+}
+
+fn derive_active_manual_intent_status(
+    requested_size: Option<f64>,
+    progress: &ManualFillProgress,
+    has_open_order: bool,
+    missing_open_order_after_grace: bool,
+) -> Option<&'static str> {
+    if progress.parse_failures > 0 {
+        if has_open_order {
+            return Some(if progress.observed_fills > 0 {
+                "PARTIAL"
+            } else {
+                "SENT"
+            });
+        }
+        return Some("UNKNOWN_RECONCILED");
+    }
+    if has_open_order {
+        if progress.filled_size > 0.0 {
+            return Some("PARTIAL");
+        }
+        return Some("SENT");
+    }
+    let requested_size = requested_size.unwrap_or(progress.filled_size);
+    if requested_size > 0.0 && progress.filled_size + 1e-9 >= requested_size {
+        return Some("FILLED");
+    }
+    if progress.filled_size > 0.0 {
+        return Some(if missing_open_order_after_grace {
+            "PARTIAL_CANCELLED"
+        } else {
+            "PARTIAL"
+        });
+    }
+    if missing_open_order_after_grace {
+        return Some("CANCELLED");
+    }
+    None
 }
 
 fn recover_existing_new_manual_execution(
@@ -2438,6 +2504,15 @@ fn recover_existing_new_manual_execution(
                 last_error: "",
                 raw_json: order.to_string(),
             },
+        )?;
+        upsert_manual_open_order_snapshot(
+            conn,
+            open_order_snapshot_from_value(
+                existing,
+                &cloid,
+                order,
+                chrono::Utc::now().timestamp_millis(),
+            ),
         )?;
         write_manual_runtime_log(
             conn,
@@ -2558,6 +2633,9 @@ fn update_manual_intent_status(
             "failed to update manual OMS intent status for {intent_id}"
         )));
     }
+    if intent_status_is_terminal(status) {
+        clear_manual_open_order_snapshot(conn, intent_id)?;
+    }
     Ok(())
 }
 
@@ -2603,6 +2681,321 @@ fn record_manual_order_submission(
             submission.raw_json,
         ],
     )?;
+    if matches!(submission.status, "REJECTED" | "ERROR") {
+        clear_manual_open_order_snapshot(conn, submission.intent_id)?;
+    }
+    Ok(())
+}
+
+fn upsert_manual_open_order_snapshot(
+    conn: &Connection,
+    snapshot: ManualOpenOrderSnapshot<'_>,
+) -> Result<(), HubError> {
+    conn.execute(
+        "INSERT INTO oms_open_orders (
+            intent_id, last_seen_ts_ms, symbol, side, price, remaining_size, reduce_only,
+            client_order_id, exchange_order_id, raw_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ON CONFLICT(intent_id) DO UPDATE SET
+            last_seen_ts_ms = excluded.last_seen_ts_ms,
+            symbol = excluded.symbol,
+            side = excluded.side,
+            price = excluded.price,
+            remaining_size = excluded.remaining_size,
+            reduce_only = excluded.reduce_only,
+            client_order_id = excluded.client_order_id,
+            exchange_order_id = excluded.exchange_order_id,
+            raw_json = excluded.raw_json",
+        params![
+            snapshot.intent_id,
+            snapshot.last_seen_ts_ms,
+            snapshot.symbol,
+            snapshot.side,
+            snapshot.price,
+            snapshot.remaining_size,
+            if snapshot.reduce_only { 1 } else { 0 },
+            snapshot.client_order_id,
+            snapshot.exchange_order_id,
+            snapshot.raw_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn clear_manual_open_order_snapshot(conn: &Connection, intent_id: &str) -> Result<bool, HubError> {
+    let changed = conn.execute(
+        "DELETE FROM oms_open_orders WHERE intent_id = ?1",
+        [intent_id],
+    )?;
+    Ok(changed > 0)
+}
+
+fn load_manual_open_order_last_seen_ms(
+    conn: &Connection,
+    intent_id: &str,
+) -> Result<Option<i64>, HubError> {
+    let row = conn.query_row(
+        "SELECT last_seen_ts_ms FROM oms_open_orders WHERE intent_id = ?1 LIMIT 1",
+        [intent_id],
+        |row| row.get(0),
+    );
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn has_manual_open_order_snapshot(conn: &Connection, intent_id: &str) -> Result<bool, HubError> {
+    Ok(load_manual_open_order_last_seen_ms(conn, intent_id)?.is_some())
+}
+
+fn intent_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_uppercase().as_str(),
+        "FILLED" | "REJECTED" | "CANCELLED" | "PARTIAL_CANCELLED" | "UNKNOWN_RECONCILED"
+    )
+}
+
+fn reconcile_active_manual_intent(
+    client: &HyperliquidClient,
+    conn: &mut Connection,
+    intent: &ExistingManualIntent,
+    open_orders: &[Value],
+    counters: &mut ManualReconcileCounters,
+) -> Result<(), HubError> {
+    let cloid = existing_intent_cloid(intent);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let fills = collect_matching_fills_once(
+        client,
+        &intent.symbol,
+        intent.created_ts_ms.saturating_sub(5_000),
+        now_ms,
+        &cloid,
+        intent.exchange_order_id.as_deref(),
+    )?;
+    let fresh_fills = unseen_manual_fills(conn, fills)?;
+    if !fresh_fills.is_empty() {
+        let account_value_usd = client
+            .account_snapshot()
+            .map_err(|error| HubError::Internal(error.to_string()))?
+            .account_value_usd;
+        let fill_summary = record_manual_fill_batch(
+            conn,
+            &fresh_fills,
+            &intent.symbol,
+            &intent.intent_id,
+            &cloid,
+            account_value_usd,
+            intent.leverage.unwrap_or(1.0).max(1.0),
+        )?;
+        write_manual_runtime_log(
+            conn,
+            if fill_summary.parse_failures > 0 { "WARN" } else { "INFO" },
+            &format!(
+                "manual_trade active_reconcile_fills intent_id={} symbol={} observed_fills={} parsed_trade_rows={} filled_size={}",
+                intent.intent_id,
+                intent.symbol,
+                fill_summary.observed_fills,
+                fill_summary.parsed_trade_rows,
+                fill_summary.filled_size
+            ),
+        )?;
+        write_manual_audit_event(
+            conn,
+            Some(&intent.symbol),
+            "MANUAL_FILLS_RECORDED",
+            if fill_summary.parse_failures > 0 {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            json!({
+                "intent_id": &intent.intent_id,
+                "action": &intent.action,
+                "observed_fills": fill_summary.observed_fills,
+                "parsed_trade_rows": fill_summary.parsed_trade_rows,
+                "filled_size": fill_summary.filled_size,
+                "source": "active_reconcile",
+            }),
+        )?;
+        write_manual_reconcile_event(
+            conn,
+            "manual_active_reconcile",
+            Some(&intent.symbol),
+            if fill_summary.parse_failures > 0 {
+                "fills_parse_failed"
+            } else {
+                "fills_recovered"
+            },
+            json!({
+                "intent_id": &intent.intent_id,
+                "observed_fills": fill_summary.observed_fills,
+                "parse_failures": fill_summary.parse_failures,
+            }),
+        )?;
+        counters.recovered_fills += 1;
+    }
+
+    let progress = load_manual_fill_progress(conn, &intent.intent_id)?;
+    let had_snapshot = has_manual_open_order_snapshot(conn, &intent.intent_id)?;
+    let open_order = find_matching_open_order(open_orders, intent, &cloid);
+    let mut missing_open_order_after_grace = false;
+
+    if let Some(order) = open_order {
+        if intent.sent_ts_ms.is_none()
+            || intent
+                .exchange_order_id
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+            || intent.status.eq_ignore_ascii_case("NEW")
+        {
+            let exchange_order_id = order
+                .get("oid")
+                .and_then(parse_json_integer)
+                .map(|value| value.to_string());
+            record_manual_order_submission(
+                conn,
+                ManualOrderSubmission {
+                    intent_id: &intent.intent_id,
+                    sent_ts_ms: now_ms,
+                    symbol: &intent.symbol,
+                    side: &intent.side,
+                    order_type: "recovered_active_open_order",
+                    requested_size: intent.requested_size.unwrap_or(0.0),
+                    reduce_only: matches!(intent.action.as_str(), "CLOSE" | "REDUCE"),
+                    client_order_id: &cloid,
+                    exchange_order_id: exchange_order_id.as_deref(),
+                    status: "SENT",
+                    last_error: "",
+                    raw_json: order.to_string(),
+                },
+            )?;
+        }
+        upsert_manual_open_order_snapshot(
+            conn,
+            open_order_snapshot_from_value(intent, &cloid, order, now_ms),
+        )?;
+        if !had_snapshot {
+            write_manual_runtime_log(
+                conn,
+                "INFO",
+                &format!(
+                    "manual_trade active_reconcile_open_order intent_id={} symbol={} client_order_id={}",
+                    intent.intent_id, intent.symbol, cloid
+                ),
+            )?;
+            write_manual_audit_event(
+                conn,
+                Some(&intent.symbol),
+                "MANUAL_ORDER_SUBMITTED",
+                "INFO",
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "action": &intent.action,
+                    "client_order_id": &cloid,
+                    "source": "active_reconcile",
+                }),
+            )?;
+            write_manual_reconcile_event(
+                conn,
+                "manual_active_reconcile",
+                Some(&intent.symbol),
+                "open_order_recovered",
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "client_order_id": &cloid,
+                }),
+            )?;
+            counters.recovered_open_orders += 1;
+        }
+    } else if let Some(last_seen_ts_ms) =
+        load_manual_open_order_last_seen_ms(conn, &intent.intent_id)?
+    {
+        if should_finalise_absent_active_intent(last_seen_ts_ms, now_ms) {
+            clear_manual_open_order_snapshot(conn, &intent.intent_id)?;
+            write_manual_runtime_log(
+                conn,
+                "INFO",
+                &format!(
+                    "manual_trade active_reconcile_open_order_cleared intent_id={} symbol={}",
+                    intent.intent_id, intent.symbol
+                ),
+            )?;
+            write_manual_reconcile_event(
+                conn,
+                "manual_active_reconcile",
+                Some(&intent.symbol),
+                "open_order_cleared",
+                json!({
+                    "intent_id": &intent.intent_id,
+                }),
+            )?;
+            counters.open_order_clears += 1;
+            missing_open_order_after_grace = true;
+        }
+    }
+
+    if let Some(next_status) = derive_active_manual_intent_status(
+        intent.requested_size,
+        &progress,
+        open_order.is_some(),
+        missing_open_order_after_grace,
+    ) {
+        if !intent.status.eq_ignore_ascii_case(next_status) {
+            let next_error = if progress.parse_failures > 0 {
+                "one_or_more_fills_failed_to_parse_into_trades"
+            } else {
+                ""
+            };
+            update_manual_intent_status(conn, &intent.intent_id, next_status, next_error)?;
+            write_manual_runtime_log(
+                conn,
+                if next_status == "UNKNOWN_RECONCILED" { "WARN" } else { "INFO" },
+                &format!(
+                    "manual_trade active_reconcile_status intent_id={} symbol={} from={} to={} filled_size={} observed_fills={}",
+                    intent.intent_id,
+                    intent.symbol,
+                    intent.status,
+                    next_status,
+                    progress.filled_size,
+                    progress.observed_fills
+                ),
+            )?;
+            write_manual_audit_event(
+                conn,
+                Some(&intent.symbol),
+                "MANUAL_INTENT_RECONCILED",
+                if next_status == "UNKNOWN_RECONCILED" {
+                    "WARN"
+                } else {
+                    "INFO"
+                },
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "from_status": &intent.status,
+                    "to_status": next_status,
+                    "filled_size": progress.filled_size,
+                    "parsed_trade_rows": progress.parsed_trade_rows,
+                    "observed_fills": progress.observed_fills,
+                    "source": "active_reconcile",
+                }),
+            )?;
+            write_manual_reconcile_event(
+                conn,
+                "manual_active_reconcile",
+                Some(&intent.symbol),
+                "status_updated",
+                json!({
+                    "intent_id": &intent.intent_id,
+                    "from_status": &intent.status,
+                    "to_status": next_status,
+                }),
+            )?;
+            counters.status_updates += 1;
+        }
+    }
     Ok(())
 }
 
@@ -4241,6 +4634,224 @@ mod tests {
     }
 
     #[test]
+    fn active_manual_intent_loader_excludes_unknown_reconciled_rows() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        for (intent_id, status) in [
+            ("manual_active_new", "NEW"),
+            ("manual_active_sent", "SENT"),
+            ("manual_active_partial", "PARTIAL"),
+            ("manual_active_unknown", "UNKNOWN"),
+            ("manual_active_reconciled", "UNKNOWN_RECONCILED"),
+        ] {
+            insert_manual_intent(
+                &conn,
+                ManualIntentRecord {
+                    intent_id,
+                    created_ts_ms: 1_773_500_400_000,
+                    symbol: "ETH",
+                    action: "OPEN",
+                    side: "SELL",
+                    requested_size: 0.0515,
+                    requested_notional: 107.5629,
+                    leverage: Some(10.0),
+                    status,
+                    dedupe_key: None,
+                    client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                    reason: "manual_trade",
+                    confidence: "MANUAL",
+                    meta_json: "{}".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        let intents = load_active_manual_intents(&conn, 10).unwrap();
+        let ids = intents
+            .into_iter()
+            .map(|intent| intent.intent_id)
+            .collect::<Vec<_>>();
+        assert!(ids.iter().any(|id| id == "manual_active_new"));
+        assert!(ids.iter().any(|id| id == "manual_active_sent"));
+        assert!(ids.iter().any(|id| id == "manual_active_partial"));
+        assert!(ids.iter().any(|id| id == "manual_active_unknown"));
+        assert!(!ids.iter().any(|id| id == "manual_active_reconciled"));
+    }
+
+    #[test]
+    fn find_matching_open_order_falls_back_to_exchange_order_id() {
+        let existing = ExistingManualIntent {
+            intent_id: "manual_active_status".to_string(),
+            created_ts_ms: 1_773_500_600_000,
+            symbol: "ETH".to_string(),
+            action: "OPEN".to_string(),
+            side: "SELL".to_string(),
+            status: "SENT".to_string(),
+            requested_size: Some(0.0515),
+            leverage: Some(10.0),
+            dedupe_key: Some("confirm-open".to_string()),
+            client_order_id: Some("0xmissingcloid".to_string()),
+            exchange_order_id: Some("348262211344".to_string()),
+            last_error: None,
+            sent_ts_ms: Some(1_773_500_610_000),
+            meta_json: Some("{}".to_string()),
+        };
+        let orders = vec![json!({
+            "coin": "ETH",
+            "oid": 348262211344_i64,
+            "side": "A",
+            "limitPx": "2088.6",
+            "sz": "0.0515"
+        })];
+
+        let matched = find_matching_open_order(&orders, &existing, "0xdifferent");
+        assert!(matched.is_some());
+    }
+
+    #[test]
+    fn open_order_snapshot_upsert_and_clear_round_trip() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+
+        upsert_manual_open_order_snapshot(
+            &conn,
+            ManualOpenOrderSnapshot {
+                intent_id: "manual_open_snapshot",
+                last_seen_ts_ms: 1_773_500_500_000,
+                symbol: "ETH",
+                side: "SELL",
+                price: Some(2088.6),
+                remaining_size: Some(0.0515),
+                reduce_only: false,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                exchange_order_id: Some("348262211344".to_string()),
+                raw_json: json!({"oid":348262211344_i64}).to_string(),
+            },
+        )
+        .unwrap();
+        assert!(has_manual_open_order_snapshot(&conn, "manual_open_snapshot").unwrap());
+        assert_eq!(
+            load_manual_open_order_last_seen_ms(&conn, "manual_open_snapshot").unwrap(),
+            Some(1_773_500_500_000)
+        );
+        assert!(clear_manual_open_order_snapshot(&conn, "manual_open_snapshot").unwrap());
+        assert!(!has_manual_open_order_snapshot(&conn, "manual_open_snapshot").unwrap());
+    }
+
+    #[test]
+    fn active_manual_status_derivation_requires_missing_open_order_grace() {
+        let sent = derive_active_manual_intent_status(
+            Some(0.0515),
+            &ManualFillProgress {
+                observed_fills: 0,
+                parsed_trade_rows: 0,
+                parse_failures: 0,
+                filled_size: 0.0,
+            },
+            true,
+            false,
+        );
+        assert_eq!(sent, Some("SENT"));
+
+        let parse_failed_but_open = derive_active_manual_intent_status(
+            Some(0.0515),
+            &ManualFillProgress {
+                observed_fills: 1,
+                parsed_trade_rows: 0,
+                parse_failures: 1,
+                filled_size: 0.0,
+            },
+            true,
+            false,
+        );
+        assert_eq!(parse_failed_but_open, Some("PARTIAL"));
+
+        let partial_without_grace = derive_active_manual_intent_status(
+            Some(0.0515),
+            &ManualFillProgress {
+                observed_fills: 1,
+                parsed_trade_rows: 1,
+                parse_failures: 0,
+                filled_size: 0.02,
+            },
+            false,
+            false,
+        );
+        assert_eq!(partial_without_grace, Some("PARTIAL"));
+
+        let partial_after_grace = derive_active_manual_intent_status(
+            Some(0.0515),
+            &ManualFillProgress {
+                observed_fills: 1,
+                parsed_trade_rows: 1,
+                parse_failures: 0,
+                filled_size: 0.02,
+            },
+            false,
+            true,
+        );
+        assert_eq!(partial_after_grace, Some("PARTIAL_CANCELLED"));
+
+        let cancelled = derive_active_manual_intent_status(
+            Some(0.0515),
+            &ManualFillProgress {
+                observed_fills: 0,
+                parsed_trade_rows: 0,
+                parse_failures: 0,
+                filled_size: 0.0,
+            },
+            false,
+            true,
+        );
+        assert_eq!(cancelled, Some("CANCELLED"));
+    }
+
+    #[test]
+    fn terminal_status_updates_clear_open_order_snapshots() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id: "manual_terminal_clear",
+                created_ts_ms: 1_773_500_700_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "SENT",
+                dedupe_key: None,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        upsert_manual_open_order_snapshot(
+            &conn,
+            ManualOpenOrderSnapshot {
+                intent_id: "manual_terminal_clear",
+                last_seen_ts_ms: 1_773_500_700_100,
+                symbol: "ETH",
+                side: "SELL",
+                price: Some(2088.6),
+                remaining_size: Some(0.0515),
+                reduce_only: false,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                exchange_order_id: Some("348262211344".to_string()),
+                raw_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+
+        update_manual_intent_status(&conn, "manual_terminal_clear", "FILLED", "").unwrap();
+        assert!(!has_manual_open_order_snapshot(&conn, "manual_terminal_clear").unwrap());
+    }
+
+    #[test]
     fn manual_audit_event_helper_supports_old_and_new_schemas() {
         let old_db = NamedTempFile::new().unwrap();
         let old_conn = Connection::open(old_db.path()).unwrap();
@@ -4332,7 +4943,9 @@ mod tests {
         )
         .unwrap();
         let old_count: i64 = old_conn
-            .query_row("SELECT COUNT(*) FROM oms_reconcile_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM oms_reconcile_events", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(old_count, 1);
 
@@ -4361,7 +4974,9 @@ mod tests {
         )
         .unwrap();
         let new_count: i64 = new_conn
-            .query_row("SELECT COUNT(*) FROM oms_reconcile_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM oms_reconcile_events", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(new_count, 1);
     }

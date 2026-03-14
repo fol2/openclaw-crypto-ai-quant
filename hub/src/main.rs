@@ -300,28 +300,36 @@ fn spawn_manual_trade_recovery_poller(state: Arc<AppState>) {
         loop {
             match tokio::task::spawn_blocking({
                 let cfg = cfg.clone();
-                move || manual_trade::recover_unknown_manual_intents(&cfg, 20)
+                move || manual_trade::reconcile_active_manual_intents(&cfg, 20)
             })
             .await
             {
                 Ok(Ok(summary)) => {
-                    let recovered = summary
+                    let activity = summary
                         .get("recovered_fills")
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0)
                         + summary
                             .get("recovered_open_orders")
                             .and_then(|value| value.as_u64())
+                            .unwrap_or(0)
+                        + summary
+                            .get("status_updates")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0)
+                        + summary
+                            .get("open_order_clears")
+                            .and_then(|value| value.as_u64())
                             .unwrap_or(0);
-                    if recovered > 0 {
-                        tracing::info!(summary = %summary, "manual unknown recovery applied");
+                    if activity > 0 {
+                        tracing::info!(summary = %summary, "manual active reconcile applied");
                     }
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(error = %error, "manual unknown recovery failed");
+                    tracing::warn!(error = %error, "manual active reconcile failed");
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "manual unknown recovery task failed");
+                    tracing::warn!(error = %error, "manual active reconcile task failed");
                 }
             }
             tokio::time::sleep(poll_interval).await;
