@@ -1663,10 +1663,21 @@ pub fn reconcile_manual_intents(cfg: &HubConfig, limit: usize) -> Result<Value, 
         let (next_status, next_last_error) =
             desired_manual_reconcile_state(&intent, &fill_summary, open_order_present, now_ms);
         let current_last_error = intent.last_error.as_deref().unwrap_or_default();
+        let effective_last_error =
+            if intent.status.eq_ignore_ascii_case(next_status) && next_last_error.is_empty() {
+                current_last_error
+            } else {
+                next_last_error
+            };
         let status_changed = !intent.status.eq_ignore_ascii_case(next_status)
-            || current_last_error != next_last_error;
+            || current_last_error != effective_last_error;
         if status_changed {
-            update_manual_intent_status(&conn, &intent.intent_id, next_status, next_last_error)?;
+            update_manual_intent_status(
+                &conn,
+                &intent.intent_id,
+                next_status,
+                effective_last_error,
+            )?;
             status_updates += 1;
         }
         if fill_summary.inserted_oms_fills > 0 {
@@ -2939,6 +2950,7 @@ fn open_order_side(order: &Value) -> &'static str {
 fn open_order_reduce_only(order: &Value) -> bool {
     match order.get("reduceOnly") {
         Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_i64().unwrap_or_default() != 0,
         Some(Value::String(value)) => matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
