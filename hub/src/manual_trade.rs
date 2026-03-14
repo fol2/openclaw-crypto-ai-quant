@@ -3362,7 +3362,12 @@ fn recover_existing_pending_cancel_request(
                 context.exchange_order_id.as_deref(),
             )
         } else {
-            false
+            manual_cancel_target_is_still_open(
+                &open_orders,
+                &symbol,
+                existing.client_order_id.as_deref(),
+                existing.exchange_order_id.as_deref(),
+            )
         }
     } else {
         let request_exchange_order_id = request
@@ -6505,6 +6510,24 @@ mod tests {
             " eth ",
             None,
             Some("12345")
+        ));
+    }
+
+    #[test]
+    fn manual_cancel_target_probe_matches_fallback_client_order_id() {
+        let orders = vec![json!({
+            "coin": "ETH",
+            "cloid": "0x6d616e5f1234567890abcdef12345678",
+            "side": "A",
+            "limitPx": "2100.5",
+            "sz": "0.0515"
+        })];
+
+        assert!(manual_cancel_target_is_still_open(
+            &orders,
+            "ETH",
+            Some("0x6d616e5f1234567890abcdef12345678"),
+            None
         ));
     }
 
