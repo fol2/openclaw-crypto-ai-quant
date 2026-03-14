@@ -25,16 +25,29 @@ fn now_ms() -> i64 {
 }
 
 fn deployed_config_boundary(
+    artifacts_dir: &std::path::Path,
+    lane: &str,
     conn: &rusqlite::Connection,
     heartbeat: &Heartbeat,
 ) -> Result<Option<(String, String)>, HubError> {
     let Some(config_id) = heartbeat.config_id.clone() else {
         return Ok(None);
     };
-    let Some(from_ts) = runtime::first_seen_config_id_ts_ms(conn, &config_id)?.and_then(|ts_ms| {
-        chrono::DateTime::from_timestamp_millis(ts_ms)
+    let ledger_from_ts = crate::config_audit::latest_successful_event_for_config_id(
+        artifacts_dir,
+        lane,
+        &config_id,
+    )?
+    .and_then(|event| {
+        chrono::DateTime::from_timestamp_millis(event.ts_ms)
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-    }) else {
+    });
+    let runtime_from_ts =
+        runtime::first_seen_config_id_ts_ms(conn, &config_id)?.and_then(|ts_ms| {
+            chrono::DateTime::from_timestamp_millis(ts_ms)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+        });
+    let Some(from_ts) = ledger_from_ts.or(runtime_from_ts) else {
         return Ok(None);
     };
     Ok(Some((config_id, from_ts)))
@@ -512,7 +525,8 @@ async fn api_snapshot(
     let daily = trading::daily_metrics(&conn, ts)?;
 
     // Range metrics: since-config and all-time
-    let deployed_config = deployed_config_boundary(&conn, &heartbeat)?;
+    let deployed_config =
+        deployed_config_boundary(&state.config.artifacts_dir, &mode, &conn, &heartbeat)?;
 
     let since_config = deployed_config
         .as_ref()
@@ -1081,10 +1095,15 @@ pub fn normalize_mode(mode: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_audit::{
+        append_event, ConfigAuditActor, ConfigAuditEvent, ConfigAuditIdentity,
+    };
     use rusqlite::Connection;
+    use tempfile::tempdir;
 
     #[test]
     fn deployed_config_boundary_uses_heartbeat_config_id() {
+        let dir = tempdir().unwrap();
         let conn = Connection::open_in_memory().unwrap();
         conn.execute(
             "CREATE TABLE runtime_logs (
@@ -1116,11 +1135,75 @@ mod tests {
             ..Default::default()
         };
 
-        let (config_id, from_ts) = deployed_config_boundary(&conn, &heartbeat)
+        let (config_id, from_ts) = deployed_config_boundary(dir.path(), "live", &conn, &heartbeat)
             .unwrap()
             .unwrap();
 
         assert_eq!(config_id, "abcdef0123456789");
         assert_eq!(from_ts, "2024-03-09T16:00:00");
+    }
+
+    #[test]
+    fn deployed_config_boundary_prefers_latest_matching_audit_event() {
+        let dir = tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE runtime_logs (
+                ts_ms INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_710_000_000_000_i64,
+                "engine ok config_id=abcdef0123456789"
+            ],
+        )
+        .unwrap();
+
+        append_event(
+            dir.path(),
+            &ConfigAuditEvent {
+                version: "config_audit_event_v1".to_string(),
+                ts_ms: 1_710_005_000_000_i64,
+                ts_utc: "2024-03-09T17:23:20".to_string(),
+                lane: "live".to_string(),
+                file_variant: "live".to_string(),
+                action: "apply_live".to_string(),
+                actor: ConfigAuditActor {
+                    auth_scope: "admin_token".to_string(),
+                    label: "operator".to_string(),
+                    source_ip: None,
+                    user_agent: None,
+                },
+                reason: Some("deploy".to_string()),
+                validation: json!({ "ok": true }),
+                before: ConfigAuditIdentity {
+                    lock_id: None,
+                    config_id: Some("old".to_string()),
+                },
+                after: ConfigAuditIdentity {
+                    lock_id: None,
+                    config_id: Some("abcdef0123456789".to_string()),
+                },
+                result: json!({ "ok": true }),
+                artifact_path: None,
+            },
+        )
+        .unwrap();
+
+        let heartbeat = Heartbeat {
+            config_id: Some("abcdef0123456789".to_string()),
+            ..Default::default()
+        };
+
+        let (_config_id, from_ts) = deployed_config_boundary(dir.path(), "live", &conn, &heartbeat)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(from_ts, "2024-03-09T17:23:20");
     }
 }
