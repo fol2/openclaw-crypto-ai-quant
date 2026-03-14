@@ -437,8 +437,12 @@ uses the Rust `live sync-fills` cursor contract to auto-check and auto-sync the
 ledger every hour.
 
 Successful runs also write exchange account and position snapshots into the
-live DB, so Hub read paths can fall back to current live balance and holdings
-even when no fresh in-memory Hyperliquid snapshot is available.
+live DB, so Hub read paths can expose exchange-observed equity and holdings
+with explicit source, freshness, and reconciliation metadata even when no
+fresh in-memory Hyperliquid snapshot is available.
+
+Those DB-backed exchange snapshots are last-known-good evidence only when they
+are stale. They must not be treated as current reconciled realised cash.
 
 Service-level tuning knobs:
 
