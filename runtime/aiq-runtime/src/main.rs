@@ -7,6 +7,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod decision_events;
 #[allow(dead_code)]
 mod live_cycle;
 #[allow(dead_code)]

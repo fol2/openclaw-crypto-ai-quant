@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use crate::decision_events;
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_cycle::{self, PaperCycleInput};
 use crate::paper_loop::{self, PaperLoopReport, PaperLoopStepReport};
@@ -478,6 +479,12 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let _signal_guard = install_signal_handlers(&stop_flag)?;
     let working_paper_db = paper_loop::prepare_working_paper_db(input.paper_db, input.dry_run)?;
+    decision_events::reconcile_db_schema(working_paper_db.path()).with_context(|| {
+        format!(
+            "paper daemon decision_events schema preflight failed for {}",
+            working_paper_db.path().display()
+        )
+    })?;
     let mut manifest_state = SymbolManifestState::new(
         input.explicit_symbols,
         input.symbols_file,

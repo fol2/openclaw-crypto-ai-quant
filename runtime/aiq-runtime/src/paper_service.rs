@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+use crate::decision_events;
 use crate::paper_daemon;
 use crate::paper_lane::PaperLane;
 use crate::paper_status::{self, PaperServiceState, PaperStatusInput, PaperStatusReport};
@@ -146,6 +147,7 @@ pub fn apply_service(input: PaperServiceApplyInput<'_>) -> Result<PaperServiceAp
     match plan.applied_action {
         PaperServiceApplyExecutedAction::Noop => {}
         PaperServiceApplyExecutedAction::Start => {
+            reconcile_decision_events_preflight(&preview)?;
             spawned_pid = Some(start_daemon(
                 &preview.daemon_command,
                 &lock_path,
@@ -165,6 +167,7 @@ pub fn apply_service(input: PaperServiceApplyInput<'_>) -> Result<PaperServiceAp
                 std::time::Duration::from_millis(input.stop_wait_ms.max(100)),
                 poll_interval,
             )?;
+            reconcile_decision_events_preflight(&preview)?;
             spawned_pid = Some(start_daemon(
                 &preview.daemon_command,
                 &lock_path,
@@ -203,6 +206,16 @@ pub fn apply_service(input: PaperServiceApplyInput<'_>) -> Result<PaperServiceAp
         spawned_pid,
         preview,
         final_service,
+    })
+}
+
+fn reconcile_decision_events_preflight(preview: &PaperServiceReport) -> Result<()> {
+    let paper_db = Path::new(&preview.status.manifest.paper_db);
+    decision_events::reconcile_db_schema(paper_db).with_context(|| {
+        format!(
+            "paper service apply refused to start because decision_events schema preflight failed for {}",
+            paper_db.display()
+        )
     })
 }
 

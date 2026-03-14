@@ -22,6 +22,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::path::Path;
 
+use crate::decision_events;
 use crate::paper_export;
 
 pub struct PaperRunOnceInput<'a> {
@@ -1116,18 +1117,20 @@ pub(crate) fn apply_decision_projection_with_tx(
         )?;
         trades_written += 1;
         let trade_id = tx.last_insert_rowid();
-        if table_exists_in_tx(tx, "decision_events")? {
-            tx.execute(
-                "INSERT INTO decision_events (id, trade_id, event_type, status, config_fingerprint, run_fingerprint)
-                 VALUES (?1, ?2, 'fill', 'executed', ?3, ?4)",
-                params![
-                    format!("{}:{}:{trade_id}", input.run_fingerprint, idx),
-                    trade_id,
-                    input.config_fingerprint,
-                    input.run_fingerprint,
-                ],
-            )?;
-        }
+        let decision_event_id = format!("{}:{}:{trade_id}", input.run_fingerprint, idx);
+        decision_events::insert_fill_tx(
+            tx,
+            &decision_events::FillDecisionEvent {
+                id: &decision_event_id,
+                timestamp_ms: ts_ms,
+                symbol,
+                trade_id,
+                config_fingerprint: input.config_fingerprint,
+                run_fingerprint: input.run_fingerprint,
+                reason_code: (!intent.reason_code.is_empty())
+                    .then_some(intent.reason_code.as_str()),
+            },
+        )?;
 
         if action == "OPEN" {
             active_open_trade_id = Some(trade_id);
@@ -1370,6 +1373,32 @@ mod tests {
             {runtime_cooldowns_sql}
             "#,
         ))
+        .unwrap();
+    }
+
+    fn create_legacy_decision_events_schema(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                timestamp_ms INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision_phase TEXT NOT NULL,
+                parent_decision_id TEXT,
+                trade_id INTEGER,
+                triggered_by TEXT,
+                action_taken TEXT,
+                rejection_reason TEXT,
+                context_json TEXT,
+                config_fingerprint TEXT,
+                run_fingerprint TEXT,
+                reason_code TEXT
+            );
+            "#,
+        )
         .unwrap();
     }
 
@@ -1736,6 +1765,109 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cooldown, Some(ms_to_secs(FIXED_TS_MS)));
+    }
+
+    #[test]
+    fn apply_decision_projection_writes_fill_events_for_legacy_decision_schema() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        seed_flat_paper_db(&paper_db, true);
+        create_legacy_decision_events_schema(&paper_db);
+
+        let pre_state = StrategyState::new(1_000.0, FIXED_TS_MS);
+        let mut post_state = StrategyState::new(970.0, FIXED_TS_MS);
+        post_state.positions.insert(
+            "ETH".to_string(),
+            bt_core::decision_kernel::Position {
+                symbol: "ETH".to_string(),
+                side: PositionSide::Long,
+                quantity: 1.5,
+                avg_entry_price: 100.0,
+                opened_at_ms: FIXED_TS_MS,
+                updated_at_ms: FIXED_TS_MS,
+                notional_usd: 150.0,
+                margin_usd: 30.0,
+                confidence: Some(2),
+                entry_atr: Some(5.0),
+                entry_adx_threshold: Some(22.0),
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: None,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+                last_funding_ms: None,
+            },
+        );
+        let intent = OrderIntent {
+            schema_version: 1,
+            intent_id: 1,
+            symbol: "ETH".to_string(),
+            kind: OrderIntentKind::Open,
+            side: PositionSide::Long,
+            quantity: 1.5,
+            price: 100.0,
+            notional_usd: 150.0,
+            fee_rate: 0.0,
+            reason: "Signal Trigger".to_string(),
+            reason_code: "entry_signal".to_string(),
+        };
+        let fill = FillEvent {
+            schema_version: 1,
+            intent_id: 1,
+            symbol: "ETH".to_string(),
+            side: PositionSide::Long,
+            price: 100.0,
+            quantity: 1.5,
+            notional_usd: 150.0,
+            fee_usd: 0.0,
+            pnl_usd: 0.0,
+        };
+        let projection = ProjectionInput {
+            config_fingerprint: "cfg",
+            run_fingerprint: "run",
+            symbol: "ETH",
+            pre_state: &pre_state,
+            prior_position: None,
+            post_state: &post_state,
+            intents: &[intent],
+            fills: &[fill],
+            snap: &sample_snap(),
+            execution_metadata: ExecutionMetadata {
+                signal: Signal::Buy,
+                confidence: Confidence::High,
+                entry_adx_threshold: 22.0,
+            },
+            ts_ms: FIXED_TS_MS,
+        };
+
+        apply_decision_projection(&paper_db, &projection).unwrap();
+
+        let conn = Connection::open(&paper_db).unwrap();
+        let event = conn
+            .query_row(
+                "SELECT timestamp_ms, symbol, decision_phase, trade_id, config_fingerprint, run_fingerprint, reason_code
+                 FROM decision_events ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(event.0, FIXED_TS_MS);
+        assert_eq!(event.1, "ETH");
+        assert_eq!(event.2, "execution");
+        assert!(event.3 > 0);
+        assert_eq!(event.4.as_deref(), Some("cfg"));
+        assert_eq!(event.5.as_deref(), Some("run"));
+        assert_eq!(event.6.as_deref(), Some("entry_signal"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::decision_events;
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_export;
 use crate::paper_run_once::{
@@ -911,6 +912,7 @@ fn decision_consumes_entry_budget(decision: &decision_kernel::DecisionResult) ->
 }
 
 fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    decision_events::ensure_schema_tx(tx)?;
     tx.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS runtime_cycle_steps (
@@ -922,14 +924,6 @@ fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             execution_count INTEGER NOT NULL,
             trades_written INTEGER NOT NULL,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS decision_events (
-            id TEXT PRIMARY KEY,
-            trade_id INTEGER,
-            event_type TEXT NOT NULL,
-            status TEXT NOT NULL,
-            config_fingerprint TEXT,
-            run_fingerprint TEXT
         );
         CREATE TABLE IF NOT EXISTS audit_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
