@@ -14,6 +14,25 @@ cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 ```
 
+## Hub Manual Trade
+
+Enable Hub manual-trade writes with `AIQ_MANUAL_TRADE_ENABLE=true` in the Hub
+unit or environment file.
+
+The Hub manual-trade API does not require `AI_QUANT_LIVE_ENABLE` or
+`AI_QUANT_LIVE_CONFIRM` in the Hub process. Those live cutover variables remain
+part of the runtime launch contract, not a prerequisite for Hub-side manual
+trade requests.
+
+Manual-trade writes still fail closed when `AI_QUANT_HARD_KILL_SWITCH=1`, and
+the existing live risk / kill-mode controls continue to gate submissions.
+
+`GET /api/trade/{lookup_id}/result` now includes the latest persisted
+`order_status` plus `response` when an OMS order row exists. The `response`
+field preserves the latest exchange payload for rejected, resting, retried, or
+deduplicated manual-trade submissions, and falls back to raw text when the
+payload is not valid JSON.
+
 ### Immutable Launch Contract
 
 The current Rust paper/live launch contract already starts daemons from the

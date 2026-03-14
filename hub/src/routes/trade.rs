@@ -6,12 +6,12 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::HubError;
 use crate::live_risk::{CancelCheck, OrderAction, OrderCheck, OrderRecord};
-use crate::live_safety;
 use crate::manual_trade;
 use crate::state::AppState;
 
@@ -133,17 +133,29 @@ async fn record_guardrail_block(state: &AppState, symbol: &str, action: &str, re
     .await;
 }
 
-async fn ensure_live_orders_enabled(
+fn hard_kill_switch_active() -> bool {
+    env::var("AI_QUANT_HARD_KILL_SWITCH")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn ensure_manual_trade_write_ready(
     state: &AppState,
     symbol: &str,
     action: &str,
 ) -> Result<(), HubError> {
-    if live_safety::live_orders_enabled() {
+    if !hard_kill_switch_active() {
         return Ok(());
     }
-    record_guardrail_block(state, symbol, action, "live_orders_disabled").await;
+    record_guardrail_block(state, symbol, action, "hard_kill_switch").await;
     Err(HubError::Forbidden(
-        "manual trade blocked: live orders are disabled".into(),
+        "live trading halted: AI_QUANT_HARD_KILL_SWITCH is active".into(),
     ))
 }
 
@@ -280,7 +292,7 @@ async fn trade_execute(
     .await
     .map_err(|error| HubError::Internal(format!("execute preflight task failed: {error}")))??;
     if should_apply_manual_submission_guards(preflight) {
-        ensure_live_orders_enabled(&state, &request.symbol, "OPEN").await?;
+        ensure_manual_trade_write_ready(&state, &request.symbol, "OPEN").await?;
         check_manual_order_risk(&state, &request.symbol, OrderAction::Open, false, "OPEN").await?;
         check_rate_limit(&state, &request.symbol, Some(token)).await?;
     }
@@ -361,7 +373,7 @@ async fn trade_close(
     .await
     .map_err(|error| HubError::Internal(format!("close preflight task failed: {error}")))??;
     if should_apply_manual_submission_guards(preflight) {
-        ensure_live_orders_enabled(&state, &request.symbol, "CLOSE").await?;
+        ensure_manual_trade_write_ready(&state, &request.symbol, "CLOSE").await?;
         check_manual_order_risk(&state, &request.symbol, OrderAction::Close, true, "CLOSE").await?;
     }
     let symbol = request.symbol.clone();
@@ -399,7 +411,7 @@ async fn trade_cancel(
             return Ok(Json(existing));
         }
         manual_trade::ManualCancelPreflight::NewSubmission => {
-            ensure_live_orders_enabled(&state, &request.symbol, "CANCEL").await?;
+            ensure_manual_trade_write_ready(&state, &request.symbol, "CANCEL").await?;
             check_manual_cancel_risk(&state, &request.symbol).await?;
         }
         manual_trade::ManualCancelPreflight::ExistingPendingRequest => {}
@@ -436,6 +448,7 @@ async fn trade_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{env_lock, EnvGuard};
 
     #[test]
     fn open_param_fingerprint_normalises_case_and_spacing() {
@@ -522,5 +535,32 @@ mod tests {
         assert!(!should_apply_manual_submission_guards(
             manual_trade::ManualExecutionPreflight::ExistingCommittedIntent
         ));
+    }
+
+    #[test]
+    fn hard_kill_switch_gate_ignores_live_enable_env() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_HARD_KILL_SWITCH", None),
+            ("AI_QUANT_LIVE_ENABLE", None),
+            ("AI_QUANT_LIVE_CONFIRM", None),
+        ]);
+
+        assert!(!hard_kill_switch_active());
+
+        let _live_enable_only = EnvGuard::set(&[("AI_QUANT_LIVE_ENABLE", Some("1"))]);
+        assert!(!hard_kill_switch_active());
+    }
+
+    #[test]
+    fn hard_kill_switch_gate_blocks_when_enabled() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_HARD_KILL_SWITCH", Some("1")),
+            ("AI_QUANT_LIVE_ENABLE", None),
+            ("AI_QUANT_LIVE_CONFIRM", None),
+        ]);
+
+        assert!(hard_kill_switch_active());
     }
 }

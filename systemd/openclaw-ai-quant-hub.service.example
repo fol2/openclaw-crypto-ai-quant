@@ -13,6 +13,9 @@ Environment=AI_QUANT_CANDLES_DB_DIR=$PROJECT_DIR/candles_dbs
 Environment=AIQ_ROOT=$PROJECT_DIR
 Environment=RUST_LOG=info
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Enable Hub manual-trade writes in the Hub process itself.
+# The Hub does not require AI_QUANT_LIVE_ENABLE / AI_QUANT_LIVE_CONFIRM for
+# manual-trade routes; use AI_QUANT_HARD_KILL_SWITCH=1 to fail closed.
 Environment=AIQ_MANUAL_TRADE_ENABLE=true
 ExecStart=$PROJECT_DIR/hub/target/release/aiq-hub
 Restart=always
