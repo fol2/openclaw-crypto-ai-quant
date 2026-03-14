@@ -1818,6 +1818,37 @@ fn enforce_manual_trade_ready(cfg: &HubConfig, is_write: bool) -> Result<(), Hub
     Ok(())
 }
 
+pub fn record_manual_guardrail_block(
+    cfg: &HubConfig,
+    symbol: &str,
+    action: &str,
+    reason: &str,
+) -> Result<(), HubError> {
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    let symbol = symbol.trim().to_ascii_uppercase();
+    let action = action.trim().to_ascii_uppercase();
+    let reason = reason.trim().to_string();
+    write_manual_runtime_log(
+        &conn,
+        "WARN",
+        &format!(
+            "manual_trade blocked symbol={} action={} reason={}",
+            symbol, action, reason
+        ),
+    )?;
+    write_manual_audit_event(
+        &conn,
+        Some(&symbol),
+        "MANUAL_GUARDRAIL_BLOCKED",
+        "WARN",
+        json!({
+            "action": action,
+            "reason": reason,
+        }),
+    )?;
+    Ok(())
+}
+
 fn open_manual_trade_db(path: &Path) -> Result<Connection, HubError> {
     let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -4500,6 +4531,37 @@ mod tests {
         assert_eq!(row.0, "manual_unknown_recovery");
         assert_eq!(row.1, "ETH");
         assert_eq!(row.2, "fills_recovered");
+    }
+
+    #[test]
+    fn manual_guardrail_block_persists_runtime_and_audit_rows() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            ..HubConfig::from_env()
+        };
+        record_manual_guardrail_block(&cfg, "ETH", "OPEN", "close_only").unwrap();
+
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let runtime_row: (String, String) = conn
+            .query_row(
+                "SELECT level, message FROM runtime_logs ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let audit_row: (String, String) = conn
+            .query_row(
+                "SELECT event, symbol FROM audit_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(runtime_row.0, "WARN");
+        assert!(runtime_row.1.contains("close_only"));
+        assert_eq!(audit_row.0, "MANUAL_GUARDRAIL_BLOCKED");
+        assert_eq!(audit_row.1, "ETH");
     }
 
     #[test]

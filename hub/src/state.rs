@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::config::HubConfig;
 use crate::db::pool::{open_ro_pool, DbPool};
 use crate::hyperliquid::HlAccountSnapshot;
+use crate::live_risk::LiveRiskManager;
 use crate::sidecar::SidecarClient;
 use crate::subprocess::JobStore;
 use crate::ws::broadcast::BroadcastHub;
@@ -31,6 +32,7 @@ pub struct AppState {
     // ── Manual trade state ─────────────────────────────────────────
     /// Per-symbol rate-limit timestamps plus the most recent confirm token.
     pub trade_rate_limits: Mutex<HashMap<String, (String, Instant)>>,
+    pub manual_trade_risk: Mutex<LiveRiskManager>,
 
     // DB pools (optional — a DB might not exist yet).
     pub live_pool: Option<DbPool>,
@@ -64,6 +66,7 @@ impl AppState {
             jobs,
             tracked_symbols: Arc::new(RwLock::new(Vec::new())),
             trade_rate_limits: Mutex::new(HashMap::new()),
+            manual_trade_risk: Mutex::new(LiveRiskManager::from_env()),
             live_pool,
             paper1_pool,
             paper2_pool,
