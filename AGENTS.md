@@ -29,15 +29,20 @@ repository. Keep it concise. Load deeper instructions on demand from
 - Do not commit ticket work directly on `master`.
 - Mandatory PR flow for every successful code update:
   1. Create one atomic PR to `master`.
-  2. Run a reviewer subagent for that PR.
-  3. Be patient with PR reviewer subagents: let them finish, avoid duplicate
+  2. Before PR review, run a documentation subagent for that PR.
+  3. Have the documentation subagent update the relevant repo docs, refresh the
+     active plan doc when the task follows one, and refactor docs if coverage
+     or structure needs improvement.
+  4. Run a reviewer subagent for that PR only after the documentation pass is
+     complete.
+  5. Be patient with PR reviewer subagents: let them finish, avoid duplicate
      reviewer launches, and do not interrupt them unless the review context has
      genuinely changed.
-  4. Merge only after the review is acceptable.
-  5. After merge, delete the PR branch locally and remotely if you created it.
-  6. After merge, remove the PR worktree(s) if you created them.
-  7. After merge, close any subagents opened specifically for that PR.
-  8. Move to the next task only after the merge and cleanup are complete.
+  6. Merge only after the review is acceptable.
+  7. After merge, delete the PR branch locally and remotely if you created it.
+  8. After merge, remove the PR worktree(s) if you created them.
+  9. After merge, close any subagents opened specifically for that PR.
+  10. Move to the next task only after the merge and cleanup are complete.
 - Never delete branches, worktrees, or subagents owned by other concurrent
   agents or sessions.
 - Never commit sensitive material, including `secrets.json`, `.env`, private
@@ -87,7 +92,7 @@ Load only the instruction file you need from `docs/agent-instructions/`:
 | Topic | Load on demand |
 |---|---|
 | Index of all instruction docs | `docs/agent-instructions/README.md` |
-| SDLC, branching, PR flow, and review patience | `docs/agent-instructions/sdlc.md` |
+| SDLC, branching, documentation sweep, PR flow, and review patience | `docs/agent-instructions/sdlc.md` |
 | Runtime ownership, services, and operator commands | `docs/agent-instructions/runtime-and-operations.md` |
 | Config rules, parity lanes, and debugging flow | `docs/agent-instructions/configuration-and-debugging.md` |
 | Backtester, GPU parity, and validation rules | `docs/agent-instructions/backtester-and-parity.md` |

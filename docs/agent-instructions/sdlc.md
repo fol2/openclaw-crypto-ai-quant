@@ -21,15 +21,33 @@ review flow, merge sequencing, or cleanup duties.
 ## Mandatory PR Flow
 
 1. Create one atomic PR to `master`.
-2. Run a reviewer subagent for that PR.
-3. Be patient with reviewer subagents. Let them finish, avoid duplicate reviewer
+2. Before PR review, run a documentation subagent for that PR.
+3. Have the documentation subagent update the relevant repo docs, refresh the
+   active plan doc when the task follows one, and refactor docs if coverage or
+   structure needs improvement.
+4. Run a reviewer subagent for that PR only after the documentation pass is
+   complete.
+5. Be patient with reviewer subagents. Let them finish, avoid duplicate reviewer
    launches, and do not interrupt them unless the review context has genuinely
    changed.
-4. Merge only after the review is acceptable.
-5. After merge, delete the PR branch locally and remotely if you created it.
-6. After merge, remove the PR worktree(s) if you created them.
-7. After merge, close any subagents opened specifically for that PR.
-8. Move to the next task only after the merge and cleanup are complete.
+6. Merge only after the review is acceptable.
+7. After merge, delete the PR branch locally and remotely if you created it.
+8. After merge, remove the PR worktree(s) if you created them.
+9. After merge, close any subagents opened specifically for that PR.
+10. Move to the next task only after the merge and cleanup are complete.
+
+## Documentation Sweep
+
+- Treat documentation as part of the atomic PR, not follow-up housekeeping.
+- The documentation subagent runs after implementation and validation are done,
+  but before the reviewer subagent is launched.
+- Its scope includes the active plan doc when the task follows one, the
+  relevant repo docs, and any instruction or operator docs touched by the
+  behavioural change.
+- Ask it to make sure the docs cover what changed end to end and to refactor
+  doc structure when the current layout hides or duplicates the new contract.
+- Reviewers should receive the post-doc state so they assess the complete PR,
+  not code plus stale docs.
 
 ## Safety Rules
 
