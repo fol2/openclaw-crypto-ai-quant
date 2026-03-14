@@ -534,7 +534,7 @@ fn approx_equal(left: f64, right: f64, relative_tol: f64) -> bool {
     if !left.is_finite() || !right.is_finite() {
         return false;
     }
-    let scale = left.abs().max(right.abs()).max(1.0);
+    let scale = left.abs().max(right.abs()).max(1e-9);
     (left - right).abs() <= scale * relative_tol
 }
 
@@ -1994,5 +1994,49 @@ mod tests {
         };
 
         assert!(journey_matches_synthetic_position(&journey, &position));
+    }
+
+    #[test]
+    fn journey_matches_synthetic_position_rejects_sub_dollar_entry_mismatch() {
+        let journey = trading::TradeJourney {
+            id: 12,
+            symbol: "PENGU".to_string(),
+            pos_type: "LONG".to_string(),
+            source: "manual".to_string(),
+            manual_leg_count: 1,
+            open_ts: "2026-03-01T00:00:00Z".to_string(),
+            close_ts: None,
+            entry_price: 0.0071,
+            exit_price: None,
+            peak_size: 14003.0,
+            total_pnl: 0.0,
+            total_fees: 0.02,
+            is_open: true,
+            legs: vec![trading::JourneyLeg {
+                id: 12,
+                timestamp: "2026-03-01T00:00:00Z".to_string(),
+                action: "OPEN".to_string(),
+                source: "manual".to_string(),
+                price: 0.0071,
+                size: 14003.0,
+                pnl: 0.0,
+                reason: "manual_trade".to_string(),
+                confidence: "MANUAL".to_string(),
+            }],
+        };
+        let position = trading::OpenPosition {
+            symbol: "PENGU".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 0,
+            open_timestamp: None,
+            entry_price: 0.0078,
+            size: 14003.0,
+            confidence: None,
+            entry_atr: 0.0,
+            leverage: 3.0,
+            margin_used: 32.0,
+        };
+
+        assert!(!journey_matches_synthetic_position(&journey, &position));
     }
 }
