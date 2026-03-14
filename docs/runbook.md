@@ -45,6 +45,11 @@ promotion remains an explicit deployment setting: enable
 `deployment.apply_to_live: true` only on the production instance that is meant
 to restart `openclaw-ai-quant-live-v8`.
 
+Factory deployment defaults now fail closed when the settings file is missing
+or incomplete: `DeploymentSettings::default()` no longer applies paper or live
+changes, and it does not restart services until `deployment.apply_to_paper` or
+`deployment.apply_to_live` is set explicitly in `config/factory_defaults.yaml`.
+
 The financial-grade factory default now seeds sweep/replay balance from current
 live equity (including unrealised PnL) and compares each challenger against the
 currently deployed target config before any paper replacement is applied. Use
@@ -67,6 +72,9 @@ Inspect `artifacts/.../run_metadata.json` and the candidate rows in
 boundaries. Candidate rows now expose `train_parity_replay_report_path`,
 `holdout_summary_path`, and `holdout_median_daily_return` so operators can
 audit exactly which window produced each gate decision.
+`step4_parity.symbol_checks` now records per-symbol trade and PnL drift so the
+factory can fail closed on symbol-level parity regressions, not just aggregate
+balance drift.
 
 Paper selection is now deterministic per role. `primary` prefers `efficient`
 artefacts ranked by total PnL, then profit factor, then lower drawdown;
@@ -96,6 +104,10 @@ systemd/openclaw-ai-quant-factory-v8.timer.example
 systemd/openclaw-ai-quant-factory-v8-deep.service.example
 systemd/openclaw-ai-quant-factory-v8-deep.timer.example
 ```
+
+The example timers are intentionally staggered: the nightly timer stays at
+`00:50 UTC`, while the deep weekly timer runs at `02:10 UTC` on Sundays so the
+two schedules cannot collide by calendar design.
 
 ## Diagnostics
 

@@ -30,6 +30,8 @@ windows.
 - Promotion gating runs on the trailing holdout window only.
 - GPU/CPU parity is rechecked on the train window with a dedicated CPU replay so
   parity does not compare train metrics against holdout metrics.
+- Parity now fails on symbol-level trade or PnL drift as well as aggregate
+  balance drift.
 
 The validation surface in `config/factory_defaults.yaml` is:
 
@@ -48,7 +50,9 @@ Holdout promotion into `validated` still requires:
 
 Artefacts now record the resolved `coverage`, `train`, and `holdout` windows in
 `run_metadata.json`, candidate validation items, and incumbent/challenger
-performance summaries.
+performance summaries. Candidate parity evidence also records
+`step4_parity.symbol_checks` so operators can see which symbol drifted and by
+how much.
 
 ## Role-Governed Paper Replacement
 

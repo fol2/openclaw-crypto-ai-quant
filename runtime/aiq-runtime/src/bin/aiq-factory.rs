@@ -360,10 +360,10 @@ struct DeploymentSettings {
 impl Default for DeploymentSettings {
     fn default() -> Self {
         Self {
-            apply_to_paper: true,
-            restart_services: true,
+            apply_to_paper: false,
+            restart_services: false,
             apply_to_live: false,
-            restart_live_service: true,
+            restart_live_service: false,
             live_yaml_path: PathBuf::from(DEFAULT_LIVE_YAML_PATH),
             live_service: DEFAULT_LIVE_SERVICE.to_string(),
         }
@@ -412,6 +412,7 @@ struct PaperTarget {
 
 #[derive(Debug, Clone, Deserialize)]
 struct SweepCandidateRow {
+    #[serde(default = "default_sweep_candidate_mode")]
     candidate_mode: bool,
     #[allow(dead_code)]
     config_id: String,
@@ -420,6 +421,8 @@ struct SweepCandidateRow {
     profit_factor: f64,
     total_pnl: f64,
     total_trades: u32,
+    #[serde(default)]
+    by_symbol: Vec<SymbolBucket>,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +430,10 @@ struct ShortlistedCandidate {
     shortlist_mode: ShortlistMode,
     rank: usize,
     sweep: SweepCandidateRow,
+}
+
+fn default_sweep_candidate_mode() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize)]
@@ -468,6 +475,19 @@ struct SymbolBucket {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SymbolParityCheck {
+    symbol: String,
+    cpu_trades: u32,
+    gpu_trades: u32,
+    trade_delta: u32,
+    cpu_pnl: f64,
+    gpu_pnl: f64,
+    pnl_delta_abs: f64,
+    pnl_delta_rel: f64,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ParityCheck {
     status: String,
     cpu_total_trades: u32,
@@ -477,6 +497,7 @@ struct ParityCheck {
     gpu_final_balance: f64,
     balance_delta_abs: f64,
     balance_delta_rel: f64,
+    symbol_checks: Vec<SymbolParityCheck>,
     thresholds: ParityThresholds,
 }
 
@@ -1811,7 +1832,7 @@ fn run_sweep(input: SweepCommandInput<'_>) -> Result<()> {
         .arg("--output")
         .arg(output_path)
         .arg("--output-mode")
-        .arg("candidate")
+        .arg("full")
         .arg("--initial-balance")
         .arg(initial_balance.to_string())
         .arg("--candles-db")
@@ -2628,9 +2649,60 @@ fn compare_cpu_replay_to_gpu_candidate(
         balance_delta_abs / cpu.final_balance.abs()
     };
     let trade_delta = cpu.total_trades.abs_diff(gpu.total_trades);
+    let cpu_by_symbol = cpu
+        .by_symbol
+        .iter()
+        .map(|item| (item.symbol.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let gpu_by_symbol = gpu
+        .by_symbol
+        .iter()
+        .map(|item| (item.symbol.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let mut all_symbols = cpu_by_symbol
+        .keys()
+        .chain(gpu_by_symbol.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    all_symbols.sort();
+    all_symbols.dedup();
+    let symbol_checks = all_symbols
+        .into_iter()
+        .map(|symbol| {
+            let cpu_symbol = cpu_by_symbol.get(&symbol);
+            let gpu_symbol = gpu_by_symbol.get(&symbol);
+            let cpu_trades = cpu_symbol.map_or(0, |item| item.trades);
+            let gpu_trades = gpu_symbol.map_or(0, |item| item.trades);
+            let cpu_pnl = cpu_symbol.map_or(0.0, |item| item.pnl);
+            let gpu_pnl = gpu_symbol.map_or(0.0, |item| item.pnl);
+            let pnl_delta_abs = (cpu_pnl - gpu_pnl).abs();
+            let pnl_delta_rel = if cpu_pnl.abs() < f64::EPSILON {
+                0.0
+            } else {
+                pnl_delta_abs / cpu_pnl.abs()
+            };
+            let trade_delta = cpu_trades.abs_diff(gpu_trades);
+            let pass = trade_delta <= validation.parity_trade_delta_max
+                && (pnl_delta_abs <= validation.parity_abs_eps
+                    || pnl_delta_rel <= validation.parity_rel_eps);
+            SymbolParityCheck {
+                symbol,
+                cpu_trades,
+                gpu_trades,
+                trade_delta,
+                cpu_pnl,
+                gpu_pnl,
+                pnl_delta_abs,
+                pnl_delta_rel,
+                status: if pass { "pass" } else { "warn" }.to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let symbol_pass = symbol_checks.iter().all(|item| item.status == "pass");
     let pass = trade_delta <= validation.parity_trade_delta_max
         && (balance_delta_abs <= validation.parity_abs_eps
-            || balance_delta_rel <= validation.parity_rel_eps);
+            || balance_delta_rel <= validation.parity_rel_eps)
+        && symbol_pass;
     ParityCheck {
         status: if pass { "pass" } else { "warn" }.to_string(),
         cpu_total_trades: cpu.total_trades,
@@ -2640,6 +2712,7 @@ fn compare_cpu_replay_to_gpu_candidate(
         gpu_final_balance,
         balance_delta_abs,
         balance_delta_rel,
+        symbol_checks,
         thresholds: ParityThresholds {
             abs_eps: validation.parity_abs_eps,
             rel_eps: validation.parity_rel_eps,
@@ -5396,6 +5469,7 @@ symbols:
                 gpu_final_balance: 10_000.0 + pnl,
                 balance_delta_abs: 0.0,
                 balance_delta_rel: 0.0,
+                symbol_checks: Vec::new(),
                 thresholds: ParityThresholds {
                     abs_eps: 0.001,
                     rel_eps: 0.000001,
@@ -5562,6 +5636,7 @@ parity_enforce: true
                 profit_factor: 1.6,
                 total_pnl: 42.0,
                 total_trades: 64,
+                by_symbol: Vec::new(),
             },
         )
         .unwrap();
@@ -5680,6 +5755,7 @@ parity_enforce: true
             profit_factor: 1.3,
             total_pnl: 20.0,
             total_trades: 40,
+            by_symbol: Vec::new(),
         };
         let rows = vec![row.clone(), row];
         let shortlist = build_shortlist(&rows, 2);
@@ -5867,10 +5943,79 @@ parity_enforce: true
     #[test]
     fn validate_factory_defaults_requires_primary_when_live_promotion_is_on() {
         let mut settings = FactoryDefaults::default();
+        settings.deployment.apply_to_paper = true;
         settings.deployment.apply_to_live = true;
         settings.selection.selected_roles = vec!["fallback".to_string()];
         let err = validate_factory_defaults(&settings).unwrap_err();
         assert!(err.to_string().contains("requires `primary` to be present"));
+    }
+
+    #[test]
+    fn deployment_defaults_fail_closed_without_explicit_settings() {
+        let settings = FactoryDefaults::default();
+        assert!(!settings.deployment.apply_to_paper);
+        assert!(!settings.deployment.apply_to_live);
+        assert!(!settings.deployment.restart_services);
+        assert!(!settings.deployment.restart_live_service);
+    }
+
+    #[test]
+    fn parity_detects_symbol_level_drift() {
+        let cpu = ReplaySummary {
+            initial_balance: 10_000.0,
+            final_balance: 10_200.0,
+            total_pnl: 200.0,
+            total_trades: 4,
+            profit_factor: 1.5,
+            max_drawdown_pct: 0.1,
+            total_fees: 4.0,
+            by_symbol: vec![
+                SymbolBucket {
+                    symbol: "BTC".to_string(),
+                    trades: 2,
+                    pnl: 120.0,
+                    win_rate: 0.5,
+                },
+                SymbolBucket {
+                    symbol: "ETH".to_string(),
+                    trades: 2,
+                    pnl: 80.0,
+                    win_rate: 0.5,
+                },
+            ],
+        };
+        let gpu = SweepCandidateRow {
+            candidate_mode: true,
+            config_id: "cfg".to_string(),
+            max_drawdown_pct: 0.1,
+            overrides: BTreeMap::new(),
+            profit_factor: 1.5,
+            total_pnl: 200.0,
+            total_trades: 4,
+            by_symbol: vec![
+                SymbolBucket {
+                    symbol: "BTC".to_string(),
+                    trades: 2,
+                    pnl: 200.0,
+                    win_rate: 0.5,
+                },
+                SymbolBucket {
+                    symbol: "ETH".to_string(),
+                    trades: 2,
+                    pnl: 0.0,
+                    win_rate: 0.5,
+                },
+            ],
+        };
+
+        let parity =
+            compare_cpu_replay_to_gpu_candidate(&cpu, &gpu, &ValidationSettings::default());
+
+        assert_eq!(parity.status, "warn");
+        assert!(parity
+            .symbol_checks
+            .iter()
+            .any(|item| item.symbol == "BTC" && item.status == "warn"));
     }
 
     #[test]
