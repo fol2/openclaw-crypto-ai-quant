@@ -110,6 +110,7 @@ struct PreparedOpen {
     order_type: ParsedOrderType,
     limit_price: Option<f64>,
     account_value_usd: f64,
+    current_leverage: Option<u32>,
 }
 
 struct PreparedClose {
@@ -174,8 +175,16 @@ struct ManualLeverageAudit<'a> {
     intent_id: &'a str,
     symbol: &'a str,
     leverage: u32,
+    order_type: &'a str,
     status: &'a str,
     raw_json: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManualLeverageEffect {
+    requested_leverage: u32,
+    previous_leverage: Option<u32>,
+    changed_on_exchange: bool,
 }
 
 struct FillWriteSummary {
@@ -432,6 +441,7 @@ pub fn execute_open(
                         "est_notional_usd": prepared.est_notional_usd,
                         "mid_price": prepared.mid_price,
                         "direction": prepared.direction,
+                        "current_leverage": prepared.current_leverage,
                     }
                 })
                 .to_string(),
@@ -486,8 +496,8 @@ pub fn execute_open(
         }),
     )?;
 
-    let response = match submit_open_order(&conn, &client, &prepared, &intent_id, &cloid) {
-        Ok(response) => response,
+    let leverage_effect = match set_manual_open_leverage(&conn, &client, &prepared, &intent_id) {
+        Ok(effect) => effect,
         Err(error) => {
             let error_text = error.to_string();
             update_manual_intent_status(
@@ -516,6 +526,46 @@ pub fn execute_open(
                 }),
             )?;
             return Err(error);
+        }
+    };
+
+    let response = match submit_open_order(&client, &prepared, &cloid) {
+        Ok(response) => response,
+        Err(error) => {
+            let error_text = error.to_string();
+            let error_status = failure_status_for_error(&error_text);
+            let leverage_note = handle_manual_open_leverage_failure(
+                &conn,
+                &client,
+                &prepared,
+                &intent_id,
+                &leverage_effect,
+                error_status == "REJECTED",
+                &error_text,
+            )?;
+            let error_with_note =
+                append_manual_leverage_note(&error_text, leverage_note.as_deref());
+            update_manual_intent_status(&conn, &intent_id, error_status, &error_with_note)?;
+            write_manual_runtime_log(
+                &conn,
+                "ERROR",
+                &format!(
+                    "manual_trade submit_failed intent_id={} symbol={} action=OPEN error={}",
+                    intent_id, prepared.symbol, error_with_note
+                ),
+            )?;
+            write_manual_audit_event(
+                &conn,
+                Some(&prepared.symbol),
+                "MANUAL_ORDER_SUBMIT_FAILED",
+                "ERROR",
+                json!({
+                    "intent_id": &intent_id,
+                    "action": "OPEN",
+                    "error": &error_with_note,
+                }),
+            )?;
+            return Err(HubError::BadRequest(error_with_note));
         }
     };
     let exchange_order_id = extract_exchange_order_id(&response);
@@ -553,6 +603,20 @@ pub fn execute_open(
         )?;
     }
     if embedded_reject {
+        let leverage_note = handle_manual_open_leverage_failure(
+            &conn,
+            &client,
+            &prepared,
+            &intent_id,
+            &leverage_effect,
+            true,
+            &response_text,
+        )?;
+        let response_with_note =
+            append_manual_leverage_note(&response_text, leverage_note.as_deref());
+        if response_with_note != response_text {
+            update_manual_intent_last_error(&conn, &intent_id, &response_with_note)?;
+        }
         write_manual_runtime_log(
             &conn,
             "ERROR",
@@ -561,7 +625,7 @@ pub fn execute_open(
                 intent_id,
                 prepared.symbol,
                 exchange_order_id.as_deref().unwrap_or("unknown"),
-                response_text
+                response_with_note
             ),
         )?;
         write_manual_audit_event(
@@ -576,7 +640,7 @@ pub fn execute_open(
                 "response": &response,
             }),
         )?;
-        return Err(HubError::BadRequest(response_text));
+        return Err(HubError::BadRequest(response_with_note));
     }
     write_manual_runtime_log(
         &conn,
@@ -3503,54 +3567,65 @@ fn record_manual_leverage_audit(
         "INSERT INTO oms_orders (
             intent_id, created_ts_ms, symbol, side, order_type, requested_size,
             reduce_only, client_order_id, exchange_order_id, status, raw_json
-        ) VALUES (?1, ?2, ?3, NULL, 'update_leverage', NULL, NULL, NULL, NULL, ?4, ?5)",
+        ) VALUES (?1, ?2, ?3, NULL, ?4, NULL, NULL, NULL, NULL, ?5, ?6)",
         params![
             audit.intent_id,
             ts_ms,
             audit.symbol,
+            audit.order_type,
             audit.status,
             audit.raw_json
         ],
     )?;
+    let level = if matches!(audit.status, "REJECTED" | "ERROR" | "DEFERRED") {
+        "WARN"
+    } else {
+        "INFO"
+    };
     write_manual_runtime_log(
         conn,
-        if matches!(audit.status, "REJECTED" | "ERROR") {
-            "WARN"
-        } else {
-            "INFO"
-        },
+        level,
         &format!(
-            "manual_trade leverage_{} intent_id={} symbol={} leverage={} status={}",
+            "manual_trade leverage_{} intent_id={} symbol={} leverage={} order_type={} status={}",
             audit.status.to_ascii_lowercase(),
             audit.intent_id,
             audit.symbol,
             audit.leverage,
+            audit.order_type,
             audit.status
         ),
     )?;
     write_manual_audit_event(
         conn,
         Some(audit.symbol),
-        match audit.status {
-            "REQUESTED" => "MANUAL_LEVERAGE_REQUESTED",
-            "SET" => "MANUAL_LEVERAGE_SET",
-            "REJECTED" => "MANUAL_LEVERAGE_REJECTED",
-            _ => "MANUAL_LEVERAGE_FAILED",
-        },
-        if matches!(audit.status, "REJECTED" | "ERROR") {
-            "WARN"
-        } else {
-            "INFO"
-        },
+        manual_leverage_event_name(audit.order_type, audit.status),
+        level,
         json!({
             "intent_id": audit.intent_id,
             "symbol": audit.symbol,
             "leverage": audit.leverage,
+            "order_type": audit.order_type,
             "status": audit.status,
             "raw_json": audit.raw_json,
         }),
     )?;
     Ok(())
+}
+
+fn manual_leverage_event_name(order_type: &str, status: &str) -> &'static str {
+    match (order_type, status) {
+        ("restore_leverage", "REQUESTED") => "MANUAL_LEVERAGE_RESTORE_REQUESTED",
+        ("restore_leverage", "SET") => "MANUAL_LEVERAGE_RESTORED",
+        ("restore_leverage", "SKIPPED") => "MANUAL_LEVERAGE_RESTORE_SKIPPED",
+        ("restore_leverage", "DEFERRED") => "MANUAL_LEVERAGE_RESTORE_DEFERRED",
+        ("restore_leverage", "REJECTED") => "MANUAL_LEVERAGE_RESTORE_REJECTED",
+        ("restore_leverage", _) => "MANUAL_LEVERAGE_RESTORE_FAILED",
+        (_, "REQUESTED") => "MANUAL_LEVERAGE_REQUESTED",
+        (_, "SET") => "MANUAL_LEVERAGE_SET",
+        (_, "SKIPPED") => "MANUAL_LEVERAGE_SKIPPED",
+        (_, "REJECTED") => "MANUAL_LEVERAGE_REJECTED",
+        _ => "MANUAL_LEVERAGE_FAILED",
+    }
 }
 
 fn write_manual_runtime_log(conn: &Connection, level: &str, message: &str) -> Result<(), HubError> {
@@ -4129,6 +4204,10 @@ fn prepare_open(
         .account_snapshot()
         .map_err(|error| HubError::Internal(error.to_string()))?
         .account_value_usd;
+    let current_leverage = client
+        .positions()
+        .map_err(|error| HubError::Internal(error.to_string()))
+        .map(|positions| current_symbol_leverage(&positions, &symbol))?;
 
     let order_type = parse_order_type(&request.order_type)?;
     let limit_price = match order_type {
@@ -4167,6 +4246,7 @@ fn prepare_open(
         order_type,
         limit_price,
         account_value_usd,
+        current_leverage,
     })
 }
 
@@ -4255,14 +4335,10 @@ fn prepare_close(
 }
 
 fn submit_open_order(
-    conn: &Connection,
     client: &HyperliquidClient,
     prepared: &PreparedOpen,
-    intent_id: &str,
     cloid: &str,
 ) -> Result<Value, HubError> {
-    set_manual_open_leverage(conn, client, prepared, intent_id)?;
-
     let response = match prepared.order_type {
         ParsedOrderType::Market => client.market_open(
             &prepared.symbol,
@@ -4305,17 +4381,45 @@ fn set_manual_open_leverage(
     client: &HyperliquidClient,
     prepared: &PreparedOpen,
     intent_id: &str,
-) -> Result<(), HubError> {
+) -> Result<ManualLeverageEffect, HubError> {
+    let effect = ManualLeverageEffect {
+        requested_leverage: prepared.leverage,
+        previous_leverage: prepared.current_leverage,
+        changed_on_exchange: false,
+    };
+    if prepared.current_leverage == Some(prepared.leverage) {
+        record_manual_leverage_audit(
+            conn,
+            ManualLeverageAudit {
+                intent_id,
+                symbol: &prepared.symbol,
+                leverage: prepared.leverage,
+                order_type: "update_leverage",
+                status: "SKIPPED",
+                raw_json: json!({
+                    "symbol": &prepared.symbol,
+                    "leverage": prepared.leverage,
+                    "previous_leverage": prepared.current_leverage,
+                    "cross_margin": true,
+                    "reason": "already_set",
+                })
+                .to_string(),
+            },
+        )?;
+        return Ok(effect);
+    }
     record_manual_leverage_audit(
         conn,
         ManualLeverageAudit {
             intent_id,
             symbol: &prepared.symbol,
             leverage: prepared.leverage,
+            order_type: "update_leverage",
             status: "REQUESTED",
             raw_json: json!({
                 "symbol": &prepared.symbol,
                 "leverage": prepared.leverage,
+                "previous_leverage": prepared.current_leverage,
                 "cross_margin": true,
             })
             .to_string(),
@@ -4332,25 +4436,40 @@ fn set_manual_open_leverage(
                     intent_id,
                     symbol: &prepared.symbol,
                     leverage: prepared.leverage,
+                    order_type: "update_leverage",
                     status: "ERROR",
-                    raw_json: error_text.clone(),
+                    raw_json: json!({
+                        "symbol": &prepared.symbol,
+                        "leverage": prepared.leverage,
+                        "previous_leverage": prepared.current_leverage,
+                        "error": error_text,
+                    })
+                    .to_string(),
                 },
             )?;
             return Err(HubError::BadRequest(error_text));
         }
     };
     if response_has_embedded_error(&leverage_response) {
+        let leverage_response_text = leverage_response.to_string();
         record_manual_leverage_audit(
             conn,
             ManualLeverageAudit {
                 intent_id,
                 symbol: &prepared.symbol,
                 leverage: prepared.leverage,
+                order_type: "update_leverage",
                 status: "REJECTED",
-                raw_json: leverage_response.to_string(),
+                raw_json: json!({
+                    "symbol": &prepared.symbol,
+                    "leverage": prepared.leverage,
+                    "previous_leverage": prepared.current_leverage,
+                    "response": &leverage_response,
+                })
+                .to_string(),
             },
         )?;
-        return Err(HubError::BadRequest(leverage_response.to_string()));
+        return Err(HubError::BadRequest(leverage_response_text));
     }
     record_manual_leverage_audit(
         conn,
@@ -4358,11 +4477,187 @@ fn set_manual_open_leverage(
             intent_id,
             symbol: &prepared.symbol,
             leverage: prepared.leverage,
+            order_type: "update_leverage",
             status: "SET",
-            raw_json: leverage_response.to_string(),
+            raw_json: json!({
+                "symbol": &prepared.symbol,
+                "leverage": prepared.leverage,
+                "previous_leverage": prepared.current_leverage,
+                "response": leverage_response,
+            })
+            .to_string(),
         },
     )?;
-    Ok(())
+    Ok(ManualLeverageEffect {
+        changed_on_exchange: true,
+        ..effect
+    })
+}
+
+fn handle_manual_open_leverage_failure(
+    conn: &Connection,
+    client: &HyperliquidClient,
+    prepared: &PreparedOpen,
+    intent_id: &str,
+    effect: &ManualLeverageEffect,
+    definitive_no_order: bool,
+    failure_detail: &str,
+) -> Result<Option<String>, HubError> {
+    if !effect.changed_on_exchange {
+        return Ok(None);
+    }
+
+    if !definitive_no_order {
+        let note = match effect.previous_leverage {
+            Some(previous_leverage) => format!(
+                "leverage changed to {}x before order outcome became unknown; previous leverage was {}x, manual verification required",
+                effect.requested_leverage, previous_leverage
+            ),
+            None => format!(
+                "leverage may have changed to {}x before order outcome became unknown; previous leverage was unavailable, manual verification required",
+                effect.requested_leverage
+            ),
+        };
+        record_manual_leverage_audit(
+            conn,
+            ManualLeverageAudit {
+                intent_id,
+                symbol: &prepared.symbol,
+                leverage: effect.requested_leverage,
+                order_type: "restore_leverage",
+                status: "DEFERRED",
+                raw_json: json!({
+                    "symbol": &prepared.symbol,
+                    "requested_leverage": effect.requested_leverage,
+                    "previous_leverage": effect.previous_leverage,
+                    "failure": failure_detail,
+                    "reason": note,
+                })
+                .to_string(),
+            },
+        )?;
+        return Ok(Some(note));
+    }
+
+    let Some(previous_leverage) = effect.previous_leverage else {
+        let note = format!(
+            "order was rejected after leverage changed to {}x; previous leverage was unavailable, automatic restore skipped",
+            effect.requested_leverage
+        );
+        record_manual_leverage_audit(
+            conn,
+            ManualLeverageAudit {
+                intent_id,
+                symbol: &prepared.symbol,
+                leverage: effect.requested_leverage,
+                order_type: "restore_leverage",
+                status: "SKIPPED",
+                raw_json: json!({
+                    "symbol": &prepared.symbol,
+                    "requested_leverage": effect.requested_leverage,
+                    "previous_leverage": Value::Null,
+                    "failure": failure_detail,
+                    "reason": note,
+                })
+                .to_string(),
+            },
+        )?;
+        return Ok(Some(note));
+    };
+
+    if previous_leverage == effect.requested_leverage {
+        return Ok(None);
+    }
+
+    record_manual_leverage_audit(
+        conn,
+        ManualLeverageAudit {
+            intent_id,
+            symbol: &prepared.symbol,
+            leverage: previous_leverage,
+            order_type: "restore_leverage",
+            status: "REQUESTED",
+            raw_json: json!({
+                "symbol": &prepared.symbol,
+                "requested_leverage": effect.requested_leverage,
+                "restore_leverage": previous_leverage,
+                "failure": failure_detail,
+            })
+            .to_string(),
+        },
+    )?;
+    let restore_response = match client.update_leverage(&prepared.symbol, previous_leverage, true) {
+        Ok(response) => response,
+        Err(error) => {
+            let note = format!(
+                "order was rejected after leverage changed to {}x and restore to {}x failed: {}",
+                effect.requested_leverage, previous_leverage, error
+            );
+            record_manual_leverage_audit(
+                conn,
+                ManualLeverageAudit {
+                    intent_id,
+                    symbol: &prepared.symbol,
+                    leverage: previous_leverage,
+                    order_type: "restore_leverage",
+                    status: "ERROR",
+                    raw_json: json!({
+                        "symbol": &prepared.symbol,
+                        "requested_leverage": effect.requested_leverage,
+                        "restore_leverage": previous_leverage,
+                        "error": error.to_string(),
+                    })
+                    .to_string(),
+                },
+            )?;
+            return Ok(Some(note));
+        }
+    };
+    if response_has_embedded_error(&restore_response) {
+        let note = format!(
+            "order was rejected after leverage changed to {}x and restore to {}x was rejected",
+            effect.requested_leverage, previous_leverage
+        );
+        record_manual_leverage_audit(
+            conn,
+            ManualLeverageAudit {
+                intent_id,
+                symbol: &prepared.symbol,
+                leverage: previous_leverage,
+                order_type: "restore_leverage",
+                status: "REJECTED",
+                raw_json: json!({
+                    "symbol": &prepared.symbol,
+                    "requested_leverage": effect.requested_leverage,
+                    "restore_leverage": previous_leverage,
+                    "response": restore_response,
+                })
+                .to_string(),
+            },
+        )?;
+        return Ok(Some(note));
+    }
+    record_manual_leverage_audit(
+        conn,
+        ManualLeverageAudit {
+            intent_id,
+            symbol: &prepared.symbol,
+            leverage: previous_leverage,
+            order_type: "restore_leverage",
+            status: "SET",
+            raw_json: json!({
+                "symbol": &prepared.symbol,
+                "requested_leverage": effect.requested_leverage,
+                "restore_leverage": previous_leverage,
+                "response": restore_response,
+            })
+            .to_string(),
+        },
+    )?;
+    Ok(Some(format!(
+        "leverage restored to {}x after rejected open",
+        previous_leverage
+    )))
 }
 
 fn submit_close_order(
@@ -4671,6 +4966,36 @@ fn parse_json_integer(value: &Value) -> Option<i64> {
         return Some(number);
     }
     value.as_str()?.trim().parse::<i64>().ok()
+}
+
+fn current_symbol_leverage(
+    positions: &[crate::live_hyperliquid::HyperliquidPosition],
+    symbol: &str,
+) -> Option<u32> {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    positions
+        .iter()
+        .find(|position| {
+            position
+                .symbol
+                .trim()
+                .eq_ignore_ascii_case(symbol_upper.as_str())
+        })
+        .and_then(|position| normalise_live_leverage(position.leverage))
+}
+
+fn normalise_live_leverage(value: f64) -> Option<u32> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    Some(value.round().clamp(1.0, 50.0) as u32)
+}
+
+fn append_manual_leverage_note(base: &str, note: Option<&str>) -> String {
+    match note.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(note) => format!("{base} [{note}]"),
+        None => base.to_string(),
+    }
 }
 
 fn fill_timestamp_ms(raw: &Value) -> i64 {
@@ -5546,6 +5871,7 @@ mod tests {
             order_type: ParsedOrderType::Market,
             limit_price: None,
             account_value_usd: 214.97,
+            current_leverage: None,
         };
 
         let drift = open_preview_drift_fields(Some(&preview), &prepared);
@@ -5873,6 +6199,7 @@ mod tests {
                 intent_id: "manual_leverage_intent",
                 symbol: "ETH",
                 leverage: 10,
+                order_type: "update_leverage",
                 status: "REQUESTED",
                 raw_json: json!({"leverage":10,"cross_margin":true}).to_string(),
             },
@@ -5884,6 +6211,7 @@ mod tests {
                 intent_id: "manual_leverage_intent",
                 symbol: "ETH",
                 leverage: 10,
+                order_type: "update_leverage",
                 status: "SET",
                 raw_json: json!({"status":"ok"}).to_string(),
             },
@@ -5921,6 +6249,106 @@ mod tests {
         );
         assert_eq!(audit_row.0, "MANUAL_LEVERAGE_SET");
         assert_eq!(audit_row.1, "ETH");
+    }
+
+    #[test]
+    fn manual_leverage_audit_supports_restore_rows() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+
+        record_manual_leverage_audit(
+            &conn,
+            ManualLeverageAudit {
+                intent_id: "manual_restore_intent",
+                symbol: "ETH",
+                leverage: 4,
+                order_type: "restore_leverage",
+                status: "REQUESTED",
+                raw_json: json!({"restore_leverage":4}).to_string(),
+            },
+        )
+        .unwrap();
+        record_manual_leverage_audit(
+            &conn,
+            ManualLeverageAudit {
+                intent_id: "manual_restore_intent",
+                symbol: "ETH",
+                leverage: 4,
+                order_type: "restore_leverage",
+                status: "SET",
+                raw_json: json!({"status":"ok"}).to_string(),
+            },
+        )
+        .unwrap();
+
+        let order_rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT order_type, status
+                 FROM oms_orders
+                 WHERE intent_id = ?1
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map(["manual_restore_intent"], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect();
+        let audit_row: (String, String) = conn
+            .query_row(
+                "SELECT event, symbol FROM audit_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            order_rows,
+            vec![
+                ("restore_leverage".to_string(), "REQUESTED".to_string()),
+                ("restore_leverage".to_string(), "SET".to_string()),
+            ]
+        );
+        assert_eq!(audit_row.0, "MANUAL_LEVERAGE_RESTORED");
+        assert_eq!(audit_row.1, "ETH");
+    }
+
+    #[test]
+    fn current_symbol_leverage_reads_matching_exchange_position() {
+        let positions = vec![
+            crate::live_hyperliquid::HyperliquidPosition {
+                symbol: "BTC".to_string(),
+                pos_type: "LONG".to_string(),
+                size: 0.5,
+                entry_price: 100_000.0,
+                leverage: 3.0,
+                margin_used: 16_666.67,
+            },
+            crate::live_hyperliquid::HyperliquidPosition {
+                symbol: "ETH".to_string(),
+                pos_type: "SHORT".to_string(),
+                size: 1.2,
+                entry_price: 2_100.0,
+                leverage: 4.0,
+                margin_used: 630.0,
+            },
+        ];
+
+        assert_eq!(current_symbol_leverage(&positions, " eth "), Some(4));
+        assert_eq!(current_symbol_leverage(&positions, "SOL"), None);
+    }
+
+    #[test]
+    fn append_manual_leverage_note_only_wraps_non_empty_notes() {
+        assert_eq!(
+            append_manual_leverage_note("exchange reject", Some("restored to 4x")),
+            "exchange reject [restored to 4x]"
+        );
+        assert_eq!(
+            append_manual_leverage_note("exchange reject", Some("   ")),
+            "exchange reject"
+        );
     }
 
     #[test]
