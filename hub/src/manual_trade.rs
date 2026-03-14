@@ -3978,6 +3978,8 @@ fn failure_status_for_error(error_text: &str) -> &'static str {
         || lower.contains("connection")
         || lower.contains("dns")
         || lower.contains("transport")
+        || lower.contains("failed to parse")
+        || lower.contains("invalid json")
     {
         "UNKNOWN"
     } else {
@@ -6348,6 +6350,22 @@ mod tests {
         assert_eq!(
             append_manual_leverage_note("exchange reject", Some("   ")),
             "exchange reject"
+        );
+    }
+
+    #[test]
+    fn parse_failures_are_treated_as_unknown_submission_outcomes() {
+        assert_eq!(
+            failure_status_for_error("failed to parse Hyperliquid exchange response"),
+            "UNKNOWN"
+        );
+        assert_eq!(
+            failure_status_for_error("Hyperliquid exchange request failed: timed out"),
+            "UNKNOWN"
+        );
+        assert_eq!(
+            failure_status_for_error("Hyperliquid exchange returned HTTP 422 bad request"),
+            "REJECTED"
         );
     }
 
