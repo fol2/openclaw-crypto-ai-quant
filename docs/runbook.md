@@ -51,6 +51,16 @@ When the Hub sits behind a local proxy or gateway, it only trusts
 non-loopback clients cannot spoof the trusted-read bypass with forwarded
 headers, and bare loopback peers do not bypass read auth on their own.
 
+The Hub also accepts Tailscale Serve identity headers such as
+`Tailscale-User-Login` for read-only bypass, but only when the direct peer is
+loopback. This covers a local Tailscale HTTP/HTTPS Serve front layer without
+opening the same trust boundary to arbitrary local clients.
+
+Raw TCP forwarding to `127.0.0.1:61010` does not provide those trusted
+Tailscale identity headers, so it cannot satisfy the Tailscale read-auth
+bypass on its own. Use an HTTP/HTTPS Tailscale Serve-style front layer when the
+operator wants tailnet reads without `AIQ_MONITOR_TOKEN`.
+
 Keep `AIQ_MONITOR_TOKEN` configured for non-trusted read clients and WebSocket
 consumers outside those local/Tailscale ranges. Keep
 `AIQ_MONITOR_ADMIN_TOKEN` configured for all admin and manual-trade actions.
