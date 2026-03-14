@@ -24,11 +24,11 @@ Progress as of 2026-03-14:
   - PR 5 via PR #998: manifest-driven `live_small` / `live_full` governance
     with persisted live governance state.
 - In progress:
-  - PR 6: stagger the daily/deep schedules, keep deployment defaults fail
-    closed when factory settings are missing or incomplete, and raise factory
-    parity from aggregate-only to symbol-level evidence. Implementation, local
-    validation, and documentation refresh are complete; PR/reviewer flow is
-    still pending.
+  - PR 6 via PR #1009: stagger the daily/deep schedules, keep deployment
+    defaults fail closed when factory settings are missing or incomplete, and
+    raise factory parity from aggregate-only to symbol-level evidence.
+    Implementation, local validation, and documentation refresh are complete;
+    PR/reviewer flow is still pending.
 
 The `Current State` and `Confirmed Gaps` sections below are the baseline taken
 when this plan was prepared. Gaps 1, 3, 4, and 5 are now closed on `master`.
