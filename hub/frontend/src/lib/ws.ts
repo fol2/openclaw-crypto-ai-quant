@@ -2,10 +2,12 @@
  * WebSocket client with auto-reconnect and topic subscriptions.
  */
 
+import { getAuthToken } from './api';
+
 type MessageHandler = (data: any) => void;
 
 export class HubWS {
-  private url: string;
+  private baseUrl: string;
   private ws: WebSocket | null = null;
   private reconnectMs = 1000;
   private maxReconnectMs = 30000;
@@ -15,13 +17,13 @@ export class HubWS {
 
   constructor(url?: string) {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.url = url || `${proto}//${window.location.host}/ws`;
+    this.baseUrl = url || `${proto}//${window.location.host}/ws`;
   }
 
   connect() {
     if (this.ws && this.ws.readyState <= WebSocket.OPEN) return;
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = new WebSocket(this.buildSocketUrl());
     } catch {
       this.scheduleReconnect();
       return;
@@ -91,6 +93,17 @@ export class HubWS {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'subscribe', topic }));
     }
+  }
+
+  private buildSocketUrl() {
+    const url = new URL(this.baseUrl, window.location.href);
+    const token = getAuthToken();
+    if (token) {
+      url.searchParams.set('token', token);
+    } else {
+      url.searchParams.delete('token');
+    }
+    return url.toString();
   }
 
   private scheduleReconnect() {

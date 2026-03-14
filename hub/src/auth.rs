@@ -86,15 +86,17 @@ async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Respon
         .unwrap_or("");
     match scope {
         AuthScope::Read => {
-            if matches_bearer_token(auth_header, &expected_token)
+            if matches_query_token(&request, expected_token)
+                || matches_bearer_token(auth_header, expected_token)
                 || (!config.admin_token.is_empty()
-                    && matches_bearer_token(auth_header, &config.admin_token))
+                    && (matches_query_token(&request, &config.admin_token)
+                        || matches_bearer_token(auth_header, &config.admin_token)))
             {
                 return next.run(request).await;
             }
         }
         AuthScope::Admin => {
-            if matches_bearer_token(auth_header, &expected_token) {
+            if matches_bearer_token(auth_header, expected_token) {
                 return next.run(request).await;
             }
         }
@@ -111,6 +113,25 @@ fn auth_error(status: StatusCode, message: &str) -> Response {
 fn matches_bearer_token(auth_header: &str, token: &str) -> bool {
     let expected_header = format!("Bearer {token}");
     constant_time_eq(auth_header.as_bytes(), expected_header.as_bytes())
+}
+
+fn matches_query_token(request: &Request, token: &str) -> bool {
+    if request.uri().path() != "/ws" || token.is_empty() {
+        return false;
+    }
+    request
+        .uri()
+        .query()
+        .and_then(extract_query_token)
+        .map(|query_token| constant_time_eq(query_token.as_bytes(), token.as_bytes()))
+        .unwrap_or(false)
+}
+
+fn extract_query_token(query: &str) -> Option<&str> {
+    query.split('&').find_map(|segment| {
+        let (key, value) = segment.split_once('=')?;
+        (key == "token" && !value.is_empty()).then_some(value)
+    })
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -248,5 +269,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn websocket_query_token_can_pass_the_read_gate() {
+        let app = Router::new()
+            .route("/ws", get(ok_handler))
+            .layer(middleware::from_fn(require_read_auth))
+            .layer(axum::Extension(HubAuthConfig {
+                read_token: "viewer-secret".to_string(),
+                admin_token: "admin-secret".to_string(),
+                dev_mode: false,
+            }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws?token=viewer-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

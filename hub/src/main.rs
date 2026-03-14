@@ -70,7 +70,10 @@ async fn main() {
     spawn_manual_trade_reconcile_poller(Arc::clone(&state));
 
     // Build router.
-    let api = routes::api_router();
+    let api = routes::api_router().layer(middleware::from_fn(auth::require_read_auth));
+    let ws_routes = Router::new()
+        .route("/ws", axum::routing::get(ws::ws_handler))
+        .route_layer(middleware::from_fn(auth::require_read_auth));
 
     // Static file serving: serve frontend/dist/ at root.
     // During development, you can run `npm run dev` in frontend/ instead.
@@ -80,10 +83,9 @@ async fn main() {
 
     let app = Router::new()
         .merge(api)
-        .route("/ws", axum::routing::get(ws::ws_handler))
+        .merge(ws_routes)
         .route("/health", axum::routing::get(health))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
-        .layer(middleware::from_fn(auth::require_read_auth))
         .layer(axum::Extension(auth_config))
         .layer(cors)
         .with_state(state);
