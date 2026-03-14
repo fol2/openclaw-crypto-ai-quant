@@ -119,7 +119,11 @@ async fn health() -> axum::Json<serde_json::Value> {
 fn build_cors_layer(config: &HubConfig) -> Result<CorsLayer, String> {
     let layer = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::IF_MATCH,
+        ])
         .expose_headers([
             header::ETAG,
             HeaderName::from_static("x-aiq-config-id"),
@@ -246,6 +250,42 @@ mod tests {
             .unwrap();
         assert!(expose.contains("etag"));
         assert!(expose.contains("x-aiq-config-lock-id"));
+    }
+
+    #[tokio::test]
+    async fn cors_allows_if_match_for_cross_origin_config_saves() {
+        let mut config = HubConfig::from_env();
+        config.cors_allowed_origins = vec!["https://console.example".to_string()];
+        let app = Router::new()
+            .route("/test", axum::routing::put(ok_handler))
+            .layer(build_cors_layer(&config).unwrap());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/test")
+                    .header(header::ORIGIN, "https://console.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "if-match,content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let allowed_headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(allowed_headers.contains("if-match"));
     }
 }
 
