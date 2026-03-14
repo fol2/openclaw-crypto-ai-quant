@@ -145,9 +145,12 @@ struct PaperEffectiveConfigArgs {
 
 #[derive(Debug, Clone, Args)]
 struct LiveEffectiveConfigArgs {
-    /// Optional YAML config path override. Falls back to AI_QUANT_STRATEGY_YAML or strategy_overrides.yaml.
+    /// Optional YAML config path override. Falls back to AI_QUANT_BASE_STRATEGY_YAML, AI_QUANT_STRATEGY_YAML, or the conventional live config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
     /// Optional symbol override for per-symbol config resolution.
     #[arg(long)]
     symbol: Option<String>,
@@ -1580,8 +1583,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
 fn run_live(command: LiveCommand) -> Result<()> {
     match command {
         LiveCommand::EffectiveConfig(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(args.config.as_deref(), None, None)?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve_live(
+                args.config.as_deref(),
+                args.project_dir.as_deref(),
+            )?;
             let report = effective_config.build_report(args.symbol.as_deref(), true)?;
 
             if args.json {
@@ -1761,9 +1766,8 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 status_path: args.status_path.as_deref(),
                 lookback_bars: args.lookback_bars,
             })?;
-            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+            let effective_config = paper_config::PaperEffectiveConfig::resolve_live(
                 Some(Path::new(&report.base_config_path)),
-                None,
                 args.project_dir.as_deref(),
             )?;
             let runtime_bootstrap =
@@ -1850,12 +1854,22 @@ mod tests {
 
     #[test]
     fn cli_parses_live_effective_config_surface() {
-        let cli = Cli::try_parse_from(["aiq-runtime", "live", "effective-config", "--json"])
-            .expect("live effective-config should parse");
+        let cli = Cli::try_parse_from([
+            "aiq-runtime",
+            "live",
+            "effective-config",
+            "--project-dir",
+            "/tmp/project",
+            "--json",
+        ])
+        .expect("live effective-config should parse");
         match cli.command {
             Command::Live {
                 command: LiveCommand::EffectiveConfig(args),
-            } => assert!(args.json),
+            } => {
+                assert!(args.json);
+                assert_eq!(args.project_dir, Some(PathBuf::from("/tmp/project")));
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

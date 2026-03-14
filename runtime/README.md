@@ -17,7 +17,7 @@ cargo run -p aiq-runtime -- paper effective-config --json
 cargo run -p aiq-runtime -- paper manifest --json
 cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
 
-cargo run -p aiq-runtime -- live effective-config --json
+cargo run -p aiq-runtime -- live effective-config --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live manifest --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 
