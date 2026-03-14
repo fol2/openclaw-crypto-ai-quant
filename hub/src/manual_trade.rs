@@ -2730,7 +2730,7 @@ fn load_reconcilable_manual_intents(
     } else {
         load_reconcilable_manual_intents_from_start(conn, None, limit)?
     };
-    if rows.len() < limit {
+    if rows.len() < limit && cursor.is_some() {
         rows.extend(load_reconcilable_manual_intents_from_start(
             conn,
             cursor.as_ref(),
@@ -6902,6 +6902,22 @@ mod tests {
         insert_test_manual_intent(&conn, "manual_reconcile_c", 300, Some(300), "PARTIAL");
 
         let intents = load_reconcilable_manual_intents(&conn, 2).unwrap();
+        let ids = intents
+            .into_iter()
+            .map(|intent| intent.intent_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["manual_reconcile_a", "manual_reconcile_b"]);
+    }
+
+    #[test]
+    fn reconcilable_intents_do_not_duplicate_under_limit_without_cursor() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_test_manual_intent(&conn, "manual_reconcile_a", 100, Some(100), "SENT");
+        insert_test_manual_intent(&conn, "manual_reconcile_b", 200, Some(200), "UNKNOWN");
+
+        let intents = load_reconcilable_manual_intents(&conn, 20).unwrap();
         let ids = intents
             .into_iter()
             .map(|intent| intent.intent_id)
