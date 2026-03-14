@@ -2,10 +2,29 @@
 
 ## Status
 
-Active.
+Archived.
 
 Prepared on 2026-03-14 after an independent three-reviewer architecture review
 of the current modular/shared config control plane and runtime contract.
+
+## Closeout
+
+Closed on 2026-03-14 after the full PR sequence landed on `master`.
+
+Merged PRs:
+
+- `#997` `runtime: harden live config contract defaults`
+- `#999` `hub: harden auth and mutation routes`
+- `#1001` `hub: make config writes validation-aware`
+- `#1010` `hub: make live apply and rollback transactional`
+- `#1011` `runtime: bind launch contracts to immutable config artefacts`
+- `#1012` `hub: retire false reload semantics`
+- `#1014` `hub: make config audit and monitoring config-id-centric`
+- `#1018` `hub: add sensitive metadata redaction boundaries`
+- `#1023` `hub: add financial-grade maker-checker approvals`
+
+The plan remains archived as the durable historical record of the review,
+sequence, and rationale that led to the final control-plane contract.
 
 ## Execution Progress
 
@@ -61,18 +80,15 @@ Progress recorded on 2026-03-14:
   path-bearing system/monitor metadata, introduced explicit privileged raw
   routes for diagnostics, and appended privileged diagnostic reads to a
   dedicated audit ledger.
-- PR 9 implementation completed on 2026-03-14
+- PR 9 completed and merged as `#1023`
   (`hub: add financial-grade maker-checker approvals`).
   This introduced distinct `viewer` / `editor` / `approver` token boundaries,
   moved save-only config writes under `editor` auth, replaced direct live apply
   / rollback execution with durable pending approval requests, added approver
   approve/reject routes plus a pending request list surface, and extended audit
   events so high-risk live mutations record both requester and approver actors.
-  At the time of this documentation pass the PR is implementation-complete on
-  branch `codex/shared-config-pr9-maker-checker-v2` and is awaiting the
-  required review / merge flow.
 
-Sequence status after merged PR 8 and the current PR 9 implementation pass:
+Sequence status at archive time:
 
 - PR 1: complete
 - PR 2: complete
@@ -82,7 +98,7 @@ Sequence status after merged PR 8 and the current PR 9 implementation pass:
 - PR 4: complete
 - PR 7: complete
 - PR 8: complete
-- PR 9: implementation complete; review / merge pending
+- PR 9: complete
 
 ## Current Stage
 
@@ -93,17 +109,14 @@ Current execution stage as of 2026-03-14:
 - PR 4 is merged and closed.
 - PR 7 is merged and closed.
 - PR 8 is merged and closed.
-- PR 9 implementation is complete and the documentation pass is now describing
-  the post-change maker-checker contract rather than one undifferentiated live
-  mutation bearer.
+- PR 9 is merged and closed.
 - `editor` and `approver` permissions are now distinct, live apply / rollback
   move through a durable pending approval store, and high-risk live mutation
   audit events now carry both requester and approver actors.
 
 Current blocker:
 
-- None at the documentation-pass stage. The next action is reviewer coverage
-  for PR 9, followed by merge and cleanup to close this active plan.
+- None. The plan is complete and archived.
 
 ## Objective
 
