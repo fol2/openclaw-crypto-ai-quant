@@ -56,6 +56,9 @@ window plus a trailing holdout window. Tune `validation.holdout_fraction` and
 need a different holdout share or slice count. Sweep / TPE search and the
 dedicated CPU parity replay run on the train window, while candidate gating and
 incumbent/challenger comparison use the holdout window only.
+Because the backtester treats `--start-ts` and `--end-ts` as inclusive, the
+factory now makes the train window end one timestamp before the holdout window
+starts so the boundary bar can never leak into both evidence sets.
 The financial-grade defaults reserve the trailing 25% of common coverage as the
 holdout window and summarise it in 3 equal holdout slices.
 
