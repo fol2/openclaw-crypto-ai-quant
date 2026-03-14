@@ -778,11 +778,7 @@ pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubEr
         } else {
             json!({
                 "ok": true,
-                "status": if confirmation.status.eq_ignore_ascii_case("PREVIEWED") {
-                    "previewed"
-                } else {
-                    "pending"
-                },
+                "status": confirmation_lookup_status(&confirmation),
                 "kind": "result",
                 "deduped": true,
             })
@@ -2397,6 +2393,20 @@ fn bind_manual_confirmation_to_intent(
     Ok(())
 }
 
+fn update_manual_confirmation_last_error(
+    conn: &Connection,
+    confirm_token: &str,
+    last_error: &str,
+) -> Result<(), HubError> {
+    conn.execute(
+        "UPDATE manual_trade_confirmations
+         SET last_error = ?1
+         WHERE confirm_token = ?2",
+        params![last_error, confirm_token],
+    )?;
+    Ok(())
+}
+
 fn load_existing_manual_intent_by_dedupe_key(
     conn: &Connection,
     dedupe_key: &str,
@@ -2632,6 +2642,23 @@ fn existing_manual_execution_payload(kind: &str, existing: &ExistingManualIntent
         "last_error": existing.last_error,
         "sent_ts_ms": existing.sent_ts_ms,
     })
+}
+
+fn confirmation_lookup_status(confirmation: &ManualConfirmationLookup) -> &'static str {
+    if confirmation.status.eq_ignore_ascii_case("EXPIRED") {
+        "expired"
+    } else if confirmation
+        .last_error
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "error"
+    } else if confirmation.status.eq_ignore_ascii_case("PREVIEWED") {
+        "previewed"
+    } else {
+        "pending"
+    }
 }
 
 fn same_optional_price(left: Option<f64>, right: Option<f64>) -> bool {
@@ -2870,6 +2897,8 @@ fn record_manual_preview_stale(
     drift_fields: &[String],
 ) -> Result<(), HubError> {
     let drift_summary = drift_fields.join(",");
+    let error_text = preview_stale_error(drift_fields).to_string();
+    update_manual_confirmation_last_error(conn, confirm_token, &error_text)?;
     write_manual_runtime_log(
         conn,
         "WARN",
@@ -2887,6 +2916,7 @@ fn record_manual_preview_stale(
             "action": action,
             "confirm_token": confirm_token,
             "drift_fields": drift_fields,
+            "error": error_text,
         }),
     )?;
     Ok(())
@@ -5335,6 +5365,53 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("SENT")
         );
+    }
+
+    #[test]
+    fn execution_result_surfaces_preview_stale_error_for_confirm_token() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash,
+                status, preview_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED', ?7)",
+            params![
+                "confirm-preview-stale",
+                now_ms,
+                now_ms + MANUAL_CONFIRM_TTL_MS,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                "hash_open",
+                json!({"symbol":"ETH","est_size":0.0515}).to_string(),
+            ],
+        )
+        .unwrap();
+        record_manual_preview_stale(
+            &conn,
+            "ETH",
+            MANUAL_CONFIRM_ACTION_OPEN,
+            "confirm-preview-stale",
+            &["est_size".to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = execution_result(&cfg, "confirm-preview-stale").unwrap();
+        assert_eq!(
+            result.get("status").and_then(|value| value.as_str()),
+            Some("error")
+        );
+        assert!(result
+            .get("last_error")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .contains("manual preview is stale"));
     }
 
     #[test]
