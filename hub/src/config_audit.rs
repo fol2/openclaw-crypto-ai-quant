@@ -163,7 +163,8 @@ pub fn latest_successful_event_for_config_id(
 ) -> Result<Option<ConfigAuditEvent>, HubError> {
     let events = read_recent_events(artifacts_dir, Some(lane), MAX_RECENT_EVENTS)?;
     Ok(events.into_iter().find(|event| {
-        event.after.config_id.as_deref() == Some(config_id)
+        matches!(event.action.as_str(), "apply_live" | "rollback_live")
+            && event.after.config_id.as_deref() == Some(config_id)
             && event
                 .result
                 .get("ok")
@@ -224,6 +225,22 @@ mod tests {
             .expect("latest matching event");
 
         assert_eq!(latest.after.config_id.as_deref(), Some("cfg-a"));
+        assert_eq!(latest.ts_ms, 30);
+    }
+
+    #[test]
+    fn latest_successful_event_ignores_save_only_entries() {
+        let dir = tempdir().unwrap();
+        let mut save_event = sample_event("cfg-a", 40);
+        save_event.action = "save_config".to_string();
+        append_event(dir.path(), &save_event).unwrap();
+        append_event(dir.path(), &sample_event("cfg-a", 30)).unwrap();
+
+        let latest = latest_successful_event_for_config_id(dir.path(), "live", "cfg-a")
+            .unwrap()
+            .expect("latest matching deploy event");
+
+        assert_eq!(latest.action, "apply_live");
         assert_eq!(latest.ts_ms, 30);
     }
 
