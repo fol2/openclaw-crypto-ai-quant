@@ -10,4 +10,6 @@ Current active items:
 
 - `factory-financial-grade-hardening.md`
 
-There are currently no backlog items.
+Current backlog items:
+
+- `shared-config-financial-grade-hardening.md`

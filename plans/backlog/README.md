@@ -1,5 +1,5 @@
 # Backlog Plans
 
-There are currently no backlog items.
+- `shared-config-financial-grade-hardening.md`
 
 Store future candidate plans here before they become active work.
