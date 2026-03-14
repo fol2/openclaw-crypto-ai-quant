@@ -3,6 +3,18 @@
 Use this folder for load-on-demand agent instructions. Start with the topic that
 matches the current task instead of reading every file.
 
+## Design Rules
+
+- Keep each instruction file topic-scoped and independently loadable.
+- Put only repository-wide essentials in `AGENTS.md`; keep detailed procedures
+  in this folder.
+- When a topic grows, split it into another module instead of inflating an
+  existing file.
+- Every module should point to deeper primary docs or source files when more
+  detail is needed.
+- Prefer additive growth here so the catalogue stays modular, flexible, and
+  easy to extend.
+
 ## Instruction Files
 
 | Topic | File |

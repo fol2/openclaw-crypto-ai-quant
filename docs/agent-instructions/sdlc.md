@@ -1,5 +1,8 @@
 # SDLC Instructions
 
+Load this file when the task involves branching, worktrees, pull requests,
+review flow, merge sequencing, or cleanup duties.
+
 ## Branching and Worktrees
 
 - Production stays in `/home/fol2hk/openclaw-plugins/ai_quant` on `master`.

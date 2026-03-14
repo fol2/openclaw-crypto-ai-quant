@@ -1,5 +1,8 @@
 # Backtester and Parity Instructions
 
+Load this file when the task involves replay, sweep, GPU parity, indicator
+validation, or backtester-owned code paths.
+
 ## Ownership
 
 Backtesting ownership lives in:

@@ -4,6 +4,15 @@ This file is the short catalogue for AI coding agents working in this
 repository. Keep it concise. Load deeper instructions on demand from
 `docs/agent-instructions/` instead of expanding this file again.
 
+## Catalogue Contract
+
+- `AGENTS.md` keeps only essential repository-wide instructions that every
+  agent must know before starting work.
+- Topic-specific guidance belongs in `docs/agent-instructions/` and should be
+  loaded only when the task needs it.
+- Expand the instruction system by adding or splitting topic modules under
+  `docs/agent-instructions/`, not by turning `AGENTS.md` back into a monolith.
+
 ## Non-Negotiable Guardrails
 
 - The production worktree at `/home/fol2hk/openclaw-plugins/ai_quant` MUST stay
@@ -79,6 +88,9 @@ Load only the instruction file you need from `docs/agent-instructions/`:
 | Config rules, parity lanes, and debugging flow | `docs/agent-instructions/configuration-and-debugging.md` |
 | Backtester, GPU parity, and validation rules | `docs/agent-instructions/backtester-and-parity.md` |
 | Release/versioning guidance | `docs/agent-instructions/release-and-versioning.md` |
+
+If a new topic does not fit an existing module, add a new file under
+`docs/agent-instructions/` and keep the main catalogue short.
 
 ## Quick Commands
 

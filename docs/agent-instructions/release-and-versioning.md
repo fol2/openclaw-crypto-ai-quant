@@ -1,5 +1,8 @@
 # Release and Versioning Instructions
 
+Load this file when the task involves version bumps, tags, release assets, or
+GitHub release automation.
+
 ## Version Governance
 
 - `VERSION` is the single human-edited version source.

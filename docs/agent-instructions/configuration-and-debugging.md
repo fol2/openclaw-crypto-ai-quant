@@ -1,5 +1,8 @@
 # Configuration and Debugging Instructions
 
+Load this file when the task involves YAML/runtime config, parity lanes,
+behaviour traces, or diagnosis of runtime behaviour.
+
 ## Configuration Defaults
 
 - Merge order:

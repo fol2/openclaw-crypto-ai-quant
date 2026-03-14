@@ -1,5 +1,8 @@
 # Runtime and Operations Instructions
 
+Load this file when the task involves services, manifests, runtime ownership,
+operator commands, or production-adjacent runtime behaviour.
+
 ## Active Stack
 
 Active execution ownership lives in:
