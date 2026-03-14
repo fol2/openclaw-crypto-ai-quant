@@ -1977,18 +1977,37 @@ async fn post_approve_config_approval(
 
     match result {
         Ok(payload) => {
-            let request = mark_approved(
-                &state.config.artifacts_dir,
-                request,
-                approver,
-                payload.clone(),
-            )?;
-            Ok(Json(json!({
-                "ok": payload.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
-                "request_id": request.request_id,
-                "status": "approved",
-                "result": payload,
-            })))
+            let payload_ok = payload
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if payload_ok {
+                let request = mark_approved(
+                    &state.config.artifacts_dir,
+                    request,
+                    approver,
+                    payload.clone(),
+                )?;
+                Ok(Json(json!({
+                    "ok": true,
+                    "request_id": request.request_id,
+                    "status": "approved",
+                    "result": payload,
+                })))
+            } else {
+                let failed = mark_failed(
+                    &state.config.artifacts_dir,
+                    request,
+                    approver,
+                    payload.clone(),
+                )?;
+                Ok(Json(json!({
+                    "ok": false,
+                    "request_id": failed.request_id,
+                    "status": "failed",
+                    "result": payload,
+                })))
+            }
         }
         Err(err) => {
             let failed = mark_failed(
@@ -2951,5 +2970,75 @@ fi
         assert_eq!(rejected["ok"], Value::Bool(true));
         assert_eq!(rejected["status"], Value::String("rejected".to_string()));
         assert_eq!(fs::read_to_string(&live_path).unwrap(), live_yaml);
+    }
+
+    #[tokio::test]
+    async fn approval_marks_request_failed_when_live_execution_returns_ok_false() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let live_path = write_live_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let candidate_yaml =
+            "global:\n  engine:\n    interval: 15m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n";
+        let baseline_state = test_state(dir.path());
+        let current = resolve_current_config_state(&baseline_state, "live").unwrap();
+        let failed_report = fake_live_service_apply_report("wrong-config-id", "running", true);
+        let recovery_report =
+            fake_live_service_apply_report(&validate_candidate_config_write(&baseline_state, "live", &live_path, "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n").unwrap().config_id, "running", true);
+        let (runtime_bin, count_path, first_path, second_path) =
+            write_fake_runtime_script(dir.path(), &failed_report, &recovery_report);
+        let _env = EnvGuard::set(&[
+            (
+                "AIQ_TEST_RUNTIME_COUNT_FILE",
+                Some(count_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_1",
+                Some(first_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_2",
+                Some(second_path.to_str().unwrap()),
+            ),
+        ]);
+        let state = admin_test_state(dir.path(), &runtime_bin);
+        let mut request_headers = if_match_headers(&current.lock_id);
+        request_headers.insert("x-aiq-actor", HeaderValue::from_static("editor-jt"));
+
+        let Json(request_response) = post_request_apply_live(
+            State(Arc::clone(&state)),
+            request_headers,
+            Json(ApplyLiveBody {
+                yaml: candidate_yaml.to_string(),
+                expected_config_id: None,
+                reason: Some("maker request".to_string()),
+                restart: Some("auto".to_string()),
+                dry_run: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let request_id = request_response["request_id"].as_str().unwrap().to_string();
+        let mut approver_headers = HeaderMap::new();
+        approver_headers.insert("x-aiq-actor", HeaderValue::from_static("approver-jm"));
+        let Json(approved) = post_approve_config_approval(
+            State(Arc::clone(&state)),
+            AxumPath(request_id),
+            approver_headers,
+            Json(ConfigApprovalDecisionBody { reason: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(approved["ok"], Value::Bool(false));
+        assert_eq!(approved["status"], Value::String("failed".to_string()));
+        assert!(fs::read_to_string(&live_path)
+            .unwrap()
+            .contains("interval: 30m"));
     }
 }

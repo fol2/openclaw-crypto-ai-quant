@@ -124,7 +124,9 @@ async fn require_any_scope(request: Request, next: Next, scopes: &[AuthScope]) -
         ]
         .into_iter()
         .filter(|token| !token.is_empty())
-        .any(|token| matches_bearer_token(auth_header, token))
+        .any(|token| {
+            matches_bearer_token(auth_header, token) || matches_query_token(&request, token)
+        })
     {
         return next.run(request).await;
     }
@@ -798,6 +800,32 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ws?token=abc%2Bdef%3D")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn websocket_query_editor_token_can_pass_the_read_gate() {
+        let app = Router::new()
+            .route("/ws", get(ok_handler))
+            .layer(middleware::from_fn(require_read_auth))
+            .layer(axum::Extension(HubAuthConfig {
+                read_token: "viewer-secret".to_string(),
+                admin_token: "admin-secret".to_string(),
+                editor_token: "editor-secret".to_string(),
+                approver_token: "approver-secret".to_string(),
+                dev_mode: false,
+            }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws?token=editor-secret")
                     .body(Body::empty())
                     .unwrap(),
             )
