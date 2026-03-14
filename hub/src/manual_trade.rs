@@ -244,6 +244,7 @@ pub fn issue_confirm_token(
     let now_ms = chrono::Utc::now().timestamp_millis();
     purge_stale_manual_confirmations(&conn, now_ms)?;
     if let Some(token) = find_reusable_manual_confirmation(&conn, action, param_hash, now_ms)? {
+        refresh_reusable_manual_confirmation(&conn, &token, symbol, preview, now_ms)?;
         write_manual_audit_event(
             &conn,
             Some(symbol),
@@ -253,6 +254,7 @@ pub fn issue_confirm_token(
                 "action": action,
                 "confirm_token": token.clone(),
                 "param_hash": param_hash,
+                "expires_ts_ms": now_ms + MANUAL_CONFIRM_TTL_MS,
             }),
         )?;
         return Ok(token);
@@ -1959,6 +1961,32 @@ fn find_reusable_manual_confirmation(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(HubError::Db(error.to_string())),
     }
+}
+
+fn refresh_reusable_manual_confirmation(
+    conn: &Connection,
+    confirm_token: &str,
+    symbol: &str,
+    preview: &Value,
+    now_ms: i64,
+) -> Result<(), HubError> {
+    conn.execute(
+        "UPDATE manual_trade_confirmations
+         SET created_ts_ms = ?1,
+             expires_ts_ms = ?2,
+             symbol = ?3,
+             preview_json = ?4,
+             last_error = NULL
+         WHERE confirm_token = ?5",
+        params![
+            now_ms,
+            now_ms + MANUAL_CONFIRM_TTL_MS,
+            symbol.trim().to_ascii_uppercase(),
+            preview.to_string(),
+            confirm_token,
+        ],
+    )?;
+    Ok(())
 }
 
 fn validate_manual_confirmation(
@@ -4055,6 +4083,74 @@ mod tests {
         )
         .unwrap();
         assert!(token_after_bind.is_none());
+    }
+
+    #[test]
+    fn reused_preview_refreshes_preview_payload_and_expiry() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let created_ts_ms = chrono::Utc::now().timestamp_millis() - 30_000;
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash,
+                status, preview_json, last_error
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED', ?7, ?8)",
+            params![
+                "confirm-refresh-token",
+                created_ts_ms,
+                created_ts_ms + 10_000,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                "hash_open",
+                json!({"symbol":"ETH","est_size":0.0515}).to_string(),
+                "old_preview"
+            ],
+        )
+        .unwrap();
+
+        let refreshed_preview = json!({
+            "symbol": "ETH",
+            "side": "SELL",
+            "order_type": "market",
+            "est_size": 0.0615,
+            "leverage": 10,
+        });
+        let refresh_start_ms = chrono::Utc::now().timestamp_millis();
+        refresh_reusable_manual_confirmation(
+            &conn,
+            "confirm-refresh-token",
+            "eth",
+            &refreshed_preview,
+            refresh_start_ms,
+        )
+        .unwrap();
+
+        let row: (i64, i64, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT created_ts_ms, expires_ts_ms, symbol, preview_json, last_error
+                 FROM manual_trade_confirmations
+                 WHERE confirm_token = ?1",
+                ["confirm-refresh-token"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert!(row.0 >= refresh_start_ms);
+        assert!(row.1 >= refresh_start_ms + MANUAL_CONFIRM_TTL_MS);
+        assert_eq!(row.2, "ETH");
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.3).unwrap(),
+            refreshed_preview
+        );
+        assert!(row.4.is_none());
     }
 
     #[test]
