@@ -8,7 +8,10 @@ This directory is the repository source of truth for planning documents.
 
 Current active items:
 
-- `factory-financial-grade-hardening.md`
 - `shared-config-financial-grade-hardening.md`
+
+Current archived items include:
+
+- `runtime/factory-financial-grade-hardening.md`
 
 Current backlog items:
