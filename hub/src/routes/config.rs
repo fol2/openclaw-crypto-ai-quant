@@ -17,6 +17,10 @@ use std::time::Duration;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::config_audit::{
+    append_event as append_config_audit_ledger_event, read_recent_events, weak_actor_from_headers,
+    ConfigAuditEvent, ConfigAuditIdentity, ConfigAuditQuery,
+};
 use crate::error::HubError;
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_lane::PaperLane;
@@ -35,6 +39,7 @@ pub struct ConfigQuery {
 pub struct ConfigWriteBody {
     pub yaml: String,
     pub expected_config_id: Option<String>,
+    pub reason: Option<String>,
 }
 
 /// Diff query parameters.
@@ -265,6 +270,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/config", get(get_config))
         .route("/api/config/raw", get(get_config_raw))
         .route("/api/config/history", get(get_config_history))
+        .route("/api/config/audit", get(get_config_audit))
         .route("/api/config/diff", get(get_config_diff))
         .route("/api/config/files", get(get_config_files));
     let mutation_routes = Router::new()
@@ -640,6 +646,56 @@ fn iso_utc_now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+fn now_ts_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn normalise_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn append_config_audit_event(
+    state: &AppState,
+    headers: &HeaderMap,
+    file_variant: &str,
+    action: &str,
+    reason: Option<&str>,
+    before_lock_id: Option<&str>,
+    before_config_id: Option<&str>,
+    after_lock_id: Option<&str>,
+    after_config_id: Option<&str>,
+    validation: Value,
+    result: Value,
+    artifact_path: Option<&str>,
+) -> Result<(), HubError> {
+    let event = ConfigAuditEvent {
+        version: "config_audit_event_v1".to_string(),
+        ts_ms: now_ts_ms(),
+        ts_utc: iso_utc_now(),
+        lane: file_variant.to_string(),
+        file_variant: file_variant.to_string(),
+        action: action.to_string(),
+        actor: weak_actor_from_headers(headers, "admin_token"),
+        reason: normalise_reason(reason),
+        validation,
+        before: ConfigAuditIdentity {
+            lock_id: before_lock_id.map(ToOwned::to_owned),
+            config_id: before_config_id.map(ToOwned::to_owned),
+        },
+        after: ConfigAuditIdentity {
+            lock_id: after_lock_id.map(ToOwned::to_owned),
+            config_id: after_config_id.map(ToOwned::to_owned),
+        },
+        result,
+        artifact_path: artifact_path.map(ToOwned::to_owned),
+    };
+    append_config_audit_ledger_event(&state.config.artifacts_dir, &event)?;
+    Ok(())
+}
+
 fn build_action_dir(root: &Path) -> Result<PathBuf, HubError> {
     fs::create_dir_all(root)?;
     let ts_compact = compact_utc_now();
@@ -957,6 +1013,28 @@ async fn put_config(
 
     atomic_write_text(&current.path, &validated.payload)?;
 
+    append_config_audit_event(
+        &state,
+        &headers,
+        file_variant,
+        "save_config",
+        body.reason.as_deref(),
+        Some(&current.lock_id),
+        current.runtime_config_id.as_deref(),
+        Some(&validated.lock_id),
+        Some(&validated.config_id),
+        json!({
+            "kind": "runtime_validation",
+            "ok": true,
+            "config_id": validated.config_id,
+        }),
+        json!({
+            "ok": true,
+            "backup": backup_path_str,
+        }),
+        None,
+    )?;
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "file": file_variant,
@@ -1032,6 +1110,32 @@ async fn post_apply_live(
     )
     .await?;
 
+    if !dry_run {
+        append_config_audit_event(
+            &state,
+            &headers,
+            "live",
+            "apply_live",
+            Some(reason.as_str()),
+            Some(&current.lock_id),
+            Some(&incumbent.config_id),
+            Some(&candidate.lock_id),
+            Some(&candidate.config_id),
+            json!({
+                "kind": "runtime_validation",
+                "ok": true,
+                "config_id": candidate.config_id,
+            }),
+            json!({
+                "ok": transaction.ok,
+                "restart_required": transaction.restart_required,
+                "runtime_apply": transaction.runtime_result,
+                "recovery": transaction.restore_result,
+            }),
+            Some(&transaction.action_dir),
+        )?;
+    }
+
     Ok(Json(json!({
         "ok": transaction.ok,
         "action": "apply_live",
@@ -1051,6 +1155,19 @@ async fn post_apply_live(
         "dry_run": dry_run,
         "error": transaction.error,
     })))
+}
+
+/// GET /api/config/audit — Read recent append-only config mutation events.
+async fn get_config_audit(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConfigAuditQuery>,
+) -> Result<Json<Vec<ConfigAuditEvent>>, HubError> {
+    let events = read_recent_events(
+        &state.config.artifacts_dir,
+        q.file.as_deref(),
+        q.limit.unwrap_or(50),
+    )?;
+    Ok(Json(events))
 }
 
 /// GET /api/config/history — List backup files for a config variant.
@@ -1220,6 +1337,7 @@ async fn post_promote_live(
 /// POST /api/config/actions/rollback-live — Roll back live config to previous deployment version.
 async fn post_rollback_live(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<RollbackLiveBody>,
 ) -> Result<Json<Value>, HubError> {
     ensure_admin_actions_enabled(&state)?;
@@ -1317,6 +1435,31 @@ async fn post_rollback_live(
         },
     )
     .await?;
+
+    append_config_audit_event(
+        &state,
+        &headers,
+        "live",
+        "rollback_live",
+        Some(reason.as_str()),
+        Some(&current.lock_id),
+        Some(&incumbent.config_id),
+        Some(&restored.lock_id),
+        Some(&restored.config_id),
+        json!({
+            "kind": "runtime_validation",
+            "ok": true,
+            "config_id": restored.config_id,
+        }),
+        json!({
+            "ok": transaction.ok,
+            "restart_required": transaction.restart_required,
+            "runtime_apply": transaction.runtime_result,
+            "recovery": transaction.restore_result,
+            "steps": steps,
+        }),
+        Some(&transaction.action_dir),
+    )?;
 
     Ok(Json(json!({
         "ok": transaction.ok,
@@ -1576,6 +1719,7 @@ fi
             Json(ConfigWriteBody {
                 yaml: "global:\n  trade:\n    leverage: nope\n".to_string(),
                 expected_config_id: None,
+                reason: None,
             }),
         )
         .await
@@ -1615,6 +1759,7 @@ fi
             Json(ConfigWriteBody {
                 yaml: "global:\n  engine:\n    interval: 5m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n".to_string(),
                 expected_config_id: None,
+                reason: None,
             }),
         )
         .await
@@ -1656,6 +1801,7 @@ fi
             Json(ConfigWriteBody {
                 yaml: "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n".to_string(),
                 expected_config_id: None,
+                reason: None,
             }),
         )
         .await
@@ -1670,6 +1816,54 @@ fi
         assert!(fs::read_to_string(&config_path)
             .unwrap()
             .contains("operator note"));
+    }
+
+    #[tokio::test]
+    async fn put_config_appends_config_audit_event() {
+        let dir = tempdir().unwrap();
+        let config_path = write_main_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let state = test_state(dir.path());
+        let current = resolve_current_config_state(&state, "main").unwrap();
+        let mut headers = if_match_headers(&current.lock_id);
+        headers.insert("x-aiq-actor", HeaderValue::from_static("operator-jt"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("config-test"));
+
+        let Json(response) = put_config(
+            State(Arc::clone(&state)),
+            Query(ConfigQuery {
+                file: Some("main".to_string()),
+            }),
+            headers,
+            Json(ConfigWriteBody {
+                yaml: "global:\n  engine:\n    interval: 15m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.5\n".to_string(),
+                expected_config_id: None,
+                reason: Some("operator save".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["ok"], Value::Bool(true));
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("interval: 15m"));
+
+        let events = read_recent_events(&state.config.artifacts_dir, Some("main"), 10).unwrap();
+        let latest = events.first().expect("config audit event");
+        assert_eq!(latest.action, "save_config");
+        assert_eq!(latest.actor.label, "operator-jt");
+        assert_eq!(latest.reason.as_deref(), Some("operator save"));
+        assert_eq!(
+            latest.before.lock_id.as_deref(),
+            Some(current.lock_id.as_str())
+        );
+        assert_eq!(
+            latest.after.config_id.as_deref(),
+            response["config_id"].as_str()
+        );
     }
 
     #[tokio::test]
@@ -1980,6 +2174,7 @@ fi
 
         let Json(response) = post_rollback_live(
             State(Arc::clone(&state)),
+            HeaderMap::new(),
             Json(RollbackLiveBody {
                 steps: Some(1),
                 reason: Some("test rollback".to_string()),

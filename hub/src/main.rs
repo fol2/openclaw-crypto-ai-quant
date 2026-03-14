@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod config_audit;
 mod db;
 mod error;
 mod factory_capability;
@@ -123,6 +124,7 @@ fn build_cors_layer(config: &HubConfig) -> Result<CorsLayer, String> {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::IF_MATCH,
+            HeaderName::from_static("x-aiq-actor"),
         ])
         .expose_headers([
             header::ETAG,

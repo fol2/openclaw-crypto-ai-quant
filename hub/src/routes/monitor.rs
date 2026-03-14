@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::db::pool::open_ro_pool;
 use crate::db::{candles, runtime, trading, tunnel};
 use crate::error::HubError;
+use crate::heartbeat::Heartbeat;
 use crate::hyperliquid::HlPositionSnapshot;
 use crate::state::AppState;
 
@@ -21,6 +22,35 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn deployed_config_boundary(
+    artifacts_dir: &std::path::Path,
+    lane: &str,
+    conn: &rusqlite::Connection,
+    heartbeat: &Heartbeat,
+) -> Result<Option<(String, String)>, HubError> {
+    let Some(config_id) = heartbeat.config_id.clone() else {
+        return Ok(None);
+    };
+    let ledger_from_ts = crate::config_audit::latest_successful_event_for_config_id(
+        artifacts_dir,
+        lane,
+        &config_id,
+    )?
+    .and_then(|event| {
+        chrono::DateTime::from_timestamp_millis(event.ts_ms)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+    });
+    let runtime_from_ts =
+        runtime::first_seen_config_id_ts_ms(conn, &config_id)?.and_then(|ts_ms| {
+            chrono::DateTime::from_timestamp_millis(ts_ms)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+        });
+    let Some(from_ts) = ledger_from_ts.or(runtime_from_ts) else {
+        return Ok(None);
+    };
+    Ok(Some((config_id, from_ts)))
 }
 
 // ── Query params ─────────────────────────────────────────────────────────
@@ -495,31 +525,12 @@ async fn api_snapshot(
     let daily = trading::daily_metrics(&conn, ts)?;
 
     // Range metrics: since-config and all-time
-    let config_candidates: &[&str] = match mode.as_str() {
-        "live" => &[
-            "strategy_overrides.live.yaml",
-            "strategy_overrides._promoted_primary.yaml",
-            "strategy_overrides.yaml",
-        ],
-        "paper1" => &["strategy_overrides.paper1.yaml", "strategy_overrides.yaml"],
-        "paper2" => &["strategy_overrides.paper2.yaml", "strategy_overrides.yaml"],
-        "paper3" => &["strategy_overrides.paper3.yaml", "strategy_overrides.yaml"],
-        _ => &["strategy_overrides.yaml"],
-    };
-    let config_mtime_iso = config_candidates
-        .iter()
-        .find_map(|f| {
-            let path = state.config.config_dir.join(f);
-            std::fs::metadata(&path).and_then(|m| m.modified()).ok()
-        })
-        .and_then(|t| {
-            let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            chrono::DateTime::from_timestamp(secs as i64, 0)
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-        });
+    let deployed_config =
+        deployed_config_boundary(&state.config.artifacts_dir, &mode, &conn, &heartbeat)?;
 
-    let since_config = config_mtime_iso
-        .as_deref()
+    let since_config = deployed_config
+        .as_ref()
+        .map(|(_, from_ts)| from_ts.as_str())
         .map(|ts| trading::range_metrics(&conn, Some(ts)))
         .transpose()?;
     let all_time = trading::range_metrics(&conn, None)?;
@@ -552,6 +563,7 @@ async fn api_snapshot(
         "daily": daily,
         "since_config": since_config.as_ref().map(|m| json!({
             "from_ts": m.from_ts,
+            "config_id": deployed_config.as_ref().map(|(config_id, _)| config_id.clone()),
             "trades": m.trades,
             "start_balance": m.start_balance,
             "end_balance": m.end_balance,
@@ -560,8 +572,8 @@ async fn api_snapshot(
             "net_pnl_usd": m.net_pnl_usd,
             "peak_balance": m.peak_balance,
             "drawdown_pct": m.drawdown_pct,
-            "label": config_mtime_iso.as_ref().map(|ts| {
-                format!("Since {}", &ts[5..10])
+            "label": deployed_config.as_ref().map(|(config_id, _)| {
+                format!("Since cfg {}", &config_id[..config_id.len().min(8)])
             }),
         })),
         "all_time": json!({
@@ -1077,5 +1089,121 @@ pub fn normalize_mode(mode: &str) -> String {
         "live" | "paper1" | "paper2" | "paper3" => m,
         "paper" => "paper1".to_string(),
         _ => "paper1".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_audit::{
+        append_event, ConfigAuditActor, ConfigAuditEvent, ConfigAuditIdentity,
+    };
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    #[test]
+    fn deployed_config_boundary_uses_heartbeat_config_id() {
+        let dir = tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE runtime_logs (
+                ts_ms INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_710_000_000_000_i64,
+                "engine ok config_id=abcdef0123456789"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_710_000_600_000_i64,
+                "engine ok config_id=abcdef0123456789"
+            ],
+        )
+        .unwrap();
+
+        let heartbeat = Heartbeat {
+            config_id: Some("abcdef0123456789".to_string()),
+            ..Default::default()
+        };
+
+        let (config_id, from_ts) = deployed_config_boundary(dir.path(), "live", &conn, &heartbeat)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(config_id, "abcdef0123456789");
+        assert_eq!(from_ts, "2024-03-09T16:00:00");
+    }
+
+    #[test]
+    fn deployed_config_boundary_prefers_latest_matching_audit_event() {
+        let dir = tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE runtime_logs (
+                ts_ms INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_710_000_000_000_i64,
+                "engine ok config_id=abcdef0123456789"
+            ],
+        )
+        .unwrap();
+
+        append_event(
+            dir.path(),
+            &ConfigAuditEvent {
+                version: "config_audit_event_v1".to_string(),
+                ts_ms: 1_710_005_000_000_i64,
+                ts_utc: "2024-03-09T17:23:20".to_string(),
+                lane: "live".to_string(),
+                file_variant: "live".to_string(),
+                action: "apply_live".to_string(),
+                actor: ConfigAuditActor {
+                    auth_scope: "admin_token".to_string(),
+                    label: "operator".to_string(),
+                    source_ip: None,
+                    user_agent: None,
+                },
+                reason: Some("deploy".to_string()),
+                validation: json!({ "ok": true }),
+                before: ConfigAuditIdentity {
+                    lock_id: None,
+                    config_id: Some("old".to_string()),
+                },
+                after: ConfigAuditIdentity {
+                    lock_id: None,
+                    config_id: Some("abcdef0123456789".to_string()),
+                },
+                result: json!({ "ok": true }),
+                artifact_path: None,
+            },
+        )
+        .unwrap();
+
+        let heartbeat = Heartbeat {
+            config_id: Some("abcdef0123456789".to_string()),
+            ..Default::default()
+        };
+
+        let (_config_id, from_ts) = deployed_config_boundary(dir.path(), "live", &conn, &heartbeat)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(from_ts, "2024-03-09T17:23:20");
     }
 }

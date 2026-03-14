@@ -26,3 +26,17 @@ pub fn fetch_heartbeat_from_db(conn: &Connection) -> Result<Option<Heartbeat>, H
         Err(e) => Err(e.into()),
     }
 }
+
+/// Find the earliest runtime log timestamp for a specific deployed config identity.
+pub fn first_seen_config_id_ts_ms(
+    conn: &Connection,
+    config_id: &str,
+) -> Result<Option<i64>, HubError> {
+    let like_pattern = format!("%config_id={config_id}%");
+    let mut stmt = conn.prepare(
+        "SELECT MIN(ts_ms) FROM runtime_logs
+         WHERE message LIKE ?",
+    )?;
+    let ts_ms = stmt.query_row([like_pattern], |row| row.get::<_, Option<i64>>(0))?;
+    Ok(ts_ms)
+}

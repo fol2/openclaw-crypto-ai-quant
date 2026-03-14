@@ -121,6 +121,37 @@ operator that a restart is required before confirmation. When the `config_id`
 does not change, the editor still warns that stale or stopped lanes may be
 supervised during apply.
 
+### Config Audit and Config-ID Attribution
+
+The Hub now appends config mutation events to:
+
+```bash
+artifacts/config_audit/config_events.jsonl
+```
+
+Each event records the mutation action, target lane / file variant,
+before-and-after `config_id`, validation status, apply / rollback result, and a
+weak request actor envelope.
+
+The weak actor envelope currently contains:
+
+- auth scope: `admin_token`
+- actor label: optional `X-AIQ-Actor` header, falling back to the auth scope
+- request source hints such as `X-Forwarded-For`, `X-Real-IP`, and `User-Agent`
+
+Read recent events through:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $AIQ_MONITOR_TOKEN" \
+  "http://127.0.0.1:8000/api/config/audit?file=live&limit=20"
+```
+
+Monitoring now derives `since_config` from the deployed heartbeat `config_id`
+plus the first runtime-log timestamp that carried that same `config_id`, rather
+than from YAML file `mtime`. Snapshot responses therefore expose config-centric
+attribution boundaries instead of filesystem metadata.
+
 ## Snapshot Operations
 
 ```bash
