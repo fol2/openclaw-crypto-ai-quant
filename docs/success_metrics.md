@@ -21,6 +21,24 @@ used by the factory cycle and its operator runbooks.
 | Config evaluation (backtest) | 30 | Below this, statistical significance is insufficient to judge a config |
 | Rolling live performance | 30 | PF, win rate, Sharpe computed over a sliding window of the last 30 trades |
 
+## Role-Governed Paper Replacement
+
+Before a validated challenger can replace a deployed paper target, it must win
+the deterministic comparator for that role and clear the configured materiality
+floor in `config/factory_defaults.yaml`.
+
+| Role | Preferred shortlist | Comparator order | Default materiality floor |
+|------|---------------------|------------------|---------------------------|
+| `primary` | `efficient` | Higher total PnL, then higher profit factor, then lower drawdown | `min_total_pnl_uplift: 50.0`, `min_profit_factor_uplift: 0.0`, `max_drawdown_slack: 0.50` |
+| `fallback` | `growth` | Higher profit factor, then higher total PnL, then lower drawdown | `min_total_pnl_uplift: 0.0`, `min_profit_factor_uplift: 0.05`, `max_drawdown_slack: 0.50` |
+| `conservative` | `conservative` | Lower drawdown, then higher profit factor, then higher total PnL | `min_total_pnl_uplift: 0.0`, `min_profit_factor_uplift: 0.0`, `max_drawdown_slack: 0.25` |
+
+If the challenger loses either gate, the factory records `incumbent_holds` and
+leaves the current paper target in place. The `primary` lane may still advance
+on its own when `fallback` or `conservative` have no deployable replacement; in
+that case the report surfaces `selected_partial` / `paper_partial` rather than
+claiming a full rollout.
+
 ## Promotion Criteria (Paper to Live)
 
 ### Gate 1: Paper Minimum Run

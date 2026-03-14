@@ -50,6 +50,26 @@ live equity (including unrealised PnL) and compares each challenger against the
 currently deployed target config before any paper replacement is applied. Use
 `balance.mode: fixed` only for controlled research runs.
 
+Paper selection is now deterministic per role. `primary` prefers `efficient`
+artefacts ranked by total PnL, then profit factor, then lower drawdown;
+`fallback` prefers `growth` artefacts ranked by profit factor, then total PnL,
+then lower drawdown; `conservative` prefers `conservative` artefacts ranked by
+lower drawdown, then profit factor, then total PnL. Rank and config ID act as
+stable tie-breakers so repeated runs on the same artefacts keep the same role
+ordering.
+
+Challengers must also clear the role-specific materiality floor in
+`config/factory_defaults.yaml` before they can replace an incumbent. The
+financial-grade defaults are `primary` `+50.0` total PnL uplift with at most
+`0.50` drawdown slack, `fallback` `+0.05` profit-factor uplift with at most
+`0.50` drawdown slack, and `conservative` at most `0.25` drawdown slack.
+
+When only the `primary` lane has a deployable challenger, the factory now
+allows a truthful partial rollout instead of blocking the whole cycle. Inspect
+`reports/report.json` for `selection_stage: selected_partial`,
+`deploy_stage: paper_partial`, `step5_gate_status: partial`, and per-role
+deployment statuses such as `incumbent_holds`.
+
 The tracked service examples live under:
 
 ```bash

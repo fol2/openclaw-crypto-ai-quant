@@ -94,7 +94,25 @@ All conditions must be met:
 
 **Trigger**: Deployment to paper trading from the approved candidate set.
 
-The top 1–3 validated candidates are deployed each cycle when the release path is opened.
+The factory now performs deterministic role-governed paper selection before any
+deployment is written:
+
+- `primary` selects from the `efficient` shortlist by total PnL, then profit
+  factor, then lower drawdown
+- `fallback` selects from the `growth` shortlist by profit factor, then total
+  PnL, then lower drawdown
+- `conservative` selects from the `conservative` shortlist by lower drawdown,
+  then profit factor, then total PnL
+
+Each role also applies a materiality gate against its current incumbent before
+replacement is allowed. When a challenger fails that gate, the deployment
+decision is recorded as `incumbent_holds` and the current paper target remains
+in place.
+
+The release path no longer requires every secondary lane to have a replacement.
+If only the `primary` role has a deployable challenger, the cycle can still
+advance with `selection_stage: selected_partial` and `deploy_stage:
+paper_partial` while untouched secondary lanes keep their incumbent config.
 
 ### paper → live_small
 
