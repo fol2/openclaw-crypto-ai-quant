@@ -14,6 +14,75 @@ cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 ```
 
+### Transactional Live Apply and Rollback
+
+The Hub live control-plane now treats live apply and live rollback as
+transactional operations. It stages the candidate YAML, snapshots the incumbent
+live YAML before mutation, and reports success only after
+`aiq-runtime live service apply --json` proves that the final live daemon is:
+
+- running
+- healthy
+- matched to the current launch contract
+- on the intended materialised `config_id`
+
+If the supervised apply proof fails, the Hub restores the incumbent live YAML
+and runs a supervised recovery apply against that incumbent contract before
+returning the failure response. Depending on the recovered lane state, that
+recovery can resolve as a start, restart, or no-op. The emitted artefacts now
+record both the previous and target `config_id` values.
+
+Transactional live apply artefacts live under:
+
+```bash
+artifacts/applies/live/<timestamp>/
+```
+
+Transactional live rollback artefacts live under:
+
+```bash
+artifacts/rollbacks/live/<timestamp>/
+```
+
+Each directory contains the incumbent snapshot, the staged candidate or
+restored payload, and an `event.json` audit record with runtime apply / recovery
+proof details.
+
+Use `AI_QUANT_RUNTIME_BIN` when the Hub must call a non-default `aiq-runtime`
+binary for live apply and rollback verification subprocesses. When unset, the
+Hub falls back to `aiq-runtime` on `PATH`.
+
+Example live apply request:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $AIQ_MONITOR_ADMIN_TOKEN" \
+  -H "If-Match: $LIVE_LOCK_ID" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  http://127.0.0.1:8000/api/config/actions/apply-live \
+  --data @/tmp/apply-live.json
+```
+
+The JSON payload should contain `yaml`, an optional `reason`, and
+`restart: "auto"` or `restart: "always"`. Non-dry-run live apply no longer
+accepts `restart: "never"` because success now requires runtime proof.
+
+Example live rollback request:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $AIQ_MONITOR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  http://127.0.0.1:8000/api/config/actions/rollback-live \
+  --data '{"steps":1,"reason":"operator rollback","restart":"auto"}'
+```
+
+Read the current `LIVE_LOCK_ID` from `GET /api/config/raw?file=live` before an
+apply request. The response exposes the raw-text lock boundary through
+`x-aiq-config-lock-id` and `ETag`.
+
 ## Snapshot Operations
 
 ```bash

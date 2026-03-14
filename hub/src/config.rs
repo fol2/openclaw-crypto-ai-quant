@@ -72,6 +72,8 @@ pub struct HubConfig {
     pub live_yaml_path: PathBuf,
     /// Live service name used for rollback auto-restart.
     pub live_service: String,
+    /// Runtime binary used for live apply/status verification subprocesses.
+    pub runtime_bin: PathBuf,
     /// Explicit runtime policy gate for factory execution surfaces.
     pub factory_enabled: bool,
     /// Path to the factory executor binary.
@@ -335,6 +337,7 @@ impl HubConfig {
                     .unwrap_or("config/strategy_overrides.live.yaml"),
             ),
             live_service: env_str("AIQ_MONITOR_LIVE_SERVICE", "openclaw-ai-quant-live-v8"),
+            runtime_bin: env_path("AI_QUANT_RUNTIME_BIN", "aiq-runtime"),
             factory_enabled: env_bool("AI_QUANT_FACTORY_ENABLE", false),
             factory_bin: env_path(
                 "AIQ_FACTORY_BIN",
