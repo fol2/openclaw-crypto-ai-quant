@@ -79,6 +79,15 @@ fn close_param_fingerprint(body: &TradeCloseBody) -> String {
     })
 }
 
+fn should_apply_manual_submission_guards(
+    preflight: manual_trade::ManualExecutionPreflight,
+) -> bool {
+    matches!(
+        preflight,
+        manual_trade::ManualExecutionPreflight::NewSubmission
+    )
+}
+
 async fn check_rate_limit(
     state: &AppState,
     symbol: &str,
@@ -238,9 +247,6 @@ async fn trade_execute(
     Json(body): Json<TradeOpenBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    ensure_live_orders_enabled(&state, &body.symbol, "OPEN").await?;
-    check_manual_order_risk(&state, &body.symbol, OrderAction::Open, false, "OPEN").await?;
-    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
         side: body.side,
@@ -253,8 +259,27 @@ async fn trade_execute(
         .confirm_token
         .as_deref()
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
-    check_rate_limit(&state, &request.symbol, Some(token)).await?;
     let param_hash = manual_trade::open_request_hash(&request);
+    let config = state.config.clone();
+    let preflight_request = request.clone();
+    let preflight_token = token.to_string();
+    let preflight_hash = param_hash.clone();
+    let preflight = tokio::task::spawn_blocking(move || {
+        manual_trade::preflight_open_execution(
+            &config,
+            &preflight_request,
+            &preflight_token,
+            &preflight_hash,
+        )
+    })
+    .await
+    .map_err(|error| HubError::Internal(format!("execute preflight task failed: {error}")))??;
+    if should_apply_manual_submission_guards(preflight) {
+        ensure_live_orders_enabled(&state, &request.symbol, "OPEN").await?;
+        check_manual_order_risk(&state, &request.symbol, OrderAction::Open, false, "OPEN").await?;
+        check_rate_limit(&state, &request.symbol, Some(token)).await?;
+    }
+    let symbol = request.symbol.clone();
     let config = state.config.clone();
     let token = token.to_string();
     let result = tokio::task::spawn_blocking(move || {
@@ -303,9 +328,6 @@ async fn trade_close(
         return Ok(Json(payload));
     }
 
-    ensure_live_orders_enabled(&state, &body.symbol, "CLOSE").await?;
-    check_manual_order_risk(&state, &body.symbol, OrderAction::Close, true, "CLOSE").await?;
-    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeCloseRequest {
         symbol: body.symbol,
         close_pct: body.close_pct,
@@ -319,6 +341,25 @@ async fn trade_close(
         .as_deref()
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?
         .to_string();
+    let preflight_request = request.clone();
+    let preflight_token = token.clone();
+    let preflight_hash = hash.clone();
+    let preflight_config = config.clone();
+    let preflight = tokio::task::spawn_blocking(move || {
+        manual_trade::preflight_close_execution(
+            &preflight_config,
+            &preflight_request,
+            &preflight_token,
+            &preflight_hash,
+        )
+    })
+    .await
+    .map_err(|error| HubError::Internal(format!("close preflight task failed: {error}")))??;
+    if should_apply_manual_submission_guards(preflight) {
+        ensure_live_orders_enabled(&state, &request.symbol, "CLOSE").await?;
+        check_manual_order_risk(&state, &request.symbol, OrderAction::Close, true, "CLOSE").await?;
+    }
+    let symbol = request.symbol.clone();
     let result = tokio::task::spawn_blocking(move || {
         manual_trade::execute_close(&config, &request, &token, &hash)
     })
@@ -335,14 +376,24 @@ async fn trade_cancel(
     Json(body): Json<TradeCancelBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    ensure_live_orders_enabled(&state, &body.symbol, "CANCEL").await?;
-    check_manual_cancel_risk(&state, &body.symbol).await?;
     let config = state.config.clone();
     let request = manual_trade::ManualTradeCancelRequest {
         symbol: body.symbol,
         oid: body.oid,
         intent_id: body.intent_id,
     };
+    let preflight_config = config.clone();
+    let preflight_request = request.clone();
+    let preflight = tokio::task::spawn_blocking(move || {
+        manual_trade::preflight_cancel_retry(&preflight_config, &preflight_request)
+    })
+    .await
+    .map_err(|error| HubError::Internal(format!("cancel preflight task failed: {error}")))??;
+    if let Some(existing) = preflight {
+        return Ok(Json(existing));
+    }
+    ensure_live_orders_enabled(&state, &request.symbol, "CANCEL").await?;
+    check_manual_cancel_risk(&state, &request.symbol).await?;
     let result = tokio::task::spawn_blocking(move || manual_trade::cancel_order(&config, &request))
         .await
         .map_err(|error| HubError::Internal(format!("cancel task failed: {error}")))??;
@@ -448,5 +499,18 @@ mod tests {
         };
 
         assert_eq!(close_param_fingerprint(&a), close_param_fingerprint(&b));
+    }
+
+    #[test]
+    fn submission_guards_only_apply_to_fresh_manual_submissions() {
+        assert!(should_apply_manual_submission_guards(
+            manual_trade::ManualExecutionPreflight::NewSubmission
+        ));
+        assert!(!should_apply_manual_submission_guards(
+            manual_trade::ManualExecutionPreflight::ExistingPendingSubmission
+        ));
+        assert!(!should_apply_manual_submission_guards(
+            manual_trade::ManualExecutionPreflight::ExistingCommittedIntent
+        ));
     }
 }
