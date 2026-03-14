@@ -319,6 +319,62 @@ The example timers are intentionally staggered: the nightly timer stays at
 `00:50 UTC`, while the deep weekly timer runs at `02:10 UTC` on Sundays so the
 two schedules cannot collide by calendar design.
 
+## Live DB Sync
+
+Use the Rust live fill sync command when Hyperliquid fills must be reconciled
+back into the local live SQLite ledger, including fills created outside this
+repo.
+
+Manual one-shot run:
+
+```bash
+cargo run -p aiq-runtime -- live sync-fills --project-dir "$PWD" --json
+```
+
+The command stores a cursor in the live DB and replays a small overlap window
+on each run so it can safely run under an hourly timer. For deeper backfills,
+override the window explicitly:
+
+```bash
+cargo run -p aiq-runtime -- live sync-fills --project-dir "$PWD" --start-ms 1771126743410 --end-ms 1773401649000 --json
+```
+
+The command fails closed when it encounters unsupported fill shapes. Treat a
+failed hourly run as an operator action item: inspect the emitted warnings
+before trusting the local ledger again.
+
+The tracked service examples live under:
+
+```bash
+systemd/openclaw-ai-quant-live-db-sync-v8.service.example
+systemd/openclaw-ai-quant-live-db-sync-v8.timer.example
+```
+
+Typical install flow:
+
+```bash
+cargo build --release --manifest-path runtime/aiq-runtime/Cargo.toml
+install -d "$HOME/.config/systemd/user"
+sed "s|\$PROJECT_DIR|$PWD|g" \
+  "$PWD/systemd/openclaw-ai-quant-live-db-sync-v8.service.example" \
+  > "$HOME/.config/systemd/user/openclaw-ai-quant-live-db-sync-v8.service"
+install -D -m 0644 "$PWD/systemd/openclaw-ai-quant-live-db-sync-v8.timer.example" \
+  "$HOME/.config/systemd/user/openclaw-ai-quant-live-db-sync-v8.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now openclaw-ai-quant-live-db-sync-v8.timer
+journalctl --user -u openclaw-ai-quant-live-db-sync-v8.service -f
+```
+
+The example service reads `ai-quant-v8.env` plus `ai-quant-live-v8.env`, then
+uses the Rust `live sync-fills` cursor contract to auto-check and auto-sync the
+ledger every hour.
+
+Service-level tuning knobs:
+
+- `AI_QUANT_LIVE_FILL_SYNC_LOOKBACK_HOURS`: fallback scan window when no cursor exists yet.
+- `AI_QUANT_LIVE_FILL_SYNC_OVERLAP_MINUTES`: overlap replay window for safe hourly re-checks.
+- `AI_QUANT_LIVE_FILL_SYNC_CURSOR_KEY`: cursor namespace stored in `runtime_sync_cursors`.
+
 ## Diagnostics
 
 ```bash

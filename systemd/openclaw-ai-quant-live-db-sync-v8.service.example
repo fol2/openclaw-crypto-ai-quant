@@ -1,0 +1,40 @@
+[Unit]
+Description=OpenClaw AI Quant Live DB Sync from Hyperliquid (v8)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=oneshot
+# Render $PROJECT_DIR to the absolute checkout path before installing this example.
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-live-v8.env
+Environment=AI_QUANT_LIVE_FILL_SYNC_LOOKBACK_HOURS=168
+Environment=AI_QUANT_LIVE_FILL_SYNC_OVERLAP_MINUTES=10
+Environment=AI_QUANT_LIVE_FILL_SYNC_CURSOR_KEY=hyperliquid_fill_sync_v1
+ExecStart=$PROJECT_DIR/target/release/aiq-runtime live sync-fills --project-dir $PROJECT_DIR --lookback-hours $AI_QUANT_LIVE_FILL_SYNC_LOOKBACK_HOURS --overlap-minutes $AI_QUANT_LIVE_FILL_SYNC_OVERLAP_MINUTES --cursor-key $AI_QUANT_LIVE_FILL_SYNC_CURSOR_KEY --json
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+ReadWritePaths=$PROJECT_DIR
+
+# Resource limits
+MemoryMax=256M
+TasksMax=256
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

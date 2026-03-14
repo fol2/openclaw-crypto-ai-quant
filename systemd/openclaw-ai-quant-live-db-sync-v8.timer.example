@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenClaw AI Quant Live DB Sync Timer (v8)
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=1h
+Persistent=true
+Unit=openclaw-ai-quant-live-db-sync-v8.service
+
+[Install]
+WantedBy=timers.target

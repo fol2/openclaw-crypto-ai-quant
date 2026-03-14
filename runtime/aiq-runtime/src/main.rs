@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 mod live_cycle;
 #[allow(dead_code)]
 mod live_daemon;
+mod live_fill_sync;
 mod live_hyperliquid;
 mod live_lane;
 mod live_manifest;
@@ -293,6 +294,46 @@ struct LiveDaemonArgs {
     json: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct LiveSyncFillsArgs {
+    /// Optional YAML config path override. Falls back to the conventional live config path.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Optional live DB override. Falls back to AI_QUANT_DB_PATH or the conventional live DB path.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Optional live secrets path. Falls back to AI_QUANT_SECRETS_PATH or ~/.config/openclaw/ai-quant-secrets.json.
+    #[arg(long)]
+    secrets_path: Option<PathBuf>,
+    /// Explicit sync window start in epoch milliseconds. Overrides the stored cursor when set.
+    #[arg(long)]
+    start_ms: Option<i64>,
+    /// Explicit sync window end in epoch milliseconds. Defaults to now when omitted.
+    #[arg(long)]
+    end_ms: Option<i64>,
+    /// Fallback lookback window, in hours, when no stored cursor exists.
+    #[arg(long, default_value_t = 168)]
+    lookback_hours: i64,
+    /// Cursor overlap, in minutes, to safely re-scan recent fills on each run.
+    #[arg(long, default_value_t = 10)]
+    overlap_minutes: i64,
+    /// Cursor key used for persisted live fill sync checkpoints.
+    #[arg(long, default_value = "hyperliquid_fill_sync_v1")]
+    cursor_key: String,
+    /// Apply the sync against a temporary DB copy and discard changes afterwards.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModeArg {
     Live,
@@ -370,6 +411,8 @@ enum LiveCommand {
     Manifest(LiveManifestArgs),
     /// Resolve the current Rust live daemon service state from the launch contract plus status file.
     Status(LiveStatusArgs),
+    /// Reconcile Hyperliquid fills back into the local live DB for automated sync/backfill.
+    SyncFills(LiveSyncFillsArgs),
     /// Resolve or apply the Rust live daemon supervisor contract.
     Service {
         #[command(subcommand)]
@@ -1707,6 +1750,62 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 );
             }
         }
+        LiveCommand::SyncFills(args) => {
+            let manifest = live_manifest::build_manifest(live_manifest::LiveManifestInput {
+                config: args.config.as_deref(),
+                project_dir: args.project_dir.as_deref(),
+                profile: args.profile.as_deref(),
+                db: args.db.as_deref(),
+                market_db: None,
+                candles_db: None,
+                symbols: &[],
+                symbols_file: None,
+                btc_symbol: "BTC",
+                secrets_path: args.secrets_path.as_deref(),
+                lock_path: None,
+                status_path: None,
+                lookback_bars: None,
+            })?;
+            let report = live_fill_sync::run_sync(live_fill_sync::LiveFillSyncInput {
+                live_db: Path::new(&manifest.live_db),
+                secrets_path: Path::new(&manifest.secrets_path),
+                start_ms: args.start_ms,
+                end_ms: args.end_ms,
+                lookback_hours: args.lookback_hours,
+                overlap_minutes: args.overlap_minutes,
+                cursor_key: Some(args.cursor_key.as_str()),
+                dry_run: args.dry_run,
+            })?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "live sync-fills ok: window={}..{} fetched={} supported={} inserted_oms_fills={} inserted_trades={} backfilled_existing_trades={} manual_intents={} dry_run={}",
+                    report.window.start_ms,
+                    report.window.end_ms,
+                    report.fetched_remote_fills,
+                    report.supported_remote_fills,
+                    report.inserted_oms_fills,
+                    report.inserted_trades,
+                    report.backfilled_existing_trades,
+                    report.inserted_manual_intents,
+                    report.dry_run,
+                );
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+            }
+
+            if !report.ok {
+                anyhow::bail!(
+                    "live fill sync found unsupported fills; inspect the warnings before relying on the ledger"
+                );
+            }
+        }
         LiveCommand::Service { command } => match command {
             LiveServiceCommand::Inspect(args) => {
                 let report = live_service::build_service(live_service::LiveServiceInput {
@@ -1938,6 +2037,30 @@ mod tests {
             Command::Live {
                 command: LiveCommand::Status(args),
             } => assert!(args.manifest.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_sync_fills_surface() {
+        let cli = Cli::try_parse_from([
+            "aiq-runtime",
+            "live",
+            "sync-fills",
+            "--project-dir",
+            "/tmp/project",
+            "--dry-run",
+            "--json",
+        ])
+        .expect("live sync-fills should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::SyncFills(args),
+            } => {
+                assert!(args.dry_run);
+                assert!(args.json);
+                assert_eq!(args.project_dir, Some(PathBuf::from("/tmp/project")));
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
