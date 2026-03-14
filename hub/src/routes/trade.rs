@@ -5,8 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha3::Digest;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -61,29 +60,39 @@ fn require_trade_enabled(state: &AppState) -> Result<(), HubError> {
     Ok(())
 }
 
-fn open_param_hash(body: &TradeOpenBody) -> String {
-    let mut hasher = DefaultHasher::new();
-    body.symbol.hash(&mut hasher);
-    body.side.hash(&mut hasher);
-    body.notional_usd.to_bits().hash(&mut hasher);
-    body.leverage.hash(&mut hasher);
-    body.order_type.hash(&mut hasher);
-    body.limit_price
-        .map(|price| price.to_bits())
-        .hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+fn encode_f64_bits(value: f64) -> String {
+    format!("{:016x}", value.to_bits())
 }
 
-fn close_param_hash(body: &TradeCloseBody) -> String {
-    let mut hasher = DefaultHasher::new();
-    "close".hash(&mut hasher);
-    body.symbol.hash(&mut hasher);
-    body.close_pct.to_bits().hash(&mut hasher);
-    body.order_type.hash(&mut hasher);
-    body.limit_price
-        .map(|price| price.to_bits())
-        .hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+fn encode_optional_f64_bits(value: Option<f64>) -> Option<String> {
+    value.map(encode_f64_bits)
+}
+
+fn param_fingerprint(payload: Value) -> String {
+    let digest = sha3::Sha3_256::digest(payload.to_string().as_bytes());
+    hex::encode(digest)
+}
+
+fn open_param_fingerprint(body: &TradeOpenBody) -> String {
+    param_fingerprint(json!({
+        "kind": "open",
+        "symbol": body.symbol.trim().to_ascii_uppercase(),
+        "side": body.side.trim().to_ascii_uppercase(),
+        "notional_usd_bits": encode_f64_bits(body.notional_usd),
+        "leverage": body.leverage,
+        "order_type": body.order_type.trim().to_ascii_lowercase(),
+        "limit_price_bits": encode_optional_f64_bits(body.limit_price),
+    }))
+}
+
+fn close_param_fingerprint(body: &TradeCloseBody) -> String {
+    param_fingerprint(json!({
+        "kind": "close",
+        "symbol": body.symbol.trim().to_ascii_uppercase(),
+        "close_pct_bits": encode_f64_bits(body.close_pct),
+        "order_type": body.order_type.trim().to_ascii_lowercase(),
+        "limit_price_bits": encode_optional_f64_bits(body.limit_price),
+    }))
 }
 
 async fn check_rate_limit(
@@ -214,7 +223,7 @@ async fn trade_preview(
     Json(body): Json<TradeOpenBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let param_hash = open_param_hash(&body);
+    let param_fingerprint = open_param_fingerprint(&body);
     let config = state.config.clone();
     let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
@@ -227,8 +236,13 @@ async fn trade_preview(
     };
     let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
         let preview = manual_trade::preview_open(&config, &request)?;
-        let confirm_token =
-            manual_trade::issue_confirm_token(&config, "OPEN", &param_hash, &symbol, &preview)?;
+        let confirm_token = manual_trade::issue_confirm_token(
+            &config,
+            "OPEN",
+            &param_fingerprint,
+            &symbol,
+            &preview,
+        )?;
         Ok::<_, HubError>((preview, confirm_token))
     })
     .await
@@ -252,7 +266,7 @@ async fn trade_execute(
         .as_deref()
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
     check_rate_limit(&state, &body.symbol, Some(token)).await?;
-    let param_hash = open_param_hash(&body);
+    let param_fingerprint = open_param_fingerprint(&body);
 
     let config = state.config.clone();
     let symbol = body.symbol.clone();
@@ -266,7 +280,7 @@ async fn trade_execute(
     };
     let token = token.to_string();
     let result = tokio::task::spawn_blocking(move || {
-        manual_trade::execute_open(&config, &request, &token, &param_hash)
+        manual_trade::execute_open(&config, &request, &token, &param_fingerprint)
     })
     .await
     .map_err(|error| HubError::Internal(format!("execute task failed: {error}")))??;
@@ -281,12 +295,12 @@ async fn trade_close(
     Json(body): Json<TradeCloseBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let hash = close_param_hash(&body);
+    let fingerprint = close_param_fingerprint(&body);
 
     if body.confirm_token.is_none() {
         let config = state.config.clone();
         let symbol = body.symbol.clone();
-        let hash_for_preview = hash.clone();
+        let fingerprint_for_preview = fingerprint.clone();
         let request = manual_trade::ManualTradeCloseRequest {
             symbol: body.symbol,
             close_pct: body.close_pct,
@@ -298,7 +312,7 @@ async fn trade_close(
             let confirm_token = manual_trade::issue_confirm_token(
                 &config,
                 "CLOSE",
-                &hash_for_preview,
+                &fingerprint_for_preview,
                 &symbol,
                 &preview,
             )?;
@@ -329,7 +343,7 @@ async fn trade_close(
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?
         .to_string();
     let result = tokio::task::spawn_blocking(move || {
-        manual_trade::execute_close(&config, &request, &token, &hash)
+        manual_trade::execute_close(&config, &request, &token, &fingerprint)
     })
     .await
     .map_err(|error| HubError::Internal(format!("close task failed: {error}")))??;
@@ -374,4 +388,83 @@ async fn trade_result(Path(id): Path<String>) -> Result<Json<Value>, HubError> {
     Err(HubError::NotFound(format!(
         "job {id} not found (rust-native manual trade executes synchronously)"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_param_fingerprint_normalises_case_and_spacing() {
+        let a = TradeOpenBody {
+            symbol: " eth ".to_string(),
+            side: " sell ".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: " MARKET ".to_string(),
+            limit_price: None,
+            confirm_token: None,
+        };
+        let b = TradeOpenBody {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: "market".to_string(),
+            limit_price: None,
+            confirm_token: None,
+        };
+
+        assert_eq!(open_param_fingerprint(&a), open_param_fingerprint(&b));
+    }
+
+    #[test]
+    fn open_param_fingerprint_changes_when_limit_price_changes() {
+        let base = TradeOpenBody {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: "limit_gtc".to_string(),
+            limit_price: Some(2100.5),
+            confirm_token: None,
+        };
+        let changed = TradeOpenBody {
+            limit_price: Some(2100.6),
+            ..base
+        };
+
+        assert_ne!(
+            open_param_fingerprint(&TradeOpenBody {
+                symbol: "ETH".to_string(),
+                side: "SELL".to_string(),
+                notional_usd: 500.0,
+                leverage: 10,
+                order_type: "limit_gtc".to_string(),
+                limit_price: Some(2100.5),
+                confirm_token: None,
+            }),
+            open_param_fingerprint(&changed)
+        );
+    }
+
+    #[test]
+    fn close_param_fingerprint_normalises_case_and_spacing() {
+        let a = TradeCloseBody {
+            symbol: " hype ".to_string(),
+            close_pct: 25.0,
+            order_type: " LIMIT_IOC ".to_string(),
+            limit_price: Some(35.5),
+            confirm_token: None,
+        };
+        let b = TradeCloseBody {
+            symbol: "HYPE".to_string(),
+            close_pct: 25.0,
+            order_type: "limit_ioc".to_string(),
+            limit_price: Some(35.5),
+            confirm_token: None,
+        };
+
+        assert_eq!(close_param_fingerprint(&a), close_param_fingerprint(&b));
+    }
 }
