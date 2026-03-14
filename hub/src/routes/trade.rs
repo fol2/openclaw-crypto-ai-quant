@@ -5,8 +5,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -59,31 +57,6 @@ fn require_trade_enabled(state: &AppState) -> Result<(), HubError> {
     Ok(())
 }
 
-fn open_param_hash(body: &TradeOpenBody) -> String {
-    let mut hasher = DefaultHasher::new();
-    body.symbol.hash(&mut hasher);
-    body.side.hash(&mut hasher);
-    body.notional_usd.to_bits().hash(&mut hasher);
-    body.leverage.hash(&mut hasher);
-    body.order_type.hash(&mut hasher);
-    body.limit_price
-        .map(|price| price.to_bits())
-        .hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}
-
-fn close_param_hash(body: &TradeCloseBody) -> String {
-    let mut hasher = DefaultHasher::new();
-    "close".hash(&mut hasher);
-    body.symbol.hash(&mut hasher);
-    body.close_pct.to_bits().hash(&mut hasher);
-    body.order_type.hash(&mut hasher);
-    body.limit_price
-        .map(|price| price.to_bits())
-        .hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}
-
 async fn check_rate_limit(
     state: &AppState,
     symbol: &str,
@@ -118,9 +91,6 @@ async fn trade_preview(
     Json(body): Json<TradeOpenBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let param_hash = open_param_hash(&body);
-    let config = state.config.clone();
-    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
         side: body.side,
@@ -129,6 +99,9 @@ async fn trade_preview(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
+    let param_hash = manual_trade::open_request_hash(&request);
+    let config = state.config.clone();
+    let symbol = request.symbol.clone();
     let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
         let preview = manual_trade::preview_open(&config, &request)?;
         let confirm_token =
@@ -149,14 +122,6 @@ async fn trade_execute(
     Json(body): Json<TradeOpenBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let token = body
-        .confirm_token
-        .as_deref()
-        .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
-    check_rate_limit(&state, &body.symbol, Some(token)).await?;
-    let param_hash = open_param_hash(&body);
-
-    let config = state.config.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
         side: body.side,
@@ -165,6 +130,13 @@ async fn trade_execute(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
+    let token = body
+        .confirm_token
+        .as_deref()
+        .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
+    check_rate_limit(&state, &request.symbol, Some(token)).await?;
+    let param_hash = manual_trade::open_request_hash(&request);
+    let config = state.config.clone();
     let token = token.to_string();
     let result = tokio::task::spawn_blocking(move || {
         manual_trade::execute_open(&config, &request, &token, &param_hash)
@@ -179,18 +151,17 @@ async fn trade_close(
     Json(body): Json<TradeCloseBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let hash = close_param_hash(&body);
 
     if body.confirm_token.is_none() {
-        let config = state.config.clone();
-        let symbol = body.symbol.clone();
-        let hash_for_preview = hash.clone();
         let request = manual_trade::ManualTradeCloseRequest {
             symbol: body.symbol,
             close_pct: body.close_pct,
             order_type: body.order_type,
             limit_price: body.limit_price,
         };
+        let hash_for_preview = manual_trade::close_request_hash(&request);
+        let config = state.config.clone();
+        let symbol = request.symbol.clone();
         let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
             let preview = manual_trade::preview_close(&config, &request)?;
             let confirm_token = manual_trade::issue_confirm_token(
@@ -211,13 +182,14 @@ async fn trade_close(
         return Ok(Json(payload));
     }
 
-    let config = state.config.clone();
     let request = manual_trade::ManualTradeCloseRequest {
         symbol: body.symbol,
         close_pct: body.close_pct,
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
+    let hash = manual_trade::close_request_hash(&request);
+    let config = state.config.clone();
     let token = body
         .confirm_token
         .as_deref()
