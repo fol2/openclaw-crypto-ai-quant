@@ -254,7 +254,8 @@ enum ManualExecutionClaim {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualExecutionPreflight {
     NewSubmission,
-    ExistingIntent,
+    ExistingPendingSubmission,
+    ExistingCommittedIntent,
 }
 
 pub fn preview_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result<Value, HubError> {
@@ -3301,8 +3302,9 @@ where
     if let Some(existing) = load_existing_manual_intent_by_dedupe_key(conn, confirm_token)? {
         if should_resume_existing_manual_submission(&existing) {
             validate_existing(&existing)?;
+            return Ok(ManualExecutionPreflight::ExistingPendingSubmission);
         }
-        return Ok(ManualExecutionPreflight::ExistingIntent);
+        return Ok(ManualExecutionPreflight::ExistingCommittedIntent);
     }
 
     validate_manual_confirmation(
@@ -5224,7 +5226,7 @@ mod tests {
     }
 
     #[test]
-    fn open_execution_preflight_treats_matching_new_intent_as_existing_retry() {
+    fn open_execution_preflight_marks_matching_new_intent_as_pending_submission() {
         let db = NamedTempFile::new().unwrap();
         let cfg = HubConfig {
             live_db: db.path().to_path_buf(),
@@ -5278,7 +5280,56 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome, ManualExecutionPreflight::ExistingIntent);
+        assert_eq!(outcome, ManualExecutionPreflight::ExistingPendingSubmission);
+    }
+
+    #[test]
+    fn open_execution_preflight_marks_sent_intent_as_committed_retry() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id: "manual_retry_open_sent",
+                created_ts_ms: 1_773_500_000_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "SENT",
+                dedupe_key: Some("confirm-open-sent"),
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let outcome = preflight_open_execution(
+            &cfg,
+            &ManualTradeOpenRequest {
+                symbol: "ETH".to_string(),
+                side: "BUY".to_string(),
+                notional_usd: 999.0,
+                leverage: 5,
+                order_type: "market".to_string(),
+                limit_price: None,
+            },
+            "confirm-open-sent",
+            "unused_hash_for_existing_retry",
+        )
+        .unwrap();
+
+        assert_eq!(outcome, ManualExecutionPreflight::ExistingCommittedIntent);
     }
 
     #[test]

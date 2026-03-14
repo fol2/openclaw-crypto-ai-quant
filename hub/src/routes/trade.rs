@@ -79,6 +79,15 @@ fn close_param_fingerprint(body: &TradeCloseBody) -> String {
     })
 }
 
+fn should_apply_manual_submission_guards(
+    preflight: manual_trade::ManualExecutionPreflight,
+) -> bool {
+    matches!(
+        preflight,
+        manual_trade::ManualExecutionPreflight::NewSubmission
+    )
+}
+
 async fn check_rate_limit(
     state: &AppState,
     symbol: &str,
@@ -265,10 +274,7 @@ async fn trade_execute(
     })
     .await
     .map_err(|error| HubError::Internal(format!("execute preflight task failed: {error}")))??;
-    if matches!(
-        preflight,
-        manual_trade::ManualExecutionPreflight::NewSubmission
-    ) {
+    if should_apply_manual_submission_guards(preflight) {
         ensure_live_orders_enabled(&state, &request.symbol, "OPEN").await?;
         check_manual_order_risk(&state, &request.symbol, OrderAction::Open, false, "OPEN").await?;
         check_rate_limit(&state, &request.symbol, Some(token)).await?;
@@ -349,10 +355,7 @@ async fn trade_close(
     })
     .await
     .map_err(|error| HubError::Internal(format!("close preflight task failed: {error}")))??;
-    if matches!(
-        preflight,
-        manual_trade::ManualExecutionPreflight::NewSubmission
-    ) {
+    if should_apply_manual_submission_guards(preflight) {
         ensure_live_orders_enabled(&state, &request.symbol, "CLOSE").await?;
         check_manual_order_risk(&state, &request.symbol, OrderAction::Close, true, "CLOSE").await?;
     }
@@ -496,5 +499,18 @@ mod tests {
         };
 
         assert_eq!(close_param_fingerprint(&a), close_param_fingerprint(&b));
+    }
+
+    #[test]
+    fn submission_guards_only_apply_to_fresh_manual_submissions() {
+        assert!(should_apply_manual_submission_guards(
+            manual_trade::ManualExecutionPreflight::NewSubmission
+        ));
+        assert!(!should_apply_manual_submission_guards(
+            manual_trade::ManualExecutionPreflight::ExistingPendingSubmission
+        ));
+        assert!(!should_apply_manual_submission_guards(
+            manual_trade::ManualExecutionPreflight::ExistingCommittedIntent
+        ));
     }
 }
