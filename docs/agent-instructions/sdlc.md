@@ -48,6 +48,10 @@ review flow, merge sequencing, or cleanup duties.
   doc structure when the current layout hides or duplicates the new contract.
 - Reviewers should receive the post-doc state so they assess the complete PR,
   not code plus stale docs.
+- When an active plan is fully complete on `master`, close it out in a final
+  docs PR or in the finishing PR itself: update its status/progress, move it to
+  `plans/archived/` when appropriate, and refresh any active/archived plan
+  indexes in the same atomic change.
 
 ## Safety Rules
 

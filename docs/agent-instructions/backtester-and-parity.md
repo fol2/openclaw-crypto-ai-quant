@@ -31,9 +31,18 @@ cargo run --manifest-path backtester/Cargo.toml -p bt-cli -- dump-indicators
 
 - Keep compared backtests on identical date ranges across intervals.
 - Always query actual DB coverage; do not assume fixed history windows.
+- Backtester `start-ts` and `end-ts` are inclusive. When splitting train vs
+  holdout windows or any other adjacent replay ranges, make the earlier window
+  end before the later window starts so the boundary bar cannot leak into both.
 - Rust indicator outputs must match Python `ta` within `0.00005` absolute
   error.
 - Validate indicator changes with `dump-indicators` against Python `ta`.
+- For strict CPU/GPU parity on factory-owned sweep flows, prefer
+  `--parity-mode identical-symbol-universe` so symbol-cap truncation does not
+  create noisy mismatches.
+- When changing factory validation or artefact contracts, add or update an
+  end-to-end test that asserts `run_metadata.json`, candidate validation rows,
+  and referenced holdout/parity artefacts stay consistent.
 
 See also:
 

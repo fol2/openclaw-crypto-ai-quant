@@ -41,3 +41,10 @@ The main systemd user services are:
 - Treat the production profile as the default live profile.
 - Use runtime manifests, effective config, and pipeline inspection before making
   assumptions about live state.
+- Keep factory timer cadences non-racing by schedule design; do not rely on the
+  global factory lock as the primary collision-avoidance mechanism for
+  `daily` vs `deep` runs.
+- Treat deployment-enabled factory modes as fail-closed: if deployment,
+  selection, profile, validation, or live-governance settings are missing or
+  incomplete, fix the settings contract instead of falling back to permissive
+  defaults.
