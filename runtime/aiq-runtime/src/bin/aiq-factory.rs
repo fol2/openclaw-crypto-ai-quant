@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use bt_core::accounting::funding_delta;
 use bt_core::config::{
     load_config_document_checked, materialise_runtime_document, strategy_config_fingerprint_sha256,
     strategy_config_to_yaml_value, StrategyConfig,
@@ -9,7 +10,7 @@ use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs2::FileExt;
 use reqwest::blocking::Client;
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -638,7 +639,13 @@ struct PaperPromotionGate {
     close_trades: u32,
     profit_factor: f64,
     max_drawdown_pct: f64,
-    slippage_pnl_at_reject_bps: f64,
+    median_slippage_bps: f64,
+    max_slippage_bps: f64,
+    rejection_rate: f64,
+    p95_cycle_latency_ms: i64,
+    max_cycle_latency_ms: i64,
+    net_funding_pnl_usd: f64,
+    equity_points: u32,
     kill_switch_events: u32,
     thresholds: PaperPromotionThresholds,
     blocked_reasons: Vec<String>,
@@ -650,7 +657,10 @@ struct PaperPromotionThresholds {
     min_close_trades: u32,
     min_profit_factor: f64,
     max_drawdown_pct: f64,
-    require_positive_slippage_pnl: bool,
+    max_median_slippage_bps: f64,
+    max_rejection_rate: f64,
+    max_p95_cycle_latency_ms: i64,
+    max_funding_drag_usd: f64,
     require_zero_kill_switch_events: bool,
 }
 
@@ -672,6 +682,12 @@ struct PaperSoakMarker {
 #[derive(Debug, Clone)]
 struct TargetSnapshot {
     target_yaml_path: PathBuf,
+    original_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct MarkerSnapshot {
+    marker_path: PathBuf,
     original_bytes: Option<Vec<u8>>,
 }
 
@@ -845,6 +861,31 @@ struct MaterialisedRoleConfig {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PaperRuntimeMetricRow {
+    cycle_latency_ms: i64,
+    intent_count: u32,
+    rejected_intent_count: u32,
+    median_slippage_bps: f64,
+    max_slippage_bps: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PaperEquityPoint {
+    step_close_ts_ms: i64,
+    equity_est_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PaperTradeEvidenceRow {
+    ts_ms: i64,
+    symbol: String,
+    action: String,
+    position_type: String,
+    price: f64,
+    size: f64,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -996,6 +1037,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
                         if settings.deployment.apply_to_live {
                             match assess_primary_paper_promotion_gate(
                                 &paths.project_dir,
+                                &paths.funding_db_path,
                                 &settings.selection,
                                 &validated,
                                 &selected,
@@ -2693,6 +2735,7 @@ fn validate_factory_defaults(settings: &FactoryDefaults) -> Result<()> {
 
 fn assess_primary_paper_promotion_gate(
     project_dir: &Path,
+    funding_db_path: &Path,
     selection: &SelectionSettings,
     validated: &[ValidationItem],
     selected: &[SelectionCandidate],
@@ -2762,8 +2805,21 @@ fn assess_primary_paper_promotion_gate(
             )],
         ));
     }
+    let current_target_id =
+        current_target_config_id(target_yaml_path.as_path(), target.role.as_str())?;
+    if current_target_id.as_deref() != Some(primary_candidate.config_id.as_str()) {
+        return Ok(blocked_paper_promotion_gate(
+            &paper_db_path,
+            primary_candidate,
+            vec![format!(
+                "paper target fingerprint for role `{}` no longer matches selected config {}",
+                target.role, primary_candidate.config_id
+            )],
+        ));
+    }
     assess_paper_promotion_gate(
         &paper_db_path,
+        funding_db_path,
         primary_candidate,
         Some(marker.deployed_at_ms),
     )
@@ -2771,12 +2827,15 @@ fn assess_primary_paper_promotion_gate(
 
 fn assess_paper_promotion_gate(
     paper_db_path: &Path,
+    funding_db_path: &Path,
     candidate: &ValidationItem,
     deployed_after_ms: Option<i64>,
 ) -> Result<PaperPromotionGate> {
     let conn = Connection::open(paper_db_path)
         .with_context(|| format!("open paper DB {}", paper_db_path.display()))?;
     let config_fingerprint = candidate.config_id.clone();
+    let metrics = load_paper_runtime_metrics(&conn, &config_fingerprint, deployed_after_ms)?;
+    let equity_points = load_paper_equity_points(&conn, &config_fingerprint, deployed_after_ms)?;
 
     let mut stmt = conn.prepare(
         "SELECT DISTINCT t.id, t.timestamp, t.action, COALESCE(t.pnl, 0.0), COALESCE(t.fee_usd, 0.0), COALESCE(t.balance, 0.0), COALESCE(d.run_fingerprint, '')
@@ -2793,16 +2852,11 @@ fn assess_paper_promotion_gate(
     let mut close_trades = 0u32;
     let mut gross_profit = 0.0f64;
     let mut gross_loss = 0.0f64;
-    let mut peak_balance: Option<f64> = None;
-    let mut max_drawdown_pct = 0.0f64;
-    let mut evidence_runs = HashSet::new();
     while let Some(row) = rows.next()? {
         let timestamp: String = row.get(1)?;
         let action: String = row.get(2)?;
         let pnl: f64 = row.get(3)?;
         let fee_usd: f64 = row.get(4)?;
-        let balance: f64 = row.get(5)?;
-        let run_fingerprint: String = row.get(6)?;
         let ts_ms = parse_trade_timestamp_ms(&timestamp);
         if let Some(anchor_ms) = deployed_after_ms {
             let Some(trade_ms) = ts_ms else {
@@ -2811,9 +2865,6 @@ fn assess_paper_promotion_gate(
             if trade_ms < anchor_ms {
                 continue;
             }
-        }
-        if !run_fingerprint.is_empty() {
-            evidence_runs.insert(run_fingerprint);
         }
         if first_trade_ts.is_none() {
             first_trade_ts = Some(timestamp.clone());
@@ -2831,23 +2882,17 @@ fn assess_paper_promotion_gate(
                 gross_loss += net_pnl.abs();
             }
         }
-
-        match peak_balance {
-            Some(peak) if peak > 0.0 => {
-                let next_peak = peak.max(balance);
-                let drawdown_pct = ((next_peak - balance).max(0.0) / next_peak) * 100.0;
-                if drawdown_pct > max_drawdown_pct {
-                    max_drawdown_pct = drawdown_pct;
-                }
-                peak_balance = Some(next_peak);
-            }
-            _ => {
-                peak_balance = Some(balance);
-            }
-        }
     }
 
-    let runtime_hours = match (first_trade_ms, last_trade_ms) {
+    let first_evidence_ms = equity_points
+        .first()
+        .map(|point| point.step_close_ts_ms)
+        .or(first_trade_ms);
+    let last_evidence_ms = equity_points
+        .last()
+        .map(|point| point.step_close_ts_ms)
+        .or(last_trade_ms);
+    let runtime_hours = match (first_evidence_ms, last_evidence_ms) {
         (Some(first), Some(last)) if last >= first => (last - first) as f64 / 3_600_000.0,
         _ => 0.0,
     };
@@ -2858,16 +2903,58 @@ fn assess_paper_promotion_gate(
     } else {
         0.0
     };
-    let kill_switch_events = count_kill_switch_events(&conn, &evidence_runs)?;
+    let max_drawdown_pct = compute_max_drawdown_from_equity_points(&equity_points);
+    let median_slippage_bps = median(
+        metrics
+            .iter()
+            .map(|row| row.median_slippage_bps)
+            .collect::<Vec<_>>(),
+    );
+    let max_slippage_bps = metrics
+        .iter()
+        .map(|row| row.max_slippage_bps)
+        .fold(0.0_f64, f64::max);
+    let total_intents = metrics.iter().map(|row| row.intent_count).sum::<u32>();
+    let total_rejected = metrics
+        .iter()
+        .map(|row| row.rejected_intent_count)
+        .sum::<u32>();
+    let rejection_rate = if total_intents == 0 {
+        0.0
+    } else {
+        total_rejected as f64 / total_intents as f64
+    };
+    let p95_cycle_latency_ms = percentile_95_i64(
+        metrics
+            .iter()
+            .map(|row| row.cycle_latency_ms)
+            .collect::<Vec<_>>(),
+    );
+    let max_cycle_latency_ms = metrics
+        .iter()
+        .map(|row| row.cycle_latency_ms)
+        .max()
+        .unwrap_or(0);
+    let kill_switch_events = count_kill_switch_events(&conn, deployed_after_ms)?;
     let thresholds = PaperPromotionThresholds {
         min_runtime_hours: 24.0,
         min_close_trades: 20,
         min_profit_factor: 1.2,
         max_drawdown_pct: 10.0,
-        require_positive_slippage_pnl: true,
+        max_median_slippage_bps: 10.0,
+        max_rejection_rate: 0.0,
+        max_p95_cycle_latency_ms: 30_000,
+        max_funding_drag_usd: 50.0,
         require_zero_kill_switch_events: true,
     };
     let mut blocked_reasons = Vec::new();
+    if metrics.is_empty() {
+        blocked_reasons.push("paper runtime metrics missing for current soak window".to_string());
+    }
+    if equity_points.len() < 2 {
+        blocked_reasons
+            .push("paper MTM equity evidence missing for current soak window".to_string());
+    }
     if close_trades == 0 {
         blocked_reasons.push(format!(
             "no paper fill evidence for config_fingerprint {} in {}",
@@ -2892,10 +2979,45 @@ fn assess_paper_promotion_gate(
             max_drawdown_pct, thresholds.max_drawdown_pct
         ));
     }
-    if candidate.slippage_pnl_at_reject_bps <= 0.0 {
+    if median_slippage_bps > thresholds.max_median_slippage_bps {
         blocked_reasons.push(format!(
-            "validation slippage stress pnl_at_{}bps <= 0",
-            candidate.slippage_reject_bps
+            "paper median slippage {:.4}bps > {:.2}bps",
+            median_slippage_bps, thresholds.max_median_slippage_bps
+        ));
+    }
+    if rejection_rate > thresholds.max_rejection_rate {
+        blocked_reasons.push(format!(
+            "paper rejection rate {:.4} > {:.4}",
+            rejection_rate, thresholds.max_rejection_rate
+        ));
+    }
+    if p95_cycle_latency_ms > thresholds.max_p95_cycle_latency_ms {
+        blocked_reasons.push(format!(
+            "paper p95 cycle latency {}ms > {}ms",
+            p95_cycle_latency_ms, thresholds.max_p95_cycle_latency_ms
+        ));
+    }
+    let net_funding_pnl_usd = match last_evidence_ms {
+        Some(end_ms) if end_ms >= deployed_after_ms.unwrap_or(i64::MIN) => {
+            match compute_net_funding_pnl(
+                &conn,
+                funding_db_path,
+                deployed_after_ms.unwrap_or(i64::MIN),
+                end_ms,
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    blocked_reasons.push(format!("paper funding evidence unavailable: {err}"));
+                    0.0
+                }
+            }
+        }
+        _ => 0.0,
+    };
+    if net_funding_pnl_usd < -thresholds.max_funding_drag_usd {
+        blocked_reasons.push(format!(
+            "paper funding drag {:.4} USD exceeds {:.2} USD",
+            net_funding_pnl_usd, thresholds.max_funding_drag_usd
         ));
     }
     if kill_switch_events > 0 {
@@ -2919,7 +3041,13 @@ fn assess_paper_promotion_gate(
         close_trades,
         profit_factor,
         max_drawdown_pct,
-        slippage_pnl_at_reject_bps: candidate.slippage_pnl_at_reject_bps,
+        median_slippage_bps,
+        max_slippage_bps,
+        rejection_rate,
+        p95_cycle_latency_ms,
+        max_cycle_latency_ms,
+        net_funding_pnl_usd,
+        equity_points: equity_points.len() as u32,
         kill_switch_events,
         thresholds,
         blocked_reasons,
@@ -2942,40 +3070,279 @@ fn blocked_paper_promotion_gate(
         close_trades: 0,
         profit_factor: 0.0,
         max_drawdown_pct: 0.0,
-        slippage_pnl_at_reject_bps: candidate.slippage_pnl_at_reject_bps,
+        median_slippage_bps: 0.0,
+        max_slippage_bps: 0.0,
+        rejection_rate: 0.0,
+        p95_cycle_latency_ms: 0,
+        max_cycle_latency_ms: 0,
+        net_funding_pnl_usd: 0.0,
+        equity_points: 0,
         kill_switch_events: 0,
         thresholds: PaperPromotionThresholds {
             min_runtime_hours: 24.0,
             min_close_trades: 20,
             min_profit_factor: 1.2,
             max_drawdown_pct: 10.0,
-            require_positive_slippage_pnl: true,
+            max_median_slippage_bps: 10.0,
+            max_rejection_rate: 0.0,
+            max_p95_cycle_latency_ms: 30_000,
+            max_funding_drag_usd: 50.0,
             require_zero_kill_switch_events: true,
         },
         blocked_reasons,
     }
 }
 
-fn count_kill_switch_events(conn: &Connection, evidence_runs: &HashSet<String>) -> Result<u32> {
-    if evidence_runs.is_empty() {
+fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+    let row = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1",
+            [table_name],
+            |_| Ok(()),
+        )
+        .optional()?;
+    Ok(row.is_some())
+}
+
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let current: String = row.get(1)?;
+        if current == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn load_paper_runtime_metrics(
+    conn: &Connection,
+    config_fingerprint: &str,
+    deployed_after_ms: Option<i64>,
+) -> Result<Vec<PaperRuntimeMetricRow>> {
+    if !table_exists(conn, "paper_runtime_metrics")? {
+        return Ok(Vec::new());
+    }
+    let start_ms = deployed_after_ms.unwrap_or(i64::MIN);
+    let mut stmt = conn.prepare(
+        "SELECT step_close_ts_ms, cycle_latency_ms, intent_count, rejected_intent_count, median_slippage_bps, max_slippage_bps
+         FROM paper_runtime_metrics
+         WHERE config_fingerprint = ?1 AND step_close_ts_ms >= ?2
+         ORDER BY step_close_ts_ms ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![config_fingerprint, start_ms], |row| {
+            Ok(PaperRuntimeMetricRow {
+                cycle_latency_ms: row.get(1)?,
+                intent_count: row.get::<_, i64>(2)?.max(0) as u32,
+                rejected_intent_count: row.get::<_, i64>(3)?.max(0) as u32,
+                median_slippage_bps: row.get(4)?,
+                max_slippage_bps: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn load_paper_equity_points(
+    conn: &Connection,
+    config_fingerprint: &str,
+    deployed_after_ms: Option<i64>,
+) -> Result<Vec<PaperEquityPoint>> {
+    if !table_exists(conn, "paper_equity_snapshots")? {
+        return Ok(Vec::new());
+    }
+    let start_ms = deployed_after_ms.unwrap_or(i64::MIN);
+    let mut stmt = conn.prepare(
+        "SELECT step_close_ts_ms, equity_est_usd
+         FROM paper_equity_snapshots
+         WHERE config_fingerprint = ?1 AND step_close_ts_ms >= ?2
+         ORDER BY step_close_ts_ms ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![config_fingerprint, start_ms], |row| {
+            Ok(PaperEquityPoint {
+                step_close_ts_ms: row.get(0)?,
+                equity_est_usd: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn load_paper_trade_evidence_rows(
+    conn: &Connection,
+    deployed_after_ms: i64,
+    evidence_end_ms: i64,
+) -> Result<Vec<PaperTradeEvidenceRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp, symbol, action, type, price, size
+         FROM trades
+         ORDER BY id ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let timestamp: String = row.get(1)?;
+        let Some(ts_ms) = parse_trade_timestamp_ms(&timestamp) else {
+            continue;
+        };
+        if ts_ms < deployed_after_ms || ts_ms > evidence_end_ms {
+            continue;
+        }
+        out.push(PaperTradeEvidenceRow {
+            ts_ms,
+            symbol: row.get(2)?,
+            action: row.get(3)?,
+            position_type: row.get(4)?,
+            price: row.get(5)?,
+            size: row.get(6)?,
+        });
+    }
+    Ok(out)
+}
+
+fn compute_max_drawdown_from_equity_points(points: &[PaperEquityPoint]) -> f64 {
+    let mut peak = None::<f64>;
+    let mut max_drawdown_pct = 0.0;
+    for point in points {
+        if point.equity_est_usd <= 0.0 {
+            continue;
+        }
+        match peak {
+            None => peak = Some(point.equity_est_usd),
+            Some(current_peak) if point.equity_est_usd > current_peak => {
+                peak = Some(point.equity_est_usd)
+            }
+            Some(current_peak) => {
+                let drawdown_pct =
+                    ((current_peak - point.equity_est_usd).max(0.0) / current_peak) * 100.0;
+                if drawdown_pct > max_drawdown_pct {
+                    max_drawdown_pct = drawdown_pct;
+                }
+            }
+        }
+    }
+    max_drawdown_pct
+}
+
+fn percentile_95_i64(mut values: Vec<i64>) -> i64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let idx = ((values.len() - 1) as f64 * 0.95).ceil() as usize;
+    values[idx.min(values.len() - 1)]
+}
+
+fn compute_net_funding_pnl(
+    conn: &Connection,
+    funding_db_path: &Path,
+    deployed_after_ms: i64,
+    evidence_end_ms: i64,
+) -> Result<f64> {
+    if evidence_end_ms < deployed_after_ms {
+        return Ok(0.0);
+    }
+    let trades = load_paper_trade_evidence_rows(conn, deployed_after_ms, evidence_end_ms)?;
+    if trades.is_empty() {
+        return Ok(0.0);
+    }
+    let funding_conn = Connection::open(funding_db_path)
+        .with_context(|| format!("open funding DB {}", funding_db_path.display()))?;
+    let mut funding_stmt = funding_conn.prepare(
+        "SELECT symbol, time, funding_rate
+         FROM funding_rates
+         WHERE time >= ?1 AND time <= ?2
+         ORDER BY time ASC, symbol ASC",
+    )?;
+    let funding_rows = funding_stmt
+        .query_map(params![deployed_after_ms, evidence_end_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    #[derive(Clone)]
+    struct OpenPosition {
+        is_long: bool,
+        size: f64,
+        mark_price: f64,
+    }
+
+    let mut positions = HashMap::<String, OpenPosition>::new();
+    let mut trade_idx = 0usize;
+    let mut net_funding_pnl_usd = 0.0f64;
+
+    for (symbol, funding_time_ms, rate) in funding_rows {
+        while trade_idx < trades.len() && trades[trade_idx].ts_ms <= funding_time_ms {
+            let trade = &trades[trade_idx];
+            let entry = positions
+                .entry(trade.symbol.clone())
+                .or_insert_with(|| OpenPosition {
+                    is_long: trade.position_type.eq_ignore_ascii_case("LONG"),
+                    size: 0.0,
+                    mark_price: trade.price,
+                });
+            entry.mark_price = trade.price;
+            entry.is_long = trade.position_type.eq_ignore_ascii_case("LONG");
+            match trade.action.as_str() {
+                "OPEN" => entry.size = trade.size.max(0.0),
+                "ADD" => entry.size += trade.size.max(0.0),
+                "REDUCE" | "CLOSE" => {
+                    entry.size = (entry.size - trade.size.max(0.0)).max(0.0);
+                    if entry.size <= f64::EPSILON {
+                        positions.remove(&trade.symbol);
+                    }
+                }
+                _ => {}
+            }
+            trade_idx += 1;
+        }
+
+        if let Some(position) = positions.get(&symbol) {
+            if position.size > f64::EPSILON && position.mark_price > 0.0 {
+                net_funding_pnl_usd +=
+                    funding_delta(position.is_long, position.size, position.mark_price, rate);
+            }
+        }
+    }
+
+    Ok(net_funding_pnl_usd)
+}
+
+fn count_kill_switch_events(conn: &Connection, deployed_after_ms: Option<i64>) -> Result<u32> {
+    if !table_exists(conn, "audit_events")? {
         return Ok(0);
     }
 
-    let mut audit_stmt = conn.prepare(
-        "SELECT COALESCE(event, ''), COALESCE(run_fingerprint, '')
-         FROM audit_events",
-    )?;
+    let has_ts_ms = table_has_column(conn, "audit_events", "ts_ms")?;
+    let sql = if has_ts_ms {
+        "SELECT COALESCE(event, ''), COALESCE(ts_ms, 0)
+         FROM audit_events"
+    } else {
+        "SELECT COALESCE(event, ''), 0
+         FROM audit_events"
+    };
+    let mut audit_stmt = conn.prepare(sql)?;
     let mut audit_rows = audit_stmt.query([])?;
     let mut count = 0u32;
     while let Some(row) = audit_rows.next()? {
         let event: String = row.get(0)?;
-        let run_fingerprint: String = row.get(1)?;
-        if !evidence_runs.contains(&run_fingerprint) {
+        let ts_ms: i64 = row.get(1)?;
+        if let Some(anchor_ms) = deployed_after_ms {
+            if has_ts_ms && ts_ms < anchor_ms {
+                continue;
+            }
+        }
+        if !event.starts_with("RISK_KILL_") {
             continue;
         }
-        if event.starts_with("RISK_KILL_") {
-            count += 1;
-        }
+        count += 1;
     }
     Ok(count)
 }
@@ -3362,6 +3729,12 @@ fn deploy_selected_configs(
         .iter()
         .map(|plan| snapshot_target(plan.target_yaml_path.as_path()))
         .collect::<Result<Vec<_>>>()?;
+    let marker_snapshots = pending_plans
+        .iter()
+        .map(|plan| {
+            snapshot_marker(paper_soak_marker_path(project_dir, plan.role.as_str()).as_path())
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let deployment_result: Result<Vec<DeploymentEvent>> = (|| {
         for plan in &pending_plans {
@@ -3418,6 +3791,7 @@ fn deploy_selected_configs(
         Ok(events) => Ok(events),
         Err(err) => {
             rollback_target_snapshots(&snapshots)?;
+            rollback_marker_snapshots(&marker_snapshots)?;
             if deployment.restart_services {
                 restart_user_services(
                     pending_plans
@@ -3708,6 +4082,18 @@ fn snapshot_target(path: &Path) -> Result<TargetSnapshot> {
     })
 }
 
+fn snapshot_marker(path: &Path) -> Result<MarkerSnapshot> {
+    let original_bytes = if path.is_file() {
+        Some(fs::read(path).with_context(|| format!("read {}", path.display()))?)
+    } else {
+        None
+    };
+    Ok(MarkerSnapshot {
+        marker_path: path.to_path_buf(),
+        original_bytes,
+    })
+}
+
 fn rollback_target_snapshots(snapshots: &[TargetSnapshot]) -> Result<()> {
     for snapshot in snapshots {
         match &snapshot.original_bytes {
@@ -3724,6 +4110,28 @@ fn rollback_target_snapshots(snapshots: &[TargetSnapshot]) -> Result<()> {
                     fs::remove_file(&snapshot.target_yaml_path).with_context(|| {
                         format!("remove {}", snapshot.target_yaml_path.display())
                     })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rollback_marker_snapshots(snapshots: &[MarkerSnapshot]) -> Result<()> {
+    for snapshot in snapshots {
+        match &snapshot.original_bytes {
+            Some(bytes) => {
+                if let Some(parent) = snapshot.marker_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create {}", parent.display()))?;
+                }
+                fs::write(&snapshot.marker_path, bytes)
+                    .with_context(|| format!("restore {}", snapshot.marker_path.display()))?;
+            }
+            None => {
+                if snapshot.marker_path.exists() {
+                    fs::remove_file(&snapshot.marker_path)
+                        .with_context(|| format!("remove {}", snapshot.marker_path.display()))?;
                 }
             }
         }
@@ -3875,13 +4283,28 @@ symbols:
         project_dir.join(DEFAULT_PRIMARY_PAPER_DB_PATH)
     }
 
+    fn paper_funding_db(project_dir: &Path) -> PathBuf {
+        project_dir.join("funding_rates.db")
+    }
+
+    fn gate_iso_from_ms(ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .with_timezone(&Utc)
+            .to_rfc3339()
+    }
+
     fn create_paper_gate_schema(conn: &Connection) {
         conn.execute_batch(
             "
             CREATE TABLE trades (
                 id INTEGER PRIMARY KEY,
                 timestamp TEXT,
+                symbol TEXT,
+                type TEXT,
                 action TEXT,
+                price REAL,
+                size REAL,
                 pnl REAL,
                 fee_usd REAL,
                 balance REAL
@@ -3896,10 +4319,51 @@ symbols:
             );
             CREATE TABLE audit_events (
                 id INTEGER PRIMARY KEY,
+                ts_ms INTEGER,
                 event TEXT,
                 level TEXT,
                 data_json TEXT,
                 run_fingerprint TEXT
+            );
+            CREATE TABLE paper_runtime_metrics (
+                step_id TEXT PRIMARY KEY,
+                config_fingerprint TEXT NOT NULL,
+                step_close_ts_ms INTEGER NOT NULL,
+                cycle_latency_ms INTEGER NOT NULL,
+                intent_count INTEGER NOT NULL,
+                fill_count INTEGER NOT NULL,
+                rejected_intent_count INTEGER NOT NULL,
+                warning_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                median_slippage_bps REAL NOT NULL,
+                max_slippage_bps REAL NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE paper_equity_snapshots (
+                step_id TEXT PRIMARY KEY,
+                config_fingerprint TEXT NOT NULL,
+                step_close_ts_ms INTEGER NOT NULL,
+                cash_usd REAL NOT NULL,
+                margin_used_usd REAL NOT NULL,
+                unrealised_pnl_usd REAL NOT NULL,
+                equity_est_usd REAL NOT NULL,
+                open_position_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    fn create_funding_schema(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE funding_rates (
+                symbol TEXT NOT NULL,
+                time INTEGER NOT NULL,
+                funding_rate REAL NOT NULL,
+                premium REAL NOT NULL,
+                PRIMARY KEY (symbol, time)
             );
             ",
         )
@@ -3910,7 +4374,11 @@ symbols:
         conn: &Connection,
         trade_id: i64,
         timestamp: &str,
+        symbol: &str,
+        position_type: &str,
         action: &str,
+        price: f64,
+        size: f64,
         pnl: f64,
         fee_usd: f64,
         balance: f64,
@@ -3918,8 +4386,8 @@ symbols:
         run_fingerprint: &str,
     ) {
         conn.execute(
-            "INSERT INTO trades (id, timestamp, action, pnl, fee_usd, balance) VALUES (?, ?, ?, ?, ?, ?)",
-            rusqlite::params![trade_id, timestamp, action, pnl, fee_usd, balance],
+            "INSERT INTO trades (id, timestamp, symbol, type, action, price, size, pnl, fee_usd, balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![trade_id, timestamp, symbol, position_type, action, price, size, pnl, fee_usd, balance],
         )
         .unwrap();
         conn.execute(
@@ -3933,6 +4401,109 @@ symbols:
             ],
         )
         .unwrap();
+    }
+
+    fn insert_paper_runtime_metric(
+        conn: &Connection,
+        step_id: &str,
+        config_fingerprint: &str,
+        step_close_ts_ms: i64,
+        cycle_latency_ms: i64,
+        intent_count: i64,
+        fill_count: i64,
+        rejected_intent_count: i64,
+        median_slippage_bps: f64,
+        max_slippage_bps: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO paper_runtime_metrics (
+                 step_id, config_fingerprint, step_close_ts_ms, cycle_latency_ms,
+                 intent_count, fill_count, rejected_intent_count, warning_count,
+                 error_count, median_slippage_bps, max_slippage_bps, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)",
+            rusqlite::params![
+                step_id,
+                config_fingerprint,
+                step_close_ts_ms,
+                cycle_latency_ms,
+                intent_count,
+                fill_count,
+                rejected_intent_count,
+                median_slippage_bps,
+                max_slippage_bps,
+                gate_iso_from_ms(step_close_ts_ms),
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_paper_equity_point(
+        conn: &Connection,
+        step_id: &str,
+        config_fingerprint: &str,
+        step_close_ts_ms: i64,
+        equity_est_usd: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO paper_equity_snapshots (
+                 step_id, config_fingerprint, step_close_ts_ms, cash_usd,
+                 margin_used_usd, unrealised_pnl_usd, equity_est_usd,
+                 open_position_count, created_at
+             ) VALUES (?, ?, ?, 0.0, 0.0, 0.0, ?, 0, ?)",
+            rusqlite::params![
+                step_id,
+                config_fingerprint,
+                step_close_ts_ms,
+                equity_est_usd,
+                gate_iso_from_ms(step_close_ts_ms),
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_audit_event(conn: &Connection, ts_ms: i64, event: &str, run_fingerprint: &str) {
+        conn.execute(
+            "INSERT INTO audit_events (ts_ms, event, level, data_json, run_fingerprint)
+             VALUES (?, ?, 'warn', '{}', ?)",
+            rusqlite::params![ts_ms, event, run_fingerprint],
+        )
+        .unwrap();
+    }
+
+    fn insert_funding_rate(conn: &Connection, symbol: &str, time: i64, funding_rate: f64) {
+        conn.execute(
+            "INSERT INTO funding_rates (symbol, time, funding_rate, premium) VALUES (?, ?, ?, 0.0)",
+            rusqlite::params![symbol, time, funding_rate],
+        )
+        .unwrap();
+    }
+
+    fn insert_paper_runtime_evidence(
+        conn: &Connection,
+        config_fingerprint: &str,
+        step_close_ts_ms: i64,
+        equity_est_usd: f64,
+    ) {
+        let step_id = format!("step-{step_close_ts_ms}");
+        insert_paper_runtime_metric(
+            conn,
+            &step_id,
+            config_fingerprint,
+            step_close_ts_ms,
+            1_000,
+            1,
+            1,
+            0,
+            0.0,
+            0.0,
+        );
+        insert_paper_equity_point(
+            conn,
+            &step_id,
+            config_fingerprint,
+            step_close_ts_ms,
+            equity_est_usd,
+        );
     }
 
     fn paper_target_primary() -> PaperTarget {
@@ -4246,6 +4817,17 @@ symbols:
     }
 
     #[test]
+    fn rollback_marker_snapshots_restores_original_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factory_paper_soak_primary.json");
+        fs::write(&path, "{\"before\":true}\n").unwrap();
+        let snapshot = snapshot_marker(&path).unwrap();
+        fs::write(&path, "{\"after\":true}\n").unwrap();
+        rollback_marker_snapshots(&[snapshot]).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"before\":true}\n");
+    }
+
+    #[test]
     fn acquire_factory_lock_rejects_parallel_holder() {
         let dir = tempfile::tempdir().unwrap();
         let _lock = acquire_factory_lock(dir.path()).unwrap();
@@ -4405,26 +4987,33 @@ symbols:
     fn paper_promotion_gate_blocks_without_runtime_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = paper_promotion_db(dir.path());
+        let funding_db_path = paper_funding_db(dir.path());
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
 
         let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
-        let gate = assess_paper_promotion_gate(&db_path, &candidate, None).unwrap();
+        let gate =
+            assess_paper_promotion_gate(&db_path, &funding_db_path, &candidate, None).unwrap();
         assert_eq!(gate.status, "blocked");
         assert!(gate
             .blocked_reasons
             .iter()
-            .any(|reason| reason.contains("no paper fill evidence")));
+            .any(|reason| reason.contains("paper runtime metrics missing")));
     }
 
     #[test]
     fn paper_promotion_gate_passes_with_soaked_primary_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = paper_promotion_db(dir.path());
+        let funding_db_path = paper_funding_db(dir.path());
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
 
         let mut candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
         candidate.config_sha256 = "ephemeral-file-sha".to_string();
@@ -4433,7 +5022,11 @@ symbols:
             &conn,
             1,
             "2026-03-01T00:00:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            100.0,
+            1.0,
             15.0,
             0.5,
             10_050.0,
@@ -4444,28 +5037,49 @@ symbols:
             &conn,
             2,
             "2026-03-02T01:30:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            101.0,
+            1.0,
             8.0,
             0.5,
             10_120.0,
             &config_id,
             "run-1",
         );
+        insert_paper_runtime_evidence(
+            &conn,
+            &config_id,
+            parse_trade_timestamp_ms("2026-03-01T00:00:00Z").unwrap(),
+            10_050.0,
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &config_id,
+            parse_trade_timestamp_ms("2026-03-02T01:30:00Z").unwrap(),
+            10_120.0,
+        );
 
-        let gate = assess_paper_promotion_gate(&db_path, &candidate, None).unwrap();
+        let gate =
+            assess_paper_promotion_gate(&db_path, &funding_db_path, &candidate, None).unwrap();
         assert_eq!(gate.status, "pass");
         assert!(gate.runtime_hours >= 24.0);
         assert_eq!(gate.close_trades, 2);
         assert_eq!(gate.kill_switch_events, 0);
+        assert_eq!(gate.equity_points, 2);
     }
 
     #[test]
     fn paper_promotion_gate_uses_current_soak_window_after_redeploy() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = paper_promotion_db(dir.path());
+        let funding_db_path = paper_funding_db(dir.path());
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
 
         let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
         let config_fingerprint = candidate.config_id.clone();
@@ -4473,7 +5087,11 @@ symbols:
             &conn,
             1,
             "2026-03-01T00:00:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            100.0,
+            1.0,
             15.0,
             0.5,
             10_050.0,
@@ -4484,23 +5102,182 @@ symbols:
             &conn,
             2,
             "2026-03-02T01:30:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            101.0,
+            1.0,
             8.0,
             0.5,
             10_120.0,
             &config_fingerprint,
             "run-old",
         );
+        insert_paper_runtime_evidence(
+            &conn,
+            &config_fingerprint,
+            parse_trade_timestamp_ms("2026-03-01T00:00:00Z").unwrap(),
+            10_050.0,
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &config_fingerprint,
+            parse_trade_timestamp_ms("2026-03-02T01:30:00Z").unwrap(),
+            10_120.0,
+        );
 
         let redeploy_after_ms = parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap();
-        let gate =
-            assess_paper_promotion_gate(&db_path, &candidate, Some(redeploy_after_ms)).unwrap();
+        let gate = assess_paper_promotion_gate(
+            &db_path,
+            &funding_db_path,
+            &candidate,
+            Some(redeploy_after_ms),
+        )
+        .unwrap();
         assert_eq!(gate.status, "blocked");
         assert_eq!(gate.close_trades, 0);
         assert!(gate
             .blocked_reasons
             .iter()
-            .any(|reason| reason.contains("no paper fill evidence")));
+            .any(|reason| reason.contains("paper runtime metrics missing")));
+    }
+
+    #[test]
+    fn paper_promotion_gate_counts_kill_switch_events_without_fill_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = paper_promotion_db(dir.path());
+        let funding_db_path = paper_funding_db(dir.path());
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
+
+        let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        insert_paper_runtime_metric(
+            &conn,
+            "step-1",
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-01T00:00:00Z").unwrap(),
+            1_000,
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+        );
+        insert_paper_runtime_metric(
+            &conn,
+            "step-2",
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-02T01:30:00Z").unwrap(),
+            1_000,
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+        );
+        insert_paper_equity_point(
+            &conn,
+            "step-1",
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-01T00:00:00Z").unwrap(),
+            10_000.0,
+        );
+        insert_paper_equity_point(
+            &conn,
+            "step-2",
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-02T01:30:00Z").unwrap(),
+            10_020.0,
+        );
+        insert_audit_event(
+            &conn,
+            parse_trade_timestamp_ms("2026-03-02T00:30:00Z").unwrap(),
+            "RISK_KILL_CLOSE_ONLY",
+            "run-kill",
+        );
+
+        let gate =
+            assess_paper_promotion_gate(&db_path, &funding_db_path, &candidate, None).unwrap();
+        assert_eq!(gate.status, "blocked");
+        assert_eq!(gate.kill_switch_events, 1);
+        assert!(gate
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("kill-switch")));
+    }
+
+    #[test]
+    fn paper_promotion_gate_blocks_on_funding_drag_degradation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = paper_promotion_db(dir.path());
+        let funding_db_path = paper_funding_db(dir.path());
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
+
+        let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        insert_paper_fill(
+            &conn,
+            1,
+            "2026-03-01T00:00:00Z",
+            "BTC",
+            "LONG",
+            "OPEN",
+            100.0,
+            1.0,
+            0.0,
+            0.1,
+            9_999.9,
+            &candidate.config_id,
+            "run-funding",
+        );
+        insert_paper_fill(
+            &conn,
+            2,
+            "2026-03-02T01:30:00Z",
+            "BTC",
+            "LONG",
+            "CLOSE",
+            120.0,
+            1.0,
+            25.0,
+            0.1,
+            10_024.8,
+            &candidate.config_id,
+            "run-funding",
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-01T00:00:00Z").unwrap(),
+            9_999.9,
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-02T01:30:00Z").unwrap(),
+            10_024.8,
+        );
+        insert_funding_rate(
+            &funding_conn,
+            "BTC",
+            parse_trade_timestamp_ms("2026-03-01T12:00:00Z").unwrap(),
+            1.0,
+        );
+
+        let gate =
+            assess_paper_promotion_gate(&db_path, &funding_db_path, &candidate, None).unwrap();
+        assert_eq!(gate.status, "blocked");
+        assert!(gate.net_funding_pnl_usd < -50.0);
+        assert!(gate
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("funding drag")));
     }
 
     #[test]
@@ -4508,27 +5285,34 @@ symbols:
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path();
         let db_path = paper_promotion_db(project_dir);
+        let funding_db_path = paper_funding_db(project_dir);
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
 
         let yaml = config_yaml("30m");
         let config_id = strategy_fingerprint_from_yaml(&yaml);
         let source_config = project_dir.join("candidate_primary.yaml");
-        let target_yaml = project_dir
-            .join("config")
-            .join("strategy_overrides.paper1.yaml");
         fs::write(&source_config, &yaml).unwrap();
-        fs::create_dir_all(target_yaml.parent().unwrap()).unwrap();
-        fs::write(&target_yaml, &yaml).unwrap();
         let mut candidate = validation_item("efficient", &config_id, 100.0, 1.2, 0.3);
         candidate.config_path = source_config.display().to_string();
         candidate.config_sha256 = "new-file-sha".to_string();
+        let target_yaml_path = project_dir
+            .join("config")
+            .join("strategy_overrides.paper1.yaml");
+        fs::create_dir_all(target_yaml_path.parent().unwrap()).unwrap();
+        fs::write(&target_yaml_path, &yaml).unwrap();
         insert_paper_fill(
             &conn,
             1,
             "2026-03-03T00:00:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            100.0,
+            1.0,
             15.0,
             0.5,
             10_050.0,
@@ -4539,12 +5323,28 @@ symbols:
             &conn,
             2,
             "2026-03-04T01:30:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            101.0,
+            1.0,
             8.0,
             0.5,
             10_120.0,
             &candidate.config_id,
             "run-current",
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap(),
+            10_050.0,
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-04T01:30:00Z").unwrap(),
+            10_120.0,
         );
 
         let marker = PaperSoakMarker {
@@ -4558,7 +5358,7 @@ symbols:
             deployed_at_ms: parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap(),
             deployed_by_run_id: "run-123".to_string(),
             source_config_path: "/tmp/source.yaml".to_string(),
-            target_yaml_path: target_yaml.display().to_string(),
+            target_yaml_path: target_yaml_path.display().to_string(),
         };
         write_json(&paper_soak_marker_path(project_dir, "primary"), &marker).unwrap();
 
@@ -4572,6 +5372,7 @@ symbols:
         }];
         let gate = assess_primary_paper_promotion_gate(
             project_dir,
+            &funding_db_path,
             &SelectionSettings::default(),
             &[candidate],
             &selected,
@@ -4670,9 +5471,12 @@ symbols:
         let dir = tempfile::tempdir().unwrap();
         let project_dir = dir.path();
         let db_path = paper_promotion_db(project_dir);
+        let funding_db_path = paper_funding_db(project_dir);
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
+        let funding_conn = Connection::open(&funding_db_path).unwrap();
+        create_funding_schema(&funding_conn);
 
         let yaml = config_yaml("30m");
         let config_id = strategy_fingerprint_from_yaml(&yaml);
@@ -4684,7 +5488,11 @@ symbols:
             &conn,
             1,
             "2026-03-03T00:00:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            100.0,
+            1.0,
             15.0,
             0.5,
             10_050.0,
@@ -4695,12 +5503,28 @@ symbols:
             &conn,
             2,
             "2026-03-04T01:30:00Z",
+            "BTC",
+            "LONG",
             "CLOSE",
+            101.0,
+            1.0,
             8.0,
             0.5,
             10_120.0,
             &candidate.config_id,
             "run-current",
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap(),
+            10_050.0,
+        );
+        insert_paper_runtime_evidence(
+            &conn,
+            &candidate.config_id,
+            parse_trade_timestamp_ms("2026-03-04T01:30:00Z").unwrap(),
+            10_120.0,
         );
 
         let marker = PaperSoakMarker {
@@ -4732,6 +5556,7 @@ symbols:
         }];
         let gate = assess_primary_paper_promotion_gate(
             project_dir,
+            &funding_db_path,
             &SelectionSettings::default(),
             &[candidate],
             &selected,
