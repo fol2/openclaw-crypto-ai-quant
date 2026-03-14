@@ -1,5 +1,7 @@
 # Backlog Plans
 
-There are no backlog plans in this repository at present.
+Current backlog items:
+
+- `factory-financial-grade-hardening.md`
 
 Store future candidate plans here before they become active work.
