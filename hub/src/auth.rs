@@ -127,11 +127,49 @@ fn matches_query_token(request: &Request, token: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn extract_query_token(query: &str) -> Option<&str> {
+fn extract_query_token(query: &str) -> Option<String> {
     query.split('&').find_map(|segment| {
         let (key, value) = segment.split_once('=')?;
-        (key == "token" && !value.is_empty()).then_some(value)
+        (key == "token" && !value.is_empty())
+            .then(|| percent_decode(value))
+            .flatten()
     })
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'%' => {
+                let hi = bytes.get(idx + 1).copied()?;
+                let lo = bytes.get(idx + 2).copied()?;
+                decoded.push((hex_value(hi)? << 4) | hex_value(lo)?);
+                idx += 3;
+            }
+            b'+' => {
+                decoded.push(b' ');
+                idx += 1;
+            }
+            other => {
+                decoded.push(other);
+                idx += 1;
+            }
+        }
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -286,6 +324,30 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ws?token=viewer-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn websocket_query_token_is_percent_decoded_before_validation() {
+        let app = Router::new()
+            .route("/ws", get(ok_handler))
+            .layer(middleware::from_fn(require_read_auth))
+            .layer(axum::Extension(HubAuthConfig {
+                read_token: "abc+def=".to_string(),
+                admin_token: "admin-secret".to_string(),
+                dev_mode: false,
+            }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws?token=abc%2Bdef%3D")
                     .body(Body::empty())
                     .unwrap(),
             )
