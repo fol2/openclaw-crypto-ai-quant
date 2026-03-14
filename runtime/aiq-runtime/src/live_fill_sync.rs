@@ -20,6 +20,9 @@ const SYNC_RUN_STATUS_STARTED: &str = "started";
 const SYNC_RUN_STATUS_SUCCESS: &str = "success";
 const SYNC_RUN_STATUS_UNSUPPORTED_REMOTE_FILLS: &str = "unsupported_remote_fills";
 const SYNC_RUN_STATUS_FAILED: &str = "failed";
+const LIVE_FILL_SYNC_SOURCE: &str = "live_fill_sync";
+const LIVE_FILL_SYNC_DRY_RUN_SOURCE: &str = "live_fill_sync_dry_run";
+const CLEARINGHOUSE_STATE_REQUEST_TYPE: &str = "clearinghouseState";
 
 pub struct LiveFillSyncInput<'a> {
     pub live_db: &'a Path,
@@ -217,12 +220,20 @@ fn run_sync_inner(
         let secrets = load_live_secrets(input.secrets_path)?;
         progress.wallet_address = Some(secrets.main_address.clone());
         let client = HyperliquidClient::new(&secrets, None)?;
-        let account_snapshot = client.account_snapshot()?;
+        let account_observation = client.clearinghouse_state_observation()?;
+        let account_snapshot = &account_observation.account_snapshot;
         progress.account_value_usd = Some(account_snapshot.account_value_usd);
         progress.withdrawable_usd = Some(account_snapshot.withdrawable_usd);
         progress.total_margin_used_usd = Some(account_snapshot.total_margin_used_usd);
-        let exchange_positions = client.positions()?;
+        let exchange_positions = &account_observation.positions;
         progress.exchange_position_count = Some(exchange_positions.len());
+        let account_snapshot_event_id = persist_account_snapshot_event(
+            working_db_path,
+            &account_observation,
+            run_id,
+            &secrets.main_address,
+            input.dry_run,
+        )?;
         let window = resolve_sync_window(
             working_db_path,
             input.start_ms,
@@ -263,10 +274,10 @@ fn run_sync_inner(
             SYNC_RUN_STATUS_UNSUPPORTED_REMOTE_FILLS
         };
         if ok {
-            persist_exchange_snapshot(
+            persist_exchange_snapshot_projection(
                 working_db_path,
-                &account_snapshot,
-                &exchange_positions,
+                &account_observation,
+                account_snapshot_event_id,
                 run_id,
                 input.dry_run,
             )?;
@@ -462,6 +473,21 @@ fn ensure_sync_schema(db_path: &Path) -> Result<()> {
             ON exchange_sync_runs(started_at_ts_ms DESC);
         CREATE INDEX IF NOT EXISTS idx_exchange_sync_runs_status_started_at
             ON exchange_sync_runs(status, started_at_ts_ms DESC);
+        CREATE TABLE IF NOT EXISTS exchange_account_snapshot_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sync_run_id INTEGER NOT NULL,
+            observed_at_ts_ms INTEGER NOT NULL,
+            observed_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            request_type TEXT NOT NULL,
+            wallet_address TEXT NOT NULL,
+            raw_payload_json TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            account_value_usd REAL NOT NULL,
+            withdrawable_usd REAL NOT NULL,
+            total_margin_used_usd REAL NOT NULL,
+            position_count INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS runtime_account_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_ms INTEGER NOT NULL,
@@ -471,7 +497,8 @@ fn ensure_sync_schema(db_path: &Path) -> Result<()> {
             total_margin_used_usd REAL NOT NULL,
             source TEXT NOT NULL,
             meta_json TEXT,
-            sync_run_id INTEGER
+            sync_run_id INTEGER,
+            account_snapshot_event_id INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_runtime_account_snapshots_ts_ms
             ON runtime_account_snapshots(ts_ms DESC);
@@ -491,12 +518,29 @@ fn ensure_sync_schema(db_path: &Path) -> Result<()> {
     )
     .context("failed to ensure live fill sync schema")?;
     ensure_sync_run_columns(&conn)?;
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_exchange_account_snapshot_events_sync_run_id
+            ON exchange_account_snapshot_events(sync_run_id, observed_at_ts_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_exchange_account_snapshot_events_payload_digest
+            ON exchange_account_snapshot_events(payload_digest);
+        CREATE INDEX IF NOT EXISTS idx_runtime_account_snapshots_account_snapshot_event_id
+            ON runtime_account_snapshots(account_snapshot_event_id);
+        ",
+    )
+    .context("failed to ensure live fill sync indexes")?;
     Ok(())
 }
 
 fn ensure_sync_run_columns(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "runtime_sync_cursors", "last_run_id", "INTEGER")?;
     add_column_if_missing(conn, "runtime_account_snapshots", "sync_run_id", "INTEGER")?;
+    add_column_if_missing(
+        conn,
+        "runtime_account_snapshots",
+        "account_snapshot_event_id",
+        "INTEGER",
+    )?;
     add_column_if_missing(conn, "runtime_exchange_positions", "sync_run_id", "INTEGER")?;
     add_column_if_missing(conn, "trades", "sync_run_id", "INTEGER")?;
     add_column_if_missing(conn, "oms_intents", "sync_run_id", "INTEGER")?;
@@ -754,17 +798,62 @@ fn write_sync_cursor(
     Ok(())
 }
 
-fn persist_exchange_snapshot(
+fn exchange_snapshot_source(dry_run: bool) -> &'static str {
+    if dry_run {
+        LIVE_FILL_SYNC_DRY_RUN_SOURCE
+    } else {
+        LIVE_FILL_SYNC_SOURCE
+    }
+}
+
+fn persist_account_snapshot_event(
     db_path: &Path,
-    account_snapshot: &crate::live_hyperliquid::HyperliquidAccountSnapshot,
-    exchange_positions: &[crate::live_hyperliquid::HyperliquidPosition],
+    account_observation: &crate::live_hyperliquid::HyperliquidClearinghouseStateObservation,
+    sync_run_id: i64,
+    wallet_address: &str,
+    dry_run: bool,
+) -> Result<i64> {
+    let ts_ms = account_observation.observed_at_ts_ms;
+    let timestamp = timestamp_from_ms(ts_ms);
+    let source = exchange_snapshot_source(dry_run);
+    let conn = open_sync_connection(db_path)?;
+    conn.execute(
+        "
+        INSERT INTO exchange_account_snapshot_events (
+            sync_run_id, observed_at_ts_ms, observed_at, source, request_type, wallet_address,
+            raw_payload_json, payload_digest, account_value_usd, withdrawable_usd,
+            total_margin_used_usd, position_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ",
+        params![
+            sync_run_id,
+            ts_ms,
+            &timestamp,
+            source,
+            CLEARINGHOUSE_STATE_REQUEST_TYPE,
+            wallet_address,
+            &account_observation.payload_json,
+            &account_observation.payload_digest,
+            account_observation.account_snapshot.account_value_usd,
+            account_observation.account_snapshot.withdrawable_usd,
+            account_observation.account_snapshot.total_margin_used_usd,
+            account_observation.positions.len() as i64,
+        ],
+    )
+    .context("failed to insert exchange account snapshot evidence")?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn persist_exchange_snapshot_projection(
+    db_path: &Path,
+    account_observation: &crate::live_hyperliquid::HyperliquidClearinghouseStateObservation,
+    account_snapshot_event_id: i64,
     sync_run_id: i64,
     dry_run: bool,
 ) -> Result<()> {
-    let ts_ms = Utc::now().timestamp_millis();
-    let timestamp = chrono::DateTime::from_timestamp_millis(ts_ms)
-        .map(|value| value.to_rfc3339())
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let ts_ms = account_observation.observed_at_ts_ms;
+    let timestamp = timestamp_from_ms(ts_ms);
+    let source = exchange_snapshot_source(dry_run);
     let mut conn = open_sync_connection(db_path)?;
     let tx = conn
         .transaction()
@@ -773,31 +862,28 @@ fn persist_exchange_snapshot(
         "
         INSERT INTO runtime_account_snapshots (
             ts_ms, timestamp, account_value_usd, withdrawable_usd, total_margin_used_usd,
-            source, meta_json, sync_run_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            source, meta_json, sync_run_id, account_snapshot_event_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ",
         params![
             ts_ms,
-            timestamp,
-            account_snapshot.account_value_usd,
-            account_snapshot.withdrawable_usd,
-            account_snapshot.total_margin_used_usd,
-            if dry_run {
-                "live_fill_sync_dry_run"
-            } else {
-                "live_fill_sync"
-            },
+            &timestamp,
+            account_observation.account_snapshot.account_value_usd,
+            account_observation.account_snapshot.withdrawable_usd,
+            account_observation.account_snapshot.total_margin_used_usd,
+            source,
             json!({
-                "position_count": exchange_positions.len(),
+                "position_count": account_observation.positions.len(),
             })
             .to_string(),
             sync_run_id,
+            account_snapshot_event_id,
         ],
     )
     .context("failed to insert runtime account snapshot")?;
     tx.execute("DELETE FROM runtime_exchange_positions", [])
         .context("failed to clear runtime exchange positions")?;
-    for position in exchange_positions {
+    for position in &account_observation.positions {
         tx.execute(
             "
             INSERT INTO runtime_exchange_positions (
@@ -813,12 +899,8 @@ fn persist_exchange_snapshot(
                 position.leverage,
                 position.margin_used,
                 ts_ms,
-                timestamp,
-                if dry_run {
-                    "live_fill_sync_dry_run"
-                } else {
-                    "live_fill_sync"
-                },
+                &timestamp,
+                source,
                 sync_run_id,
             ],
         )
@@ -832,7 +914,7 @@ fn persist_exchange_snapshot(
     tx.commit()
         .context("failed to commit exchange snapshot transaction")?;
 
-    sync_exchange_positions(db_path, exchange_positions, ts_ms)
+    sync_exchange_positions(db_path, &account_observation.positions, ts_ms)
         .context("failed to sync position_state from exchange positions")?;
     Ok(())
 }
@@ -2233,47 +2315,171 @@ mod tests {
     }
 
     #[test]
+    fn ensure_sync_schema_backfills_account_snapshot_event_reference_on_legacy_db() {
+        let file = NamedTempFile::new().unwrap();
+        let conn = Connection::open(file.path()).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE runtime_account_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                account_value_usd REAL NOT NULL,
+                withdrawable_usd REAL NOT NULL,
+                total_margin_used_usd REAL NOT NULL,
+                source TEXT NOT NULL,
+                meta_json TEXT,
+                sync_run_id INTEGER
+            );
+            ",
+        )
+        .unwrap();
+        drop(conn);
+
+        ensure_sync_schema(file.path()).unwrap();
+
+        let conn = Connection::open(file.path()).unwrap();
+        assert!(table_column_exists(
+            &conn,
+            "runtime_account_snapshots",
+            "account_snapshot_event_id",
+        )
+        .unwrap());
+        assert!(conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='exchange_account_snapshot_events'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
     fn persist_exchange_snapshot_writes_account_and_position_tables() {
         let db = temp_db();
-        let account_snapshot = crate::live_hyperliquid::HyperliquidAccountSnapshot {
-            account_value_usd: 200.5,
-            withdrawable_usd: 52.25,
-            total_margin_used_usd: 148.25,
+        let observation = crate::live_hyperliquid::HyperliquidClearinghouseStateObservation {
+            observed_at_ts_ms: 1_773_000_000_111_i64,
+            account_snapshot: crate::live_hyperliquid::HyperliquidAccountSnapshot {
+                account_value_usd: 200.5,
+                withdrawable_usd: 52.25,
+                total_margin_used_usd: 148.25,
+            },
+            positions: vec![
+                crate::live_hyperliquid::HyperliquidPosition {
+                    symbol: "DOGE".to_string(),
+                    pos_type: "LONG".to_string(),
+                    size: 1692.0,
+                    entry_price: 0.094602,
+                    leverage: 4.0,
+                    margin_used: 40.0,
+                },
+                crate::live_hyperliquid::HyperliquidPosition {
+                    symbol: "HYPE".to_string(),
+                    pos_type: "SHORT".to_string(),
+                    size: 5.34,
+                    entry_price: 37.2767,
+                    leverage: 4.0,
+                    margin_used: 50.6,
+                },
+            ],
+            payload_json: json!({
+                "marginSummary": {
+                    "accountValue": "200.5",
+                    "totalMarginUsed": "148.25"
+                },
+                "withdrawable": "52.25",
+                "assetPositions": [
+                    {
+                        "position": {
+                            "coin": "DOGE",
+                            "entryPx": "0.094602",
+                            "marginUsed": "40.0",
+                            "leverage": { "value": "4" },
+                            "szi": "1692.0"
+                        }
+                    },
+                    {
+                        "position": {
+                            "coin": "HYPE",
+                            "entryPx": "37.2767",
+                            "marginUsed": "50.6",
+                            "leverage": { "value": "4" },
+                            "szi": "-5.34"
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+            payload_digest: "digest-123".to_string(),
         };
-        let exchange_positions = vec![
-            crate::live_hyperliquid::HyperliquidPosition {
-                symbol: "DOGE".to_string(),
-                pos_type: "LONG".to_string(),
-                size: 1692.0,
-                entry_price: 0.094602,
-                leverage: 4.0,
-                margin_used: 40.0,
-            },
-            crate::live_hyperliquid::HyperliquidPosition {
-                symbol: "HYPE".to_string(),
-                pos_type: "SHORT".to_string(),
-                size: 5.34,
-                entry_price: 37.2767,
-                leverage: 4.0,
-                margin_used: 50.6,
-            },
-        ];
 
-        persist_exchange_snapshot(
+        let account_snapshot_event_id =
+            persist_account_snapshot_event(db.path(), &observation, 105, "0xabc", false).unwrap();
+
+        let conn = Connection::open(db.path()).unwrap();
+        let snapshot_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_account_snapshots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let position_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_exchange_positions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(snapshot_count, 0);
+        assert_eq!(position_count, 0);
+
+        persist_exchange_snapshot_projection(
             db.path(),
-            &account_snapshot,
-            &exchange_positions,
+            &observation,
+            account_snapshot_event_id,
             105,
             false,
         )
         .unwrap();
 
         let conn = Connection::open(db.path()).unwrap();
-        let account_row: (f64, f64, f64, i64) = conn
+        let account_row: (i64, String, f64, f64, f64, i64, i64) = conn
             .query_row(
-                "SELECT account_value_usd, withdrawable_usd, total_margin_used_usd, sync_run_id FROM runtime_account_snapshots ORDER BY ts_ms DESC LIMIT 1",
+                "SELECT ts_ms, timestamp, account_value_usd, withdrawable_usd, total_margin_used_usd, sync_run_id, account_snapshot_event_id
+                 FROM runtime_account_snapshots ORDER BY ts_ms DESC LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let evidence_row: (i64, i64, i64, String, String, String, String, String, i64) = conn
+            .query_row(
+                "SELECT id, sync_run_id, observed_at_ts_ms, source, wallet_address, request_type, raw_payload_json, payload_digest, position_count
+                 FROM exchange_account_snapshot_events ORDER BY observed_at_ts_ms DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
             )
             .unwrap();
         let position_row: (i64, i64) = conn
@@ -2284,7 +2490,32 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(account_row, (200.5, 52.25, 148.25, 105));
+        assert_eq!(
+            account_row,
+            (
+                observation.observed_at_ts_ms,
+                timestamp_from_ms(observation.observed_at_ts_ms),
+                200.5,
+                52.25,
+                148.25,
+                105,
+                account_snapshot_event_id,
+            )
+        );
+        assert_eq!(
+            evidence_row,
+            (
+                account_row.6,
+                105,
+                observation.observed_at_ts_ms,
+                LIVE_FILL_SYNC_SOURCE.to_string(),
+                "0xabc".to_string(),
+                CLEARINGHOUSE_STATE_REQUEST_TYPE.to_string(),
+                observation.payload_json.clone(),
+                "digest-123".to_string(),
+                2,
+            )
+        );
         assert_eq!(position_row, (2, 105));
     }
 }
