@@ -1,8 +1,8 @@
 # AI Agent Instructions for openclaw-crypto-ai-quant
 
 This file is the short catalogue for AI coding agents working in this
-repository. Keep it concise. Load deeper material on demand from the linked
-docs and source files instead of expanding this file again.
+repository. Keep it concise. Load deeper instructions on demand from
+`docs/agent-instructions/` instead of expanding this file again.
 
 ## Non-Negotiable Guardrails
 
@@ -69,26 +69,16 @@ about archived history.
 
 ## Load On Demand Catalogue
 
-Load only the topic you need:
+Load only the instruction file you need from `docs/agent-instructions/`:
 
 | Topic | Load on demand |
 |---|---|
-| Runtime ownership and surface map | `docs/current_authoritative_paths.md` |
-| Operations and service commands | `docs/runbook.md` |
-| Release/version process | `docs/release_process.md`, `VERSION`, `tools/release/*.sh` |
-| Strategy lifecycle and promotion | `docs/strategy_lifecycle.md` |
-| Success/risk metrics | `docs/success_metrics.md` |
-| Repository architecture | `docs/ARCHITECTURE.md` |
-| Canonical config example | `config/strategy_overrides.yaml.example` |
-| Runtime CLI entrypoint | `runtime/aiq-runtime/src/main.rs` |
-| Stage/behaviour plan resolution | `runtime/aiq-runtime-core/src/pipeline.rs` |
-| Backtester engine | `backtester/crates/bt-core/src/engine.rs` |
-| Decision kernel | `backtester/crates/bt-core/src/decision_kernel.rs` |
-| Behaviour registry | `backtester/crates/bt-core/src/behaviour.rs`, `backtester/crates/bt-signals/src/behaviour.rs` |
-| GPU sweep | `backtester/crates/bt-gpu/` |
-| WS ingestion | `ws_sidecar/` |
-| Dashboard and operator routes | `hub/` |
-| Housekeeping/legacy notes | `docs/housekeeping/` |
+| Index of all instruction docs | `docs/agent-instructions/README.md` |
+| SDLC, branching, PR flow, and review patience | `docs/agent-instructions/sdlc.md` |
+| Runtime ownership, services, and operator commands | `docs/agent-instructions/runtime-and-operations.md` |
+| Config rules, parity lanes, and debugging flow | `docs/agent-instructions/configuration-and-debugging.md` |
+| Backtester, GPU parity, and validation rules | `docs/agent-instructions/backtester-and-parity.md` |
+| Release/versioning guidance | `docs/agent-instructions/release-and-versioning.md` |
 
 ## Quick Commands
 
