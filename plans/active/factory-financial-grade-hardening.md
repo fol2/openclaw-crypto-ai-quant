@@ -7,6 +7,30 @@ Active.
 Prepared on 2026-03-14 after an independent three-reviewer design review of the
 current Rust factory cycle.
 
+## Progress
+
+Progress as of 2026-03-14:
+
+- Activated on `master` by PR #991.
+- Completed on `master`:
+  - PR 1 via PR #993: preserve lane-effective configs and full YAML roots.
+  - PR 4 via PR #995, with follow-up fix PR #996: fail-closed paper execution
+    evidence, marker rollback hardening, and paper promotion truthfulness.
+  - PR 5 via PR #998: manifest-driven `live_small` / `live_full` governance
+    with persisted live governance state.
+- In progress:
+  - PR 2 via PR #1000: deterministic role-governed selection and challenger
+    materiality thresholds. Implementation and local tests are complete; reviewer
+    flow and merge are still pending.
+- Pending:
+  - PR 3.
+  - PR 6.
+
+The `Current State` and `Confirmed Gaps` sections below are the baseline taken
+when this plan was prepared. Gaps 1, 3, 4, and 5 are now closed on `master`.
+Gap 6 is partially addressed by the open PR 2 work, while Gap 2 and the
+remaining Gap 6 scheduler/parity items are still open.
+
 ## Objective
 
 Close the remaining governance and evidence gaps between the current Rust-owned
@@ -254,12 +278,12 @@ Acceptance:
 
 The recommended order is:
 
-1. PR 1
-2. PR 4
-3. PR 5
-4. PR 2
-5. PR 3
-6. PR 6
+1. PR 1 - Complete via PR #993
+2. PR 4 - Complete via PR #995 and PR #996
+3. PR 5 - Complete via PR #998
+4. PR 2 - In progress via PR #1000
+5. PR 3 - Pending
+6. PR 6 - Pending
 
 Rationale:
 
