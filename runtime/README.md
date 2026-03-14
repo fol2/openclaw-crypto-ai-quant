@@ -33,6 +33,10 @@ cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db tradin
 hourly automation should treat a failed run as an operator review signal rather
 than a silent partial success.
 
+It also refreshes DB-backed exchange account and position snapshots so the Hub
+can fall back to current live balance and holdings when an in-memory
+Hyperliquid cache is unavailable or stale.
+
 ## Ownership
 
 The runtime now owns:

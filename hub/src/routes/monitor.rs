@@ -262,6 +262,32 @@ fn live_position_overrides(
         .unwrap_or_default()
 }
 
+fn live_position_overrides_from_db(
+    mode: &str,
+    db_positions: &[trading::RuntimeExchangePositionSnapshot],
+) -> HashMap<String, HlPositionSnapshot> {
+    if mode != "live" {
+        return HashMap::new();
+    }
+
+    db_positions
+        .iter()
+        .map(|position| {
+            (
+                position.symbol.clone(),
+                HlPositionSnapshot {
+                    symbol: position.symbol.clone(),
+                    pos_type: position.pos_type.clone(),
+                    size: position.size,
+                    entry_price: position.entry_price,
+                    leverage: position.leverage,
+                    margin_used: position.margin_used,
+                },
+            )
+        })
+        .collect()
+}
+
 fn live_position_override_for<'a>(
     db_position: &trading::OpenPosition,
     live_positions: &'a HashMap<String, HlPositionSnapshot>,
@@ -273,6 +299,58 @@ fn live_position_override_for<'a>(
                 .pos_type
                 .eq_ignore_ascii_case(&db_position.pos_type)
         })
+}
+
+fn synthetic_open_position_from_live_snapshot(
+    live_position: &HlPositionSnapshot,
+) -> trading::OpenPosition {
+    trading::OpenPosition {
+        symbol: live_position.symbol.clone(),
+        pos_type: live_position.pos_type.clone(),
+        open_trade_id: 0,
+        open_timestamp: None,
+        entry_price: live_position.entry_price,
+        size: live_position.size,
+        confidence: None,
+        entry_atr: 0.0,
+        leverage: live_position.leverage.max(0.01),
+        margin_used: live_position.margin_used.max(0.0),
+    }
+}
+
+fn merge_positions_with_live_snapshot(
+    ledger_positions: &[trading::OpenPosition],
+    live_positions: &HashMap<String, HlPositionSnapshot>,
+    live_snapshot_authoritative: bool,
+) -> Vec<trading::OpenPosition> {
+    if !live_snapshot_authoritative {
+        return ledger_positions.to_vec();
+    }
+
+    let mut merged = Vec::new();
+    let mut symbols = live_positions.keys().cloned().collect::<Vec<_>>();
+    symbols.sort();
+    for symbol in symbols {
+        let Some(live_position) = live_positions.get(&symbol) else {
+            continue;
+        };
+        if let Some(ledger_position) = ledger_positions.iter().find(|position| {
+            position.symbol == symbol
+                && position
+                    .pos_type
+                    .eq_ignore_ascii_case(&live_position.pos_type)
+        }) {
+            let mut merged_position = ledger_position.clone();
+            merged_position.entry_price = live_position.entry_price;
+            merged_position.size = live_position.size;
+            merged_position.leverage = live_position.leverage.max(0.01);
+            merged_position.margin_used = live_position.margin_used.max(0.0);
+            merged.push(merged_position);
+        } else {
+            merged.push(synthetic_open_position_from_live_snapshot(live_position));
+        }
+    }
+    merged
 }
 
 fn position_json(
@@ -385,7 +463,7 @@ async fn api_snapshot(
         });
 
     // Open positions
-    let positions = trading::compute_open_positions(&conn)?;
+    let ledger_positions = trading::compute_open_positions(&conn)?;
 
     // Recent symbols
     let interval = &state.config.monitor_interval;
@@ -394,32 +472,6 @@ async fn api_snapshot(
     let candle_conn = candle_pool.as_ref().and_then(|p| p.get().ok());
 
     let symbols = trading::list_recent_symbols(&conn, candle_conn.as_deref(), interval, ts, 200)?;
-
-    // Merge: open positions first, then other symbols
-    let mut merged: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for pos in &positions {
-        if seen.insert(pos.symbol.clone()) {
-            merged.push(pos.symbol.clone());
-        }
-    }
-    for s in &symbols {
-        if seen.insert(s.clone()) {
-            merged.push(s.clone());
-        }
-    }
-    merged.truncate(200);
-
-    // Update the shared symbol list so the background mids poller broadcasts real prices.
-    {
-        let mut tracked = state.tracked_symbols.write().await;
-        *tracked = merged.clone();
-    }
-
-    // Last signals, trades, and intents per symbol
-    let last_signals = trading::last_signals_by_symbol(&conn, &merged)?;
-    let last_trades = trading::last_trades_by_symbol(&conn, &merged)?;
-    let last_intents = trading::last_intents_by_symbol(&conn, &merged)?;
 
     // Balance — prefer HL API snapshot for live mode, fall back to DB.
     let bal = trading::latest_balance(&conn)?;
@@ -441,6 +493,65 @@ async fn api_snapshot(
     } else {
         None
     };
+    let db_live_snapshot = if mode == "live" {
+        trading::latest_runtime_account_snapshot(&conn)?
+    } else {
+        None
+    };
+    let db_live_positions = if mode == "live" {
+        trading::runtime_exchange_positions(&conn)?
+    } else {
+        Vec::new()
+    };
+    const DB_SYNC_STALE_MS: i64 = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
+    let db_live_snapshot_fresh = db_live_snapshot
+        .as_ref()
+        .map(|snapshot| ts.saturating_sub(snapshot.ts_ms) <= DB_SYNC_STALE_MS)
+        .unwrap_or(false);
+    let live_positions = if let Some(ref hl) = hl_snap {
+        live_position_overrides(mode.as_str(), Some(hl))
+    } else if db_live_snapshot_fresh {
+        live_position_overrides_from_db(mode.as_str(), &db_live_positions)
+    } else {
+        HashMap::new()
+    };
+    let live_snapshot_authoritative = hl_snap.is_some() || db_live_snapshot_fresh;
+    let positions = merge_positions_with_live_snapshot(
+        &ledger_positions,
+        &live_positions,
+        live_snapshot_authoritative,
+    );
+
+    // Merge: open positions first, then other symbols
+    let mut merged: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for pos in &positions {
+        if seen.insert(pos.symbol.clone()) {
+            merged.push(pos.symbol.clone());
+        }
+    }
+    for symbol in live_positions.keys() {
+        if seen.insert(symbol.clone()) {
+            merged.push(symbol.clone());
+        }
+    }
+    for s in &symbols {
+        if seen.insert(s.clone()) {
+            merged.push(s.clone());
+        }
+    }
+    merged.truncate(200);
+
+    // Update the shared symbol list so the background mids poller broadcasts real prices.
+    {
+        let mut tracked = state.tracked_symbols.write().await;
+        *tracked = merged.clone();
+    }
+
+    // Last signals, trades, and intents per symbol
+    let last_signals = trading::last_signals_by_symbol(&conn, &merged)?;
+    let last_trades = trading::last_trades_by_symbol(&conn, &merged)?;
+    let last_intents = trading::last_intents_by_symbol(&conn, &merged)?;
 
     // Get mids from sidecar
     let mids_snap = state.sidecar.get_mids(&merged).await.ok();
@@ -456,7 +567,6 @@ async fn api_snapshot(
     let mut margin_used_total = 0.0_f64;
     let pos_map: HashMap<String, &trading::OpenPosition> =
         positions.iter().map(|p| (p.symbol.clone(), p)).collect();
-    let live_positions = live_position_overrides(mode.as_str(), hl_snap.as_ref());
 
     let mut symbols_out: Vec<Value> = Vec::new();
     for sym in &merged {
@@ -518,6 +628,15 @@ async fn api_snapshot(
                 unreal,
                 hl.total_margin_used,
                 "hyperliquid",
+            )
+        } else if let Some(snapshot) = db_live_snapshot.filter(|_| db_live_snapshot_fresh) {
+            let unreal = snapshot.account_value_usd - snapshot.withdrawable_usd;
+            (
+                Some(snapshot.account_value_usd),
+                Some(snapshot.account_value_usd),
+                unreal,
+                snapshot.total_margin_used_usd,
+                "db_exchange_snapshot",
             )
         } else {
             (
@@ -687,9 +806,13 @@ async fn api_marks(
         .ok_or_else(|| HubError::Db("db not available".to_string()))?;
     let conn = pool.get()?;
 
-    let pos = trading::open_position_for_symbol(&conn, &sym)?;
-    let entries = if let Some(ref p) = pos {
-        trading::position_entries(&conn, &sym, p.open_trade_id)?
+    let ledger_pos = trading::open_position_for_symbol(&conn, &sym)?;
+    let entries = if let Some(ref p) = ledger_pos {
+        if p.open_trade_id > 0 {
+            trading::position_entries(&conn, &sym, p.open_trade_id)?
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -714,7 +837,48 @@ async fn api_marks(
     } else {
         None
     };
-    let live_positions = live_position_overrides(mode.as_str(), hl_snap.as_ref());
+    let db_live_snapshot = if mode == "live" {
+        trading::latest_runtime_account_snapshot(&conn)?
+    } else {
+        None
+    };
+    let db_live_positions = if mode == "live" {
+        trading::runtime_exchange_positions(&conn)?
+    } else {
+        Vec::new()
+    };
+    const DB_SYNC_STALE_MS: i64 = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
+    let db_live_snapshot_fresh = db_live_snapshot
+        .as_ref()
+        .map(|snapshot| now_ms().saturating_sub(snapshot.ts_ms) <= DB_SYNC_STALE_MS)
+        .unwrap_or(false);
+    let live_positions = if let Some(ref hl) = hl_snap {
+        live_position_overrides(mode.as_str(), Some(hl))
+    } else if db_live_snapshot_fresh {
+        live_position_overrides_from_db(mode.as_str(), &db_live_positions)
+    } else {
+        HashMap::new()
+    };
+    let live_snapshot_authoritative = hl_snap.is_some() || db_live_snapshot_fresh;
+    let pos = if live_snapshot_authoritative {
+        match (ledger_pos, live_positions.get(&sym)) {
+            (Some(mut ledger), Some(live)) if live.pos_type.eq_ignore_ascii_case(&ledger.pos_type) => {
+                ledger.entry_price = live.entry_price;
+                ledger.size = live.size;
+                ledger.leverage = live.leverage.max(0.01);
+                ledger.margin_used = live.margin_used.max(0.0);
+                Some(ledger)
+            }
+            (_, Some(live)) => Some(synthetic_open_position_from_live_snapshot(live)),
+            _ => None,
+        }
+    } else {
+        ledger_pos.or_else(|| {
+            live_positions
+                .get(&sym)
+                .map(synthetic_open_position_from_live_snapshot)
+        })
+    };
 
     let position_json = pos.as_ref().map(|p| {
         let live_override = live_position_override_for(p, &live_positions);
@@ -1226,5 +1390,58 @@ mod tests {
             .unwrap();
 
         assert_eq!(from_ts, "2024-03-09T17:23:20");
+    }
+
+    #[test]
+    fn merge_positions_with_live_snapshot_clears_stale_ledger_when_snapshot_is_authoritative() {
+        let ledger_positions = vec![trading::OpenPosition {
+            symbol: "AXS".to_string(),
+            pos_type: "SHORT".to_string(),
+            open_trade_id: 42,
+            open_timestamp: Some("2026-03-03T22:59:03.822+00:00".to_string()),
+            entry_price: 1.2149,
+            size: 109.6,
+            confidence: Some("MANUAL".to_string()),
+            entry_atr: 0.0,
+            leverage: 4.0,
+            margin_used: 33.3,
+        }];
+        let live_positions = HashMap::<String, HlPositionSnapshot>::new();
+
+        let merged = merge_positions_with_live_snapshot(&ledger_positions, &live_positions, true);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn merge_positions_with_live_snapshot_uses_live_values_for_matching_symbol() {
+        let ledger_positions = vec![trading::OpenPosition {
+            symbol: "DOGE".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 11904,
+            open_timestamp: Some("2026-03-11T17:31:59.945000+00:00".to_string()),
+            entry_price: 0.093828,
+            size: 1036.0,
+            confidence: Some("MANUAL".to_string()),
+            entry_atr: 0.0,
+            leverage: 4.0,
+            margin_used: 24.0,
+        }];
+        let live_positions = HashMap::from([(
+            "DOGE".to_string(),
+            HlPositionSnapshot {
+                symbol: "DOGE".to_string(),
+                pos_type: "LONG".to_string(),
+                size: 1692.0,
+                entry_price: 0.094602,
+                leverage: 4.0,
+                margin_used: 40.112244,
+            },
+        )]);
+
+        let merged = merge_positions_with_live_snapshot(&ledger_positions, &live_positions, true);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].open_trade_id, 11904);
+        assert!((merged[0].size - 1692.0).abs() < 1e-9);
+        assert!((merged[0].entry_price - 0.094602).abs() < 1e-9);
     }
 }

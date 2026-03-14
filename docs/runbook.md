@@ -379,6 +379,10 @@ The example service reads `ai-quant-v8.env` plus `ai-quant-live-v8.env`, then
 uses the Rust `live sync-fills` cursor contract to auto-check and auto-sync the
 ledger every hour.
 
+Successful runs also write exchange account and position snapshots into the
+live DB, so Hub read paths can fall back to current live balance and holdings
+even when no fresh in-memory Hyperliquid snapshot is available.
+
 Service-level tuning knobs:
 
 - `AI_QUANT_LIVE_FILL_SYNC_LOOKBACK_HOURS`: fallback scan window when no cursor exists yet.

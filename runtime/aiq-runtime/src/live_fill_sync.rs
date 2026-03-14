@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::live_hyperliquid::{HyperliquidClient, HyperliquidFill};
 use crate::live_oms::{LiveOms, LiveOmsOptions};
 use crate::live_secrets::load_live_secrets;
+use crate::live_state::sync_exchange_positions;
 
 const DEFAULT_CURSOR_KEY: &str = "hyperliquid_fill_sync_v1";
 const DEFAULT_DB_TIMEOUT_MS: u64 = 1_000;
@@ -34,6 +35,10 @@ pub struct LiveFillSyncReport {
     pub live_db: String,
     pub working_db: String,
     pub user: String,
+    pub account_value_usd: f64,
+    pub withdrawable_usd: f64,
+    pub total_margin_used_usd: f64,
+    pub exchange_position_count: usize,
     pub window: SyncWindowReport,
     pub fetched_remote_fills: usize,
     pub supported_remote_fills: usize,
@@ -168,6 +173,8 @@ fn run_sync_inner(
     ensure_sync_schema(working_db_path)?;
     let secrets = load_live_secrets(input.secrets_path)?;
     let client = HyperliquidClient::new(&secrets, None)?;
+    let account_snapshot = client.account_snapshot()?;
+    let exchange_positions = client.positions()?;
     let cursor_key = input
         .cursor_key
         .map(str::trim)
@@ -201,8 +208,16 @@ fn run_sync_inner(
     relabel_existing_manual_trades(working_db_path, &aiq_cloid_prefix, &mut stats)?;
 
     let ok = stats.unsupported_remote_fills == 0;
-    if ok && !input.dry_run {
-        write_sync_cursor(working_db_path, cursor_key, window.start_ms, window.end_ms)?;
+    if ok {
+        persist_exchange_snapshot(
+            working_db_path,
+            &account_snapshot,
+            &exchange_positions,
+            input.dry_run,
+        )?;
+        if !input.dry_run {
+            write_sync_cursor(working_db_path, cursor_key, window.start_ms, window.end_ms)?;
+        }
     }
     Ok(LiveFillSyncReport {
         ok,
@@ -210,6 +225,10 @@ fn run_sync_inner(
         live_db: source_live_db.display().to_string(),
         working_db: working_db_path.display().to_string(),
         user: secrets.main_address,
+        account_value_usd: account_snapshot.account_value_usd,
+        withdrawable_usd: account_snapshot.withdrawable_usd,
+        total_margin_used_usd: account_snapshot.total_margin_used_usd,
+        exchange_position_count: exchange_positions.len(),
         window: SyncWindowReport {
             start_ms: window.start_ms,
             end_ms: window.end_ms,
@@ -317,6 +336,29 @@ fn ensure_sync_schema(db_path: &Path) -> Result<()> {
             last_end_ts_ms INTEGER NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS runtime_account_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            account_value_usd REAL NOT NULL,
+            withdrawable_usd REAL NOT NULL,
+            total_margin_used_usd REAL NOT NULL,
+            source TEXT NOT NULL,
+            meta_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_account_snapshots_ts_ms
+            ON runtime_account_snapshots(ts_ms DESC);
+        CREATE TABLE IF NOT EXISTS runtime_exchange_positions (
+            symbol TEXT PRIMARY KEY,
+            pos_type TEXT NOT NULL,
+            size REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            leverage REAL NOT NULL,
+            margin_used REAL NOT NULL,
+            ts_ms INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            source TEXT NOT NULL
+        );
         ",
     )
     .context("failed to ensure live fill sync schema")?;
@@ -392,6 +434,71 @@ fn write_sync_cursor(db_path: &Path, cursor_key: &str, start_ms: i64, end_ms: i6
         params![cursor_key, start_ms, end_ms, Utc::now().to_rfc3339()],
     )
     .context("failed to persist sync cursor")?;
+    Ok(())
+}
+
+fn persist_exchange_snapshot(
+    db_path: &Path,
+    account_snapshot: &crate::live_hyperliquid::HyperliquidAccountSnapshot,
+    exchange_positions: &[crate::live_hyperliquid::HyperliquidPosition],
+    dry_run: bool,
+) -> Result<()> {
+    let ts_ms = Utc::now().timestamp_millis();
+    let timestamp = chrono::DateTime::from_timestamp_millis(ts_ms)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let mut conn = open_sync_connection(db_path)?;
+    let tx = conn
+        .transaction()
+        .context("failed to start exchange snapshot transaction")?;
+    tx.execute(
+        "
+        INSERT INTO runtime_account_snapshots (
+            ts_ms, timestamp, account_value_usd, withdrawable_usd, total_margin_used_usd, source, meta_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ",
+        params![
+            ts_ms,
+            timestamp,
+            account_snapshot.account_value_usd,
+            account_snapshot.withdrawable_usd,
+            account_snapshot.total_margin_used_usd,
+            if dry_run { "live_fill_sync_dry_run" } else { "live_fill_sync" },
+            json!({
+                "position_count": exchange_positions.len(),
+            })
+            .to_string(),
+        ],
+    )
+    .context("failed to insert runtime account snapshot")?;
+    tx.execute("DELETE FROM runtime_exchange_positions", [])
+        .context("failed to clear runtime exchange positions")?;
+    for position in exchange_positions {
+        tx.execute(
+            "
+            INSERT INTO runtime_exchange_positions (
+                symbol, pos_type, size, entry_price, leverage, margin_used, ts_ms, updated_at, source
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ",
+            params![
+                position.symbol.trim().to_ascii_uppercase(),
+                position.pos_type.trim().to_ascii_uppercase(),
+                position.size,
+                position.entry_price,
+                position.leverage,
+                position.margin_used,
+                ts_ms,
+                timestamp,
+                if dry_run { "live_fill_sync_dry_run" } else { "live_fill_sync" },
+            ],
+        )
+        .with_context(|| format!("failed to persist runtime exchange position for {}", position.symbol))?;
+    }
+    tx.commit()
+        .context("failed to commit exchange snapshot transaction")?;
+
+    sync_exchange_positions(db_path, exchange_positions, ts_ms)
+        .context("failed to sync position_state from exchange positions")?;
     Ok(())
 }
 
@@ -1589,5 +1696,55 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("already present locally")));
+    }
+
+    #[test]
+    fn persist_exchange_snapshot_writes_account_and_position_tables() {
+        let db = temp_db();
+        let account_snapshot = crate::live_hyperliquid::HyperliquidAccountSnapshot {
+            account_value_usd: 200.5,
+            withdrawable_usd: 52.25,
+            total_margin_used_usd: 148.25,
+        };
+        let exchange_positions = vec![
+            crate::live_hyperliquid::HyperliquidPosition {
+                symbol: "DOGE".to_string(),
+                pos_type: "LONG".to_string(),
+                size: 1692.0,
+                entry_price: 0.094602,
+                leverage: 4.0,
+                margin_used: 40.0,
+            },
+            crate::live_hyperliquid::HyperliquidPosition {
+                symbol: "HYPE".to_string(),
+                pos_type: "SHORT".to_string(),
+                size: 5.34,
+                entry_price: 37.2767,
+                leverage: 4.0,
+                margin_used: 50.6,
+            },
+        ];
+
+        persist_exchange_snapshot(db.path(), &account_snapshot, &exchange_positions, false)
+            .unwrap();
+
+        let conn = Connection::open(db.path()).unwrap();
+        let account_row: (f64, f64, f64) = conn
+            .query_row(
+                "SELECT account_value_usd, withdrawable_usd, total_margin_used_usd FROM runtime_account_snapshots ORDER BY ts_ms DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let position_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_exchange_positions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(account_row, (200.5, 52.25, 148.25));
+        assert_eq!(position_count, 2);
     }
 }
