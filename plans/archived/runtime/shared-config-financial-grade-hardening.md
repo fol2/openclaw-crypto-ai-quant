@@ -212,9 +212,9 @@ Required outcome:
 
 ### 4. Runtime launch immutability is now implemented
 
-This gap is closed in the current PR 6 implementation branch.
+This gap was closed by PR 6.
 
-The runtime launch contract now:
+The merged runtime launch contract now:
 
 - launches paper/live daemons from materialised `config_path` artefacts rather
   than mutable `base_config_path`
@@ -239,9 +239,9 @@ Required outcome:
 
 ### 6. Audit and attribution are not config-id-centric
 
-This gap is closed in the current PR 7 implementation branch.
+This gap was closed by PR 7.
 
-The current branch now:
+The merged control plane now:
 
 - records append-only config mutation events keyed by before/after `config_id`
 - attaches weak request actor metadata, reason, lane, validation outcome, and
@@ -252,9 +252,9 @@ The current branch now:
 
 ### 7. Sensitive operational metadata needs redaction boundaries
 
-This gap is closed in the current PR 8 implementation branch.
+This gap was closed by PR 8.
 
-The current branch now:
+The merged control plane now:
 
 - redacts sensitive path, raw command, and raw payload metadata on default
   config/system/monitor read paths
@@ -265,9 +265,9 @@ The current branch now:
 
 ### 8. Governance workflow is now implemented
 
-This gap is closed in the current PR 9 implementation branch.
+This gap was closed by PR 9.
 
-The current branch now:
+The merged control plane now:
 
 - separates `viewer`, `editor`, and `approver` auth boundaries
 - requires live apply / rollback to move through a durable pending approval
