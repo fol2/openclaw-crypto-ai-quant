@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getJourneys, getTrades, getConfigHistory, getConfigDiff, getConfigFiles } from '../lib/api';
+  import { getJourneys, getTrades, getConfigHistory, getConfigDiffPrivileged, getConfigFiles } from '../lib/api';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
   // ── UI state ─────────────────────────────────────────────────────
@@ -154,7 +154,7 @@
     if (!diffA || !diffB || diffA === diffB) return;
     diffLoading = true;
     try {
-      const res = await getConfigDiff(diffA, diffB, selectedConfigFile);
+      const res = await getConfigDiffPrivileged(diffA, diffB, selectedConfigFile);
       diffResult = res.diff || [];
     } catch (e) { console.error('loadDiff:', e); }
     diffLoading = false;

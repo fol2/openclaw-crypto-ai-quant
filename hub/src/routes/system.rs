@@ -1,5 +1,6 @@
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     middleware,
     routing::{get, post},
     Json, Router,
@@ -9,6 +10,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::process::Command;
 
+use crate::config_audit::weak_actor_from_headers;
+use crate::diagnostic_audit::{append_read_event, DiagnosticReadEvent};
 use crate::error::HubError;
 use crate::factory_capability::{FactoryCapability, FACTORY_SERVICE_UNITS};
 use crate::state::AppState;
@@ -21,6 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/system/disk", get(disk_usage))
         .route("/api/system/logs", get(service_logs));
     let mutation_routes = Router::new()
+        .route("/api/system/logs/raw", get(service_logs_raw))
         .route("/api/system/services/{name}/{action}", post(service_action))
         .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
 
@@ -56,6 +60,26 @@ fn validate_service(name: &str) -> Result<(), HubError> {
 
 fn is_factory_service(name: &str) -> bool {
     FACTORY_SERVICE_UNITS.contains(&name)
+}
+
+fn append_diagnostic_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &str,
+    target: &str,
+) -> Result<(), HubError> {
+    append_read_event(
+        &state.config.artifacts_dir,
+        &DiagnosticReadEvent {
+            version: "diagnostic_read_event_v1".to_string(),
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            ts_utc: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            route: route.to_string(),
+            target: target.to_string(),
+            actor: weak_actor_from_headers(headers, "admin_token"),
+        },
+    )?;
+    Ok(())
 }
 
 /// GET /api/system/services — List systemd user services with status.
@@ -194,7 +218,7 @@ async fn db_stats(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>
 
         stats.push(json!({
             "label": label,
-            "path": path.display().to_string(),
+            "path_redacted": true,
             "exists": exists,
             "size_bytes": size,
             "size_mb": format!("{:.1}", size as f64 / 1_048_576.0),
@@ -211,7 +235,7 @@ async fn db_stats(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>
                     let meta = entry.metadata().ok();
                     stats.push(json!({
                         "label": format!("candle/{name}"),
-                        "path": entry.path().display().to_string(),
+                        "path_redacted": true,
                         "exists": true,
                         "size_bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
                         "size_mb": format!("{:.1}", meta.as_ref().map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0),
@@ -238,7 +262,20 @@ pub struct LogsQuery {
 /// GET /api/system/logs — Recent journalctl logs for a service.
 async fn service_logs(Query(q): Query<LogsQuery>) -> Result<Json<Value>, HubError> {
     validate_service(&q.service)?;
+    Ok(Json(json!({
+        "service": q.service,
+        "redacted": true,
+        "message": "raw system logs are privileged; use /api/system/logs/raw with admin auth",
+    })))
+}
 
+/// GET /api/system/logs/raw — Read raw systemd logs through an explicit privileged route.
+async fn service_logs_raw(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LogsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, HubError> {
+    validate_service(&q.service)?;
     let lines = q.lines.unwrap_or(50).min(500);
     let unit = format!("{}.service", q.service);
 
@@ -252,6 +289,13 @@ async fn service_logs(Query(q): Query<LogsQuery>) -> Result<Json<Value>, HubErro
         .output()
         .await
         .map_err(|e| HubError::Internal(format!("journalctl failed: {e}")))?;
+
+    append_diagnostic_audit(
+        &state,
+        &headers,
+        "system_logs_raw",
+        &format!("service={}", q.service),
+    )?;
 
     let text = String::from_utf8_lossy(&output.stdout).to_string();
 
@@ -297,10 +341,59 @@ async fn disk_usage(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value
 
         result.push(json!({
             "label": label,
-            "path": path,
+            "path_redacted": true,
             "size": size,
         }));
     }
 
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use tempfile::tempdir;
+
+    fn test_state(root: &std::path::Path) -> Arc<AppState> {
+        let mut config = crate::config::HubConfig::from_env();
+        config.aiq_root = root.to_path_buf();
+        config.candles_db_dir = root.join("candles_dbs");
+        config.live_db = root.join("live.db");
+        config.paper1_db = root.join("paper1.db");
+        config.paper2_db = root.join("paper2.db");
+        config.paper3_db = root.join("paper3.db");
+        AppState::new(config)
+    }
+
+    #[tokio::test]
+    async fn service_logs_default_route_is_redacted() {
+        let Json(response) = service_logs(Query(LogsQuery {
+            service: "openclaw-ai-quant-hub".to_string(),
+            lines: Some(20),
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(response["redacted"], Value::Bool(true));
+        assert!(response["message"].as_str().unwrap().contains("privileged"));
+    }
+
+    #[tokio::test]
+    async fn db_stats_and_disk_usage_redact_paths() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("candles_dbs")).unwrap();
+        std::fs::write(dir.path().join("live.db"), b"test").unwrap();
+        let state = test_state(dir.path());
+
+        let Json(db_stats_response) = db_stats(State(Arc::clone(&state))).await.unwrap();
+        assert!(db_stats_response
+            .iter()
+            .all(|row| row.get("path").is_none() && row.get("path_redacted").is_some()));
+
+        let Json(disk_response) = disk_usage(State(Arc::clone(&state))).await.unwrap();
+        assert!(disk_response
+            .iter()
+            .all(|row| row.get("path").is_none() && row.get("path_redacted").is_some()));
+    }
 }

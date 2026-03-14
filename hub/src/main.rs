@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod config_audit;
 mod db;
+mod diagnostic_audit;
 mod error;
 mod factory_capability;
 mod heartbeat;

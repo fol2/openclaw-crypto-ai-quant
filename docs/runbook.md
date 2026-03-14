@@ -171,6 +171,37 @@ plus the first runtime-log timestamp that carried that same `config_id`, rather
 than from YAML file `mtime`. Snapshot responses therefore expose config-centric
 attribution boundaries instead of filesystem metadata.
 
+### Default Redaction and Privileged Diagnostics
+
+Default config/system/monitor read paths now redact sensitive operational
+metadata such as:
+
+- raw config bodies and raw config diffs
+- filesystem paths
+- raw subprocess payloads
+- raw system log bodies
+- raw audit `data_json` blobs
+
+Use the explicit privileged routes when operators genuinely need raw
+diagnostics:
+
+```bash
+/api/config/raw/privileged
+/api/config/diff/privileged
+/api/config/audit/privileged
+/api/system/logs/raw
+```
+
+These privileged diagnostics reads are audited to:
+
+```bash
+artifacts/diagnostic_audit/read_events.jsonl
+```
+
+Operators may attach a weak actor hint through `X-AIQ-Actor`; when absent, the
+Hub falls back to the `admin_token` auth scope label in the diagnostics audit
+event.
+
 ## Snapshot Operations
 
 ```bash
