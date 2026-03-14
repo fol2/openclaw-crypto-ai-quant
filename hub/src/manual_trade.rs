@@ -1610,7 +1610,7 @@ pub fn cancel_order(
             ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
             ManualCancelRequestClaim::Existing(existing) => {
                 if let Some(recovered) =
-                    recover_existing_pending_cancel_request(cfg, &conn, request, &existing)?
+                    recover_existing_pending_cancel_request(cfg, &mut conn, request, &existing)?
                 {
                     return Ok(recovered);
                 }
@@ -1843,7 +1843,7 @@ pub fn cancel_order(
             ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
             ManualCancelRequestClaim::Existing(existing) => {
                 if let Some(recovered) =
-                    recover_existing_pending_cancel_request(cfg, &conn, request, &existing)?
+                    recover_existing_pending_cancel_request(cfg, &mut conn, request, &existing)?
                 {
                     return Ok(recovered);
                 }
@@ -3297,7 +3297,7 @@ fn manual_cancel_target_is_still_open(
 
 fn recover_existing_pending_cancel_request(
     cfg: &HubConfig,
-    conn: &Connection,
+    conn: &mut Connection,
     request: &ManualTradeCancelRequest,
     existing: &ExistingManualCancelRequest,
 ) -> Result<Option<Value>, HubError> {
@@ -3311,6 +3311,7 @@ fn recover_existing_pending_cancel_request(
         .open_orders()
         .map_err(|error| HubError::Internal(format!("failed to inspect open orders: {error}")))?;
 
+    let mut recovered_cancel_context: Option<ManualCancelContext> = None;
     let target_still_open = if let Some(intent_id) = request
         .intent_id
         .as_deref()
@@ -3318,6 +3319,7 @@ fn recover_existing_pending_cancel_request(
         .filter(|value| !value.is_empty())
     {
         if let Some(context) = load_manual_cancel_context_by_intent_id(conn, intent_id)? {
+            recovered_cancel_context = Some(context.clone());
             if is_terminal_cancelled_status(context.current_status.as_deref()) {
                 update_manual_cancel_request(
                     conn,
@@ -3356,6 +3358,11 @@ fn recover_existing_pending_cancel_request(
             false
         }
     } else {
+        recovered_cancel_context = load_manual_cancel_context_by_exchange_order_id(
+            conn,
+            &symbol,
+            request.oid.as_deref().map(str::trim).unwrap_or_default(),
+        )?;
         manual_cancel_target_is_still_open(
             &open_orders,
             &symbol,
@@ -3372,6 +3379,30 @@ fn recover_existing_pending_cancel_request(
         "status": "ok",
         "reason": "target_not_open_on_retry",
     });
+    record_manual_cancel_audit(
+        conn,
+        recovered_cancel_context.as_ref(),
+        ManualCancelAudit {
+            intent_id: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.intent_id.as_deref()),
+            symbol: &symbol,
+            side: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.side.as_deref()),
+            order_type: "cancel_recovered",
+            requested_size: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.requested_size),
+            reduce_only: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.reduce_only),
+            client_order_id: existing.client_order_id.as_deref(),
+            exchange_order_id: existing.exchange_order_id.as_deref(),
+            status: "CANCELLED",
+            raw_json: recovered_response.to_string(),
+        },
+    )?;
     update_manual_cancel_request(
         conn,
         &existing.request_id,
