@@ -180,17 +180,21 @@ export async function getConfig(file = 'main') {
   return apiFetch(`/api/config?file=${encodeURIComponent(file)}`);
 }
 
-export async function getConfigRaw(file = 'main'): Promise<string> {
+export async function getConfigRaw(file = 'main'): Promise<{ raw: string; configId: string | null }> {
   const headers: Record<string, string> = {};
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
   const resp = await fetch(`/api/config/raw?file=${encodeURIComponent(file)}`, { headers });
   if (!resp.ok) throw new Error(`API ${resp.status}`);
-  return resp.text();
+  return {
+    raw: await resp.text(),
+    configId: resp.headers.get('x-aiq-config-id'),
+  };
 }
 
-export async function putConfig(yaml: string, file = 'main') {
+export async function putConfig(yaml: string, file = 'main', expectedConfigId?: string | null) {
   return apiFetch(`/api/config?file=${encodeURIComponent(file)}`, {
     method: 'PUT',
+    headers: expectedConfigId ? { 'If-Match': expectedConfigId } : undefined,
     body: JSON.stringify({ yaml }),
   });
 }

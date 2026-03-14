@@ -8,6 +8,7 @@ pub enum HubError {
     Db(String),
     NotFound(String),
     BadRequest(String),
+    Conflict(String),
     Forbidden(String),
     Internal(String),
 }
@@ -18,6 +19,7 @@ impl std::fmt::Display for HubError {
             Self::Db(msg) => write!(f, "db_error: {msg}"),
             Self::NotFound(msg) => write!(f, "not_found: {msg}"),
             Self::BadRequest(msg) => write!(f, "bad_request: {msg}"),
+            Self::Conflict(msg) => write!(f, "conflict: {msg}"),
             Self::Forbidden(msg) => write!(f, "forbidden: {msg}"),
             Self::Internal(msg) => write!(f, "internal_error: {msg}"),
         }
@@ -32,6 +34,7 @@ impl IntoResponse for HubError {
             Self::Db(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db_error:{msg}")),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };

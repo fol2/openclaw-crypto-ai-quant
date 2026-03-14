@@ -8,6 +8,9 @@ mod hyperliquid;
 #[path = "../../runtime/aiq-runtime/src/live_hyperliquid.rs"]
 mod live_hyperliquid;
 #[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/live_lane.rs"]
+mod live_lane;
+#[allow(dead_code)]
 #[path = "../../runtime/aiq-runtime/src/live_risk.rs"]
 mod live_risk;
 #[allow(dead_code)]
@@ -16,6 +19,12 @@ mod live_safety;
 #[path = "../../runtime/aiq-runtime/src/live_secrets.rs"]
 mod live_secrets;
 mod manual_trade;
+#[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/paper_config.rs"]
+mod paper_config;
+#[allow(dead_code)]
+#[path = "../../runtime/aiq-runtime/src/paper_lane.rs"]
+mod paper_lane;
 mod routes;
 mod sidecar;
 mod state;
