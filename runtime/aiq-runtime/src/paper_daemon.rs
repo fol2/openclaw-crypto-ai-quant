@@ -65,6 +65,7 @@ pub(crate) struct PaperDaemonStatus {
     pub running: bool,
     pub pid: u32,
     pub config_path: String,
+    pub config_id: String,
     pub paper_db: String,
     pub candles_db: String,
     pub lock_path: String,
@@ -101,6 +102,8 @@ pub(crate) struct PaperDaemonStatusSnapshot {
     pub pid: u32,
     #[serde(default)]
     pub config_path: String,
+    #[serde(default)]
+    pub config_id: String,
     #[serde(default)]
     pub paper_db: String,
     #[serde(default)]
@@ -322,6 +325,7 @@ fn write_status_snapshot(
         running: snapshot.stopped_at_ms.is_none(),
         pid: std::process::id(),
         config_path: input.effective_config.config_path().display().to_string(),
+        config_id: input.effective_config.config_id().to_string(),
         paper_db: input.paper_db.display().to_string(),
         candles_db: input.candles_db.display().to_string(),
         lock_path: lock_path.display().to_string(),

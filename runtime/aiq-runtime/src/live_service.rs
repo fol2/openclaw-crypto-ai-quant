@@ -26,6 +26,7 @@ pub struct LiveServiceInput<'a> {
 #[derive(Clone, Copy)]
 pub struct LiveServiceApplyInput<'a> {
     pub service: LiveServiceInput<'a>,
+    pub expected_config_id: Option<&'a str>,
     pub requested_action: LiveServiceApplyRequestedAction,
     pub start_wait_ms: u64,
     pub stop_wait_ms: u64,
@@ -126,6 +127,7 @@ pub fn build_service(input: LiveServiceInput<'_>) -> Result<LiveServiceReport> {
 
 pub fn apply_service(input: LiveServiceApplyInput<'_>) -> Result<LiveServiceApplyReport> {
     let preview = build_service(input.service)?;
+    verify_expected_config_id(input.expected_config_id, &preview.status.manifest.config_id)?;
     let lock_path = PathBuf::from(&preview.lock_path);
     let status_path = PathBuf::from(&preview.status_path);
     let lock_owner_pid = live_daemon::probe_lock_owner(&lock_path)?;
@@ -179,6 +181,10 @@ pub fn apply_service(input: LiveServiceApplyInput<'_>) -> Result<LiveServiceAppl
     }
 
     let final_service = build_service(input.service)?;
+    verify_expected_config_id(
+        input.expected_config_id,
+        &final_service.status.manifest.config_id,
+    )?;
 
     Ok(LiveServiceApplyReport {
         ok: final_service.ok,
@@ -191,6 +197,25 @@ pub fn apply_service(input: LiveServiceApplyInput<'_>) -> Result<LiveServiceAppl
         preview,
         final_service,
     })
+}
+
+fn verify_expected_config_id(
+    expected_config_id: Option<&str>,
+    actual_config_id: &str,
+) -> Result<()> {
+    if let Some(expected_config_id) = expected_config_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if expected_config_id != actual_config_id {
+            anyhow::bail!(
+                "live service apply refused to continue because expected config_id {} did not match resolved {}",
+                expected_config_id,
+                actual_config_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn derive_action(status: &LiveStatusReport) -> (LiveSupervisorAction, String) {
@@ -754,5 +779,67 @@ mod tests {
 
         assert_eq!(report.status.service_state, LiveServiceState::Ready);
         assert_eq!(report.desired_action, LiveSupervisorAction::Start);
+    }
+
+    #[test]
+    fn apply_service_rejects_mismatched_expected_config_id_before_supervising() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let config_path = dir
+            .path()
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        write_config(&config_path, "30m");
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_STRATEGY_YAML", None),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_MARKET_DB_PATH", None),
+            ("AI_QUANT_CANDLES_DB_DIR", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            ("AI_QUANT_EVENT_LOG_DIR", None),
+            ("AI_QUANT_INSTANCE_TAG", None),
+            ("AI_QUANT_LIVE_SERVICE_NAME", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
+            ("AI_QUANT_SECRETS_PATH", None),
+            ("AI_QUANT_LIVE_ENABLE", Some("1")),
+            (
+                "AI_QUANT_LIVE_CONFIRM",
+                Some("I_UNDERSTAND_THIS_CAN_LOSE_MONEY"),
+            ),
+        ]);
+
+        let err = apply_service(LiveServiceApplyInput {
+            service: LiveServiceInput {
+                config: None,
+                project_dir: Some(dir.path()),
+                profile: None,
+                db: None,
+                market_db: None,
+                candles_db: None,
+                symbols: &[],
+                symbols_file: None,
+                btc_symbol: "BTC",
+                secrets_path: None,
+                lock_path: None,
+                status_path: None,
+                lookback_bars: Some(200),
+                stale_after_ms: Some(30_000),
+            },
+            expected_config_id: Some("wrong-config-id"),
+            requested_action: LiveServiceApplyRequestedAction::Auto,
+            start_wait_ms: 100,
+            stop_wait_ms: 100,
+            poll_ms: 10,
+        })
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("expected config_id wrong-config-id did not match resolved"));
     }
 }

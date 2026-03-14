@@ -224,6 +224,9 @@ struct LiveServiceArgs {
 struct LiveServiceApplyArgs {
     #[command(flatten)]
     service: LiveServiceArgs,
+    /// Expected materialised config identity for this supervised apply.
+    #[arg(long)]
+    expected_config_id: Option<String>,
     /// Requested supervisor action. `auto` reuses the read-only live service recommendation.
     #[arg(long, value_enum, default_value = "auto")]
     action: LiveServiceApplyActionArg,
@@ -243,6 +246,9 @@ struct LiveDaemonArgs {
     /// Optional YAML config path override. Falls back to the conventional live config path.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Expected materialised config identity for this launch contract.
+    #[arg(long)]
+    expected_config_id: Option<String>,
     /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
     #[arg(long)]
     project_dir: Option<PathBuf>,
@@ -447,6 +453,9 @@ struct PaperServiceArgs {
 struct PaperServiceApplyArgs {
     #[command(flatten)]
     service: PaperServiceArgs,
+    /// Expected materialised config identity for this supervised apply.
+    #[arg(long)]
+    expected_config_id: Option<String>,
     /// Requested supervisor action. `auto` reuses the read-only paper service recommendation.
     #[arg(long, value_enum, default_value = "auto")]
     action: PaperServiceApplyActionArg,
@@ -636,6 +645,9 @@ struct PaperLoopArgs {
 struct PaperDaemonArgs {
     #[command(flatten)]
     common: PaperCommonArgs,
+    /// Expected materialised config identity for this launch contract.
+    #[arg(long)]
+    expected_config_id: Option<String>,
     /// Paper DB path to restore from and project back into.
     #[arg(long)]
     db: Option<PathBuf>,
@@ -947,6 +959,26 @@ fn resolve_config_path(path: &Path) -> PathBuf {
     }
 
     path.to_path_buf()
+}
+
+fn verify_expected_config_id(
+    expected_config_id: Option<&str>,
+    actual_config_id: &str,
+    context: &str,
+) -> Result<()> {
+    if let Some(expected_config_id) = expected_config_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if expected_config_id != actual_config_id {
+            anyhow::bail!(
+                "{context} refused to proceed because expected config_id {} did not match resolved {}",
+                expected_config_id,
+                actual_config_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn load_symbols(symbols: Vec<String>, symbols_file: Option<&Path>) -> Result<Vec<String>> {
@@ -1315,6 +1347,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                         status_path: args.service.status.manifest.status_path.as_deref(),
                         stale_after_ms: args.service.status.stale_after_ms,
                     },
+                    expected_config_id: args.expected_config_id.as_deref(),
                     requested_action,
                     start_wait_ms: args.start_wait_ms,
                     stop_wait_ms: args.stop_wait_ms,
@@ -1526,8 +1559,13 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 lock_path: args.lock_path.as_deref(),
                 status_path: args.status_path.as_deref(),
             })?;
+            verify_expected_config_id(
+                args.expected_config_id.as_deref(),
+                &manifest.config_id,
+                "paper daemon launch contract",
+            )?;
             let effective_config = paper_config::PaperEffectiveConfig::resolve(
-                Some(Path::new(&manifest.base_config_path)),
+                Some(Path::new(&manifest.config_path)),
                 args.common.lane.map(Into::into),
                 args.common.project_dir.as_deref(),
             )?;
@@ -1715,6 +1753,7 @@ fn run_live(command: LiveCommand) -> Result<()> {
                         lookback_bars: args.service.status.manifest.lookback_bars,
                         stale_after_ms: args.service.status.stale_after_ms,
                     },
+                    expected_config_id: args.expected_config_id.as_deref(),
                     requested_action: match args.action {
                         LiveServiceApplyActionArg::Auto => {
                             live_service::LiveServiceApplyRequestedAction::Auto
@@ -1766,8 +1805,13 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 status_path: args.status_path.as_deref(),
                 lookback_bars: args.lookback_bars,
             })?;
+            verify_expected_config_id(
+                args.expected_config_id.as_deref(),
+                &report.config_id,
+                "live daemon launch contract",
+            )?;
             let effective_config = paper_config::PaperEffectiveConfig::resolve_live(
-                Some(Path::new(&report.base_config_path)),
+                Some(Path::new(&report.config_path)),
                 args.project_dir.as_deref(),
             )?;
             let runtime_bootstrap =

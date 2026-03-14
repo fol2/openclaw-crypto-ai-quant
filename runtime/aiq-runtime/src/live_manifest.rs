@@ -211,7 +211,9 @@ pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport
         "live".to_string(),
         "daemon".to_string(),
         "--config".to_string(),
-        effective_config.base_config_path().display().to_string(),
+        effective_config.config_path().display().to_string(),
+        "--expected-config-id".to_string(),
+        effective_config.config_id().to_string(),
         "--db".to_string(),
         live_db.display().to_string(),
         "--lock-path".to_string(),
@@ -425,6 +427,14 @@ mod tests {
             "live".to_string(),
             "daemon".to_string()
         ]));
+        assert!(report
+            .daemon_command
+            .windows(2)
+            .any(|window| window == ["--config", report.config_path.as_str()]));
+        assert!(report
+            .daemon_command
+            .windows(2)
+            .any(|window| window == ["--expected-config-id", report.config_id.as_str()]));
         assert!(report
             .warnings
             .iter()
