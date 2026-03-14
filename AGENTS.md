@@ -6,6 +6,8 @@ repository. Keep it concise. Load deeper instructions on demand from
 
 ## Catalogue Contract
 
+- Do not change `AGENTS.md` or its core guardrails unless the user explicitly
+  asks to update repository agent instructions.
 - `AGENTS.md` keeps only essential repository-wide instructions that every
   agent must know before starting work.
 - Topic-specific guidance belongs in `docs/agent-instructions/` and should be
