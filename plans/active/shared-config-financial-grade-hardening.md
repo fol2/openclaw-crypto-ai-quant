@@ -40,26 +40,34 @@ Progress recorded on 2026-03-14:
   This bound paper/live daemon launch to materialised runtime artefacts,
   propagated approved `config_id` expectations through daemon and service-apply
   surfaces, and made daemon status fail closed on `config_id` drift.
-- PR 4 implementation completed on 2026-03-14
+- PR 4 completed and merged as `#1012`
   (`hub: retire false reload semantics`).
   This retired the fake `/api/config/reload` hot-reload surface with a
   fail-closed error, removed `Save & Reload` / `hot-reload` product copy from
   the config editor, split non-live editing into save-only semantics, and moved
   live editing onto an explicit `Apply to Live` flow that previews restart
-  impact through `apply-live` before confirmation. At the time of this
-  documentation pass the PR is implementation-complete on branch
-  `codex/shared-config-pr4-honest-apply-model` and is awaiting the required
-  review / merge flow.
+  impact through `apply-live` before confirmation.
+- PR 7 implementation completed on 2026-03-14
+  (`hub: make config audit and monitoring config-id-centric`).
+  This introduced an append-only config audit ledger keyed by before/after
+  `config_id`, added weak request actor metadata through auth scope plus an
+  optional `X-AIQ-Actor` hint, extended mutation routes to emit structured
+  config audit events, added a `GET /api/config/audit` read surface, and moved
+  monitor `since_config` attribution from YAML file `mtime` to deployed
+  heartbeat `config_id` plus its first-seen runtime-log timestamp. At the time
+  of this documentation pass the PR is implementation-complete on branch
+  `codex/shared-config-pr7-configid-audit` and is awaiting the required review
+  / merge flow.
 
-Sequence status after merged PR 6 and the current PR 4 implementation pass:
+Sequence status after merged PR 4 and the current PR 7 implementation pass:
 
 - PR 1: complete
 - PR 2: complete
 - PR 3: complete
 - PR 5: complete
 - PR 6: complete
-- PR 4: implementation complete; review / merge pending
-- PR 7: pending
+- PR 4: complete
+- PR 7: implementation complete; review / merge pending
 - PR 8: pending
 - PR 9: pending
 
@@ -69,19 +77,22 @@ Current execution stage as of 2026-03-14:
 
 - PR 5 is merged and closed.
 - PR 6 is merged and closed.
-- PR 4 implementation is complete and the documentation pass is now describing
-  the post-change honest apply contract rather than a false reload surface.
-- The Hub now rejects `/api/config/reload` with explicit guidance instead of
-  touching file mtime, the config editor no longer claims a strategy-YAML hot
-  reload, non-live files are save-only, and live files now move through an
-  explicit `Apply to Live` preview/confirm flow backed by `apply-live`.
-- PR 7 (`Make audit and monitoring config-id-centric`) becomes the next active
-  implementation stage once PR 4 finishes review and merge.
+- PR 4 is merged and closed.
+- PR 7 implementation is complete and the documentation pass is now describing
+  the post-change config-id-centric audit contract rather than a monitoring
+  mtime boundary.
+- Config mutations now append structured before/after `config_id` events to a
+  shared config audit ledger, weak request actor fields can be tagged through
+  `X-AIQ-Actor`, and monitor `since_config` now resolves from deployed
+  heartbeat `config_id` plus the first-seen runtime log timestamp for that
+  identity.
+- PR 8 (`Add redaction boundaries for sensitive operational metadata`) becomes
+  the next active implementation stage once PR 7 finishes review and merge.
 
 Current blocker:
 
 - None at the documentation-pass stage. The next action is reviewer coverage
-  for PR 4, followed by merge and cleanup before opening PR 7.
+  for PR 7, followed by merge and cleanup before opening PR 8.
 
 ## Objective
 
@@ -204,19 +215,16 @@ Required outcome:
 
 ### 6. Audit and attribution are not config-id-centric
 
-Current save history, rollback events, and monitoring views are not yet centred
-on deployed `config_id`. The monitor still derives `since_config` from file
-mtime, rollback events record process-level `USER` / `HOSTNAME` rather than a
-real request actor, and save history stores anonymous backup names rather than a
-durable deployment identity trail.
+This gap is closed in the current PR 7 implementation branch.
 
-Required outcome:
+The current branch now:
 
-- config audit is append-only and keyed by before/after `config_id`
-- request actor, reason, target lane, and validation result are recorded for
-  every mutation
-- operational reporting uses deployed `config_id`, not file mtime, for
-  attribution boundaries
+- records append-only config mutation events keyed by before/after `config_id`
+- attaches weak request actor metadata, reason, lane, validation outcome, and
+  restart/apply result to each mutation
+- exposes recent config audit events through `GET /api/config/audit`
+- derives monitor `since_config` from deployed heartbeat `config_id` instead of
+  YAML file `mtime`
 
 ### 7. Sensitive operational metadata needs redaction boundaries
 
