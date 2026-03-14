@@ -158,7 +158,7 @@ Step down or pause immediately.
 | Drawdown warning | DD from config-start HWM | > 15% |
 | Max config age | Days since deployment | > 14 |
 
-**Source**: live trading DB (rolling window) + validation pipeline output.
+**Source**: live trading DB rolling windows + live audit events + persisted live governance state.
 
 When a pause trigger fires, the factory writes a generated paused manifest with
 zero entry exposure and records the pause transition in the live governance

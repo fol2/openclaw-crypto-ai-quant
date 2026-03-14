@@ -58,7 +58,7 @@ Trigger rotation if **any** condition is met:
 |---------|-----------|--------|
 | Rolling profit factor | PF < 1.0 over last 30 trades | Pause config, fall back to safety mode |
 | Live drawdown warning | DD > 15% from config-start HWM | Pause config, queue a replacement from the latest validation run |
-| Max config age | 14 days since deployment | Re-validate; retire if no longer passing |
+| Max config age | 14 days since deployment | Pause config, queue a replacement from the latest validation run |
 
 When a config is rotated out, record: config hash, start/stop timestamps, reason for rotation, and final performance summary.
 
