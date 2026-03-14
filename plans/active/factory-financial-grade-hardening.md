@@ -2,7 +2,7 @@
 
 ## Status
 
-Backlog.
+Active.
 
 Prepared on 2026-03-14 after an independent three-reviewer design review of the
 current Rust factory cycle.

@@ -6,8 +6,8 @@ This directory is the repository source of truth for planning documents.
 - `backlog/` holds plans that are still candidates for future work.
 - `archived/` holds plans that are complete, cancelled, or otherwise closed.
 
-Current backlog items:
+Current active items:
 
 - `factory-financial-grade-hardening.md`
 
-There are currently no active plans.
+There are currently no backlog items.
