@@ -38,6 +38,8 @@ repository. Keep it concise. Load deeper instructions on demand from
   8. Move to the next task only after the merge and cleanup are complete.
 - Never delete branches, worktrees, or subagents owned by other concurrent
   agents or sessions.
+- Never commit sensitive material, including `secrets.json`, `.env`, private
+  keys, wallet addresses, or API keys.
 - Never disable kill switches or weaken live-trading guardrails without explicit
   user approval.
 - Never auto-tune strategy configuration through unattended scripts. Suggestion
