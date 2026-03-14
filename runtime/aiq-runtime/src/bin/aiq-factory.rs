@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../live_lane.rs"]
+mod live_lane;
 #[path = "../live_secrets.rs"]
 mod live_secrets;
 #[cfg(test)]

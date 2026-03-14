@@ -307,9 +307,9 @@ impl HubConfig {
                 "AIQ_MONITOR_LIVE_YAML_PATH",
                 aiq_root
                     .join("config")
-                    .join("strategy_overrides.yaml")
+                    .join("strategy_overrides.live.yaml")
                     .to_str()
-                    .unwrap_or("config/strategy_overrides.yaml"),
+                    .unwrap_or("config/strategy_overrides.live.yaml"),
             ),
             live_service: env_str("AIQ_MONITOR_LIVE_SERVICE", "openclaw-ai-quant-live-v8"),
             factory_enabled: env_bool("AI_QUANT_FACTORY_ENABLE", false),

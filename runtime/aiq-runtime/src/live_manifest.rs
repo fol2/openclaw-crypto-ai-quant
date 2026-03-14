@@ -79,17 +79,8 @@ pub struct LiveManifestReport {
 
 pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport> {
     let defaults = live_lane::defaults(input.project_dir)?;
-    let base_config_path = input
-        .config
-        .map(Path::to_path_buf)
-        .or_else(|| env_path("AI_QUANT_BASE_STRATEGY_YAML"))
-        .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
-        .unwrap_or_else(|| defaults.config_path.clone());
-    let effective_config = PaperEffectiveConfig::resolve(
-        Some(base_config_path.as_path()),
-        None,
-        Some(defaults.project_dir.as_path()),
-    )?;
+    let effective_config =
+        PaperEffectiveConfig::resolve_live(input.config, Some(defaults.project_dir.as_path()))?;
     let mut warnings = effective_config.warnings().to_vec();
     let config = effective_config.load_config(None, true)?;
     let runtime_bootstrap =
@@ -422,6 +413,7 @@ mod tests {
         assert_eq!(report.launch_state, LiveManifestLaunchState::Blocked);
         assert_eq!(report.service_name, "openclaw-ai-quant-live-v8");
         assert_eq!(report.instance_tag, "v8-LIVE");
+        assert_eq!(report.base_config_path, config_path.display().to_string());
         assert!(report.config_path.contains("artifacts/_runtime_configs/"));
         assert!(report.config_path.ends_with(".runtime.yaml"));
         assert!(report.live_db.ends_with("trading_engine_v8_live.db"));
@@ -554,5 +546,55 @@ mod tests {
             env_config_path.display().to_string()
         );
         assert_eq!(report.interval, "15m");
+    }
+
+    #[test]
+    fn manifest_fails_closed_when_only_live_example_yaml_exists() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let example_path = dir
+            .path()
+            .join("config")
+            .join("strategy_overrides.live.yaml.example");
+        write_config(&example_path, "30m");
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_BASE_STRATEGY_YAML", None),
+            ("AI_QUANT_STRATEGY_YAML", None),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_MARKET_DB_PATH", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
+            ("AI_QUANT_CANDLES_DB_DIR", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            ("AI_QUANT_EVENT_LOG_DIR", None),
+            ("AI_QUANT_INSTANCE_TAG", None),
+            ("AI_QUANT_LIVE_SERVICE_NAME", None),
+        ]);
+
+        let err = build_manifest(LiveManifestInput {
+            config: None,
+            project_dir: Some(dir.path()),
+            profile: None,
+            db: None,
+            market_db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            btc_symbol: "BTC",
+            secrets_path: None,
+            lock_path: None,
+            status_path: None,
+            lookback_bars: None,
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("config/strategy_overrides.live.yaml"),
+            "unexpected error: {err:#}"
+        );
     }
 }

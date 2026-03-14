@@ -2,7 +2,7 @@
 
 ## Status
 
-Backlog.
+Active.
 
 Prepared on 2026-03-14 after an independent three-reviewer architecture review
 of the current modular/shared config control plane and runtime contract.

@@ -18,6 +18,15 @@ const DEFAULT_PROMOTED_SCAN_RUN_DIRS_PER_DATE: usize = 200;
 const MIN_PROMOTED_SCAN_LIMIT: usize = 1;
 const MAX_PROMOTED_SCAN_LIMIT: usize = 10_000;
 
+#[derive(Debug, Clone)]
+struct EffectiveConfigDefaults {
+    project_dir: PathBuf,
+    config_path: PathBuf,
+    promoted_role: Option<String>,
+    strategy_mode_file: Option<PathBuf>,
+    default_strategy_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaperEffectiveConfig {
     base_config_path: PathBuf,
@@ -58,17 +67,45 @@ impl PaperEffectiveConfig {
         lane: Option<PaperLane>,
         project_dir: Option<&Path>,
     ) -> Result<Self> {
-        let lane_defaults = match lane {
-            Some(lane) => Some(lane.defaults(project_dir)?),
+        let defaults = match lane {
+            Some(lane) => Some(EffectiveConfigDefaults::from(lane.defaults(project_dir)?)),
             None => None,
         };
-        let base_config_path = resolve_config_path(config, lane_defaults.as_ref());
-        let resolved_project_root = lane_defaults
+        let base_config_path = resolve_config_path(config, defaults.as_ref());
+        let resolved_project_root = defaults
             .as_ref()
             .map(|defaults| defaults.project_dir.clone())
             .unwrap_or_else(project_root);
+        Self::resolve_internal(
+            base_config_path,
+            defaults.as_ref(),
+            &resolved_project_root,
+            false,
+        )
+    }
+
+    pub fn resolve_live(config: Option<&Path>, project_dir: Option<&Path>) -> Result<Self> {
+        let defaults = EffectiveConfigDefaults::from(crate::live_lane::defaults(project_dir)?);
+        let base_config_path = resolve_live_config_path(config, &defaults);
+        if !base_config_path.exists() {
+            anyhow::bail!("live config does not exist: {}", base_config_path.display());
+        }
+        Self::resolve_internal(
+            base_config_path,
+            Some(&defaults),
+            &defaults.project_dir,
+            true,
+        )
+    }
+
+    fn resolve_internal(
+        base_config_path: PathBuf,
+        defaults: Option<&EffectiveConfigDefaults>,
+        resolved_project_root: &Path,
+        materialise_live: bool,
+    ) -> Result<Self> {
         let materialised_output_root =
-            materialised_output_root(resolved_project_root.as_path(), &base_config_path);
+            materialised_output_root(resolved_project_root, &base_config_path);
         let mut warnings = Vec::new();
         let base_document = config::load_yaml_document_checked(
             base_config_path
@@ -78,7 +115,7 @@ impl PaperEffectiveConfig {
         .map_err(anyhow::Error::msg)?;
 
         let mut active_document = base_document.clone();
-        let requested_promoted_role = lane_defaults
+        let requested_promoted_role = defaults
             .as_ref()
             .and_then(|defaults| defaults.promoted_role.clone())
             .or_else(|| env_string("AI_QUANT_PROMOTED_ROLE").map(|role| role.to_ascii_lowercase()));
@@ -135,7 +172,7 @@ impl PaperEffectiveConfig {
         };
 
         let (strategy_mode, strategy_mode_source, strategy_mode_warning) =
-            resolve_strategy_mode(lane_defaults.as_ref(), resolved_project_root.as_path());
+            resolve_strategy_mode(defaults, resolved_project_root);
         if let Some(strategy_mode_warning) = strategy_mode_warning {
             warnings.push(strategy_mode_warning);
         }
@@ -165,7 +202,7 @@ impl PaperEffectiveConfig {
         };
 
         let runtime_document =
-            config::materialise_runtime_document(&effective_document, false, None)
+            config::materialise_runtime_document(&effective_document, materialise_live, None)
                 .map_err(anyhow::Error::msg)?;
         let runtime_yaml_path = runtime_output_path(
             materialised_output_root.as_path(),
@@ -307,13 +344,13 @@ impl PaperEffectiveConfig {
     }
 }
 
-pub(crate) fn resolve_config_path(
+fn resolve_config_path(
     config: Option<&Path>,
-    lane_defaults: Option<&crate::paper_lane::PaperLaneDefaults>,
+    defaults: Option<&EffectiveConfigDefaults>,
 ) -> PathBuf {
     let configured = config
         .map(Path::to_path_buf)
-        .or_else(|| lane_defaults.map(|defaults| defaults.config_path.clone()))
+        .or_else(|| defaults.map(|defaults| defaults.config_path.clone()))
         .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
 
@@ -336,13 +373,21 @@ pub(crate) fn resolve_config_path(
     configured
 }
 
+fn resolve_live_config_path(config: Option<&Path>, defaults: &EffectiveConfigDefaults) -> PathBuf {
+    config
+        .map(Path::to_path_buf)
+        .or_else(|| env_path("AI_QUANT_BASE_STRATEGY_YAML"))
+        .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
+        .unwrap_or_else(|| defaults.config_path.clone())
+}
+
 fn project_root() -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     path.canonicalize().unwrap_or(path)
 }
 
 fn resolve_strategy_mode(
-    lane_defaults: Option<&crate::paper_lane::PaperLaneDefaults>,
+    defaults: Option<&EffectiveConfigDefaults>,
     project_root: &Path,
 ) -> (Option<String>, Option<String>, Option<String>) {
     if let Some(strategy_mode) = env_string("AI_QUANT_STRATEGY_MODE") {
@@ -354,10 +399,10 @@ fn resolve_strategy_mode(
     }
 
     let mode_file = env_path("AI_QUANT_STRATEGY_MODE_FILE")
-        .or_else(|| lane_defaults.map(|defaults| defaults.strategy_mode_file.clone()))
+        .or_else(|| defaults.and_then(|defaults| defaults.strategy_mode_file.as_ref().cloned()))
         .unwrap_or_else(|| project_root.join("artifacts/state/strategy_mode.txt"));
     if !mode_file.exists() {
-        if let Some(strategy_mode) = lane_defaults
+        if let Some(strategy_mode) = defaults
             .and_then(|defaults| defaults.default_strategy_mode.as_deref())
             .and_then(config::normalise_strategy_mode_key)
         {
@@ -598,6 +643,30 @@ fn yaml_document_sha256(document: &serde_yaml::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(payload);
     format!("{:x}", hasher.finalize())
+}
+
+impl From<crate::paper_lane::PaperLaneDefaults> for EffectiveConfigDefaults {
+    fn from(value: crate::paper_lane::PaperLaneDefaults) -> Self {
+        Self {
+            project_dir: value.project_dir,
+            config_path: value.config_path,
+            promoted_role: value.promoted_role,
+            strategy_mode_file: Some(value.strategy_mode_file),
+            default_strategy_mode: value.default_strategy_mode,
+        }
+    }
+}
+
+impl From<crate::live_lane::LiveLaneDefaults> for EffectiveConfigDefaults {
+    fn from(value: crate::live_lane::LiveLaneDefaults) -> Self {
+        Self {
+            project_dir: value.project_dir,
+            config_path: value.config_path,
+            promoted_role: None,
+            strategy_mode_file: Some(value.strategy_mode_file),
+            default_strategy_mode: Some(value.default_strategy_mode),
+        }
+    }
 }
 
 fn yaml_value_to_json(value: &serde_yaml::Value) -> serde_json::Value {
@@ -971,9 +1040,69 @@ modes:
         let example_path = config_dir.join("strategy_overrides.paper2.example.yaml");
         fs::write(&example_path, "global:\n  engine:\n    interval: 30m\n").unwrap();
 
-        let lane_defaults = PaperLane::Paper2.defaults(Some(dir.path())).unwrap();
-        let resolved = resolve_config_path(None, Some(&lane_defaults));
+        let defaults =
+            EffectiveConfigDefaults::from(PaperLane::Paper2.defaults(Some(dir.path())).unwrap());
+        let resolved = resolve_config_path(None, Some(&defaults));
         assert_eq!(resolved, example_path);
+    }
+
+    #[test]
+    fn live_effective_config_preserves_live_overlays() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let config_path = config_dir.join("strategy_overrides.live.yaml");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            &config_path,
+            r#"
+global:
+  engine:
+    interval: 30m
+live:
+  global:
+    engine:
+      interval: 5m
+"#,
+        )
+        .unwrap();
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_BASE_STRATEGY_YAML", None),
+            ("AI_QUANT_STRATEGY_YAML", None),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+        ]);
+
+        let effective = PaperEffectiveConfig::resolve_live(None, Some(dir.path())).unwrap();
+        let report = effective.build_report(None, true).unwrap();
+
+        assert_eq!(effective.base_config_path(), config_path.as_path());
+        assert_eq!(report.interval, "5m");
+    }
+
+    #[test]
+    fn live_effective_config_fails_closed_when_only_example_exists() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let example_path = config_dir.join("strategy_overrides.live.yaml.example");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(&example_path, "global:\n  engine:\n    interval: 30m\n").unwrap();
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_BASE_STRATEGY_YAML", None),
+            ("AI_QUANT_STRATEGY_YAML", None),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+        ]);
+
+        let err = PaperEffectiveConfig::resolve_live(None, Some(dir.path())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("config/strategy_overrides.live.yaml"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
