@@ -721,9 +721,12 @@ pub fn latest_journey_entries(conn: &Connection, symbol: &str) -> Result<Vec<Tra
     let Some(journey) = trade_journeys(conn, 1, 0, Some(symbol))?.into_iter().next() else {
         return Ok(Vec::new());
     };
-    let pos_type = journey.pos_type.clone();
+    Ok(trade_entries_from_journey(journey))
+}
 
-    Ok(journey
+pub fn trade_entries_from_journey(journey: TradeJourney) -> Vec<TradeEntry> {
+    let pos_type = journey.pos_type.clone();
+    journey
         .legs
         .into_iter()
         .map(|leg| TradeEntry {
@@ -736,7 +739,7 @@ pub fn latest_journey_entries(conn: &Connection, symbol: &str) -> Result<Vec<Tra
             size: Some(leg.size),
             confidence: (!leg.confidence.is_empty()).then_some(leg.confidence),
         })
-        .collect())
+        .collect()
 }
 
 // ── Trade Journeys ──────────────────────────────────────────────────────
