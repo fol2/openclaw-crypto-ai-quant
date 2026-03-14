@@ -16,7 +16,8 @@
   };
   const SERVICE_STATUS_REFRESH_MS = 30_000;
 
-  type ModeRuntimeState = 'on' | 'off' | 'error' | 'unknown';
+  type ModeRuntimeState = 'on' | 'retry' | 'off' | 'error' | 'unknown';
+  type HeartbeatState = 'ok' | 'stale' | 'missing';
   let snap: any = $state(null);
   let volumes: Record<string, number> = $state({});
   let focusSym = $state('');
@@ -322,7 +323,8 @@
     const sub = String(service?.sub || '').toLowerCase();
     const load = String(service?.load || '').toLowerCase();
     if (active === 'active') return 'on';
-    if (active === 'failed' || sub === 'failed' || sub === 'auto-restart') return 'error';
+    if (active === 'activating' || sub === 'auto-restart') return 'retry';
+    if (active === 'failed' || sub === 'failed') return 'error';
     if (load === 'not-found' || active === '' || active === 'unknown') return 'unknown';
     return 'off';
   }
@@ -334,6 +336,7 @@
   function getModeRuntimeLabel(mode: string): string {
     const state = getModeRuntimeState(mode);
     if (state === 'on') return 'ON';
+    if (state === 'retry') return 'RETRY';
     if (state === 'off') return 'OFF';
     if (state === 'error') return 'ERR';
     return 'NA';
@@ -481,19 +484,20 @@
     if (s === null || s === undefined) return '\u2014';
     if (s < 60) return `${Math.round(s)}s`;
     if (s < 3600) return `${Math.round(s / 60)}m`;
-    return `${(s / 3600).toFixed(1)}h`;
+    if (s < 86_400) return `${(s / 3600).toFixed(1)}h`;
+    return `${(s / 86_400).toFixed(1)}d`;
   }
   function sigAge(ts: string | null | undefined): string {
     if (!ts) return '';
     const d = new Date(ts);
     if (isNaN(d.getTime())) return '';
-    return fmtAge((Date.now() - d.getTime()) / 1000);
+    return fmtAge((snapshotNowMs() - d.getTime()) / 1000);
   }
   function isFreshSig(ts: string | null | undefined): boolean {
     if (!ts) return false;
     const d = new Date(ts);
     if (isNaN(d.getTime())) return false;
-    return (Date.now() - d.getTime()) < 3_600_000; // 1 hour
+    return (snapshotNowMs() - d.getTime()) < signalFreshWindowMs();
   }
   function pnlClass(v: number | null | undefined): string {
     if (v === null || v === undefined) return '';
@@ -569,6 +573,31 @@
     if (unit === 'h') return n * 60 * 60_000;
     if (unit === 'd') return n * 24 * 60 * 60_000;
     return 60_000;
+  }
+
+  function snapshotNowMs(): number {
+    const ts = Number(snap?.now_ts_ms);
+    return Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+  }
+
+  function heartbeatState(rawHealth: any): HeartbeatState {
+    if (!rawHealth?.ok) return 'missing';
+    const tsMs = Number(rawHealth?.ts_ms);
+    if (!Number.isFinite(tsMs) || tsMs <= 0) return 'missing';
+    const loopMs = Math.max(Number(rawHealth?.loop_s || 0) * 1_000, 0);
+    const freshWindowMs = Math.max(loopMs * 6, 60_000);
+    return (snapshotNowMs() - tsMs) <= freshWindowMs ? 'ok' : 'stale';
+  }
+
+  function signalFreshWindowMs(): number {
+    const configured = String(snap?.config?.trader_interval || '').trim().toLowerCase();
+    return Math.max(intervalToMs(configured) * 2, 60 * 60_000);
+  }
+
+  function normaliseSignal(signal: string | null | undefined): 'BUY' | 'SELL' | '' {
+    const value = String(signal || '').trim().toUpperCase();
+    if (value === 'BUY' || value === 'SELL') return value;
+    return '';
   }
 
   function newestCandleIndex(rows: any[]): number {
@@ -1111,6 +1140,12 @@
   let daily = $derived(snap?.daily || {});
   let recent = $derived(snap?.recent || {});
   let openPositions = $derived(snap?.open_positions || []);
+  let engineHeartbeatState = $derived(heartbeatState(health));
+  let engineHeartbeatLabel = $derived(
+    engineHeartbeatState === 'ok' ? 'ENGINE'
+    : engineHeartbeatState === 'stale' ? 'STALE'
+    : 'NO HB'
+  );
   let selectedModeKey = $derived(
     (appState.mode === 'paper' || !appState.mode) ? 'paper1' : appState.mode
   );
@@ -1254,22 +1289,31 @@
       </div>
     </div>
 
-    <div class="status-chip" class:ok={health.ok} class:bad={!health.ok}>
-      <span class="status-dot" class:alive={health.ok}></span>
-      {health.ok ? 'ENGINE' : 'NO HB'}
+    <div
+      class="status-chip"
+      class:ok={engineHeartbeatState === 'ok'}
+      class:warn={engineHeartbeatState === 'stale'}
+      class:bad={engineHeartbeatState === 'missing'}
+    >
+      <span
+        class="status-dot"
+        class:alive={engineHeartbeatState === 'ok'}
+        class:warn-dot={engineHeartbeatState === 'stale'}
+      ></span>
+      {engineHeartbeatLabel}
     </div>
 
     <div
       class="status-chip mode-runtime-chip"
       class:ok={selectedModeRuntimeState === 'on'}
-      class:warn={selectedModeRuntimeState === 'off'}
+      class:warn={selectedModeRuntimeState === 'retry' || selectedModeRuntimeState === 'off'}
       class:bad={selectedModeRuntimeState === 'error'}
       class:unknown={selectedModeRuntimeState === 'unknown'}
     >
       <span
         class="status-dot"
         class:alive={selectedModeRuntimeState === 'on'}
-        class:warn-dot={selectedModeRuntimeState === 'off'}
+        class:warn-dot={selectedModeRuntimeState === 'retry' || selectedModeRuntimeState === 'off'}
         class:bad-dot={selectedModeRuntimeState === 'error'}
         class:unknown-dot={selectedModeRuntimeState === 'unknown'}
       ></span>
@@ -1435,13 +1479,14 @@
                 ></mid-price>
               </td>
               <td>
-                {#if isFreshSig(s.last_signal?.timestamp)}
-                  {#if s.last_signal?.signal === 'BUY'}
-                    <span class="sig-badge buy">BUY</span>
-                  {:else if s.last_signal?.signal === 'SELL'}
-                    <span class="sig-badge sell">SELL</span>
-                  {/if}
-                  <span class="sig-age">{sigAge(s.last_signal.timestamp)}</span>
+                {#if normaliseSignal(s.last_signal?.signal) !== ''}
+                  <span
+                    class="sig-badge"
+                    class:buy={normaliseSignal(s.last_signal?.signal) === 'BUY'}
+                    class:sell={normaliseSignal(s.last_signal?.signal) === 'SELL'}
+                    class:stale={!isFreshSig(s.last_signal?.timestamp)}
+                  >{normaliseSignal(s.last_signal?.signal)}</span>
+                  <span class="sig-age" class:stale={!isFreshSig(s.last_signal?.timestamp)}>{sigAge(s.last_signal?.timestamp)}</span>
                 {:else}
                   <span class="sig-badge none">\u2014</span>
                 {/if}
@@ -1891,6 +1936,10 @@
     border-color: rgba(81,207,102,0.3);
     color: var(--green);
   }
+  .status-chip.warn {
+    border-color: rgba(255,212,59,0.35);
+    color: var(--yellow);
+  }
   .status-chip.bad {
     border-color: rgba(255,107,107,0.3);
     color: var(--red);
@@ -2328,6 +2377,10 @@
     background: var(--red-bg);
     color: var(--red);
   }
+  .sig-badge.stale {
+    opacity: 0.72;
+    filter: saturate(0.7);
+  }
   .sig-badge.none {
     color: var(--text-dim);
   }
@@ -2366,6 +2419,9 @@
     color: var(--text);
     font-family: 'IBM Plex Mono', monospace;
     margin-left: 3px;
+  }
+  .sig-age.stale {
+    color: var(--text-dim);
   }
   .pos-pnl.green { color: var(--green); }
   .pos-pnl.red   { color: var(--red); }
