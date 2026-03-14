@@ -1,14 +1,6 @@
 name: Three-Way Parity
 
 on:
-  push:
-    branches: [master, major-v8]
-    paths:
-      - 'backtester/**'
-  pull_request:
-    branches: [master, major-v8]
-    paths:
-      - 'backtester/**'
   workflow_dispatch:
     inputs:
       tol_pnl:
