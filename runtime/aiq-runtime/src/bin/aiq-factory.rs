@@ -5091,6 +5091,9 @@ mod tests {
     use crate::paper_config::PaperEffectiveConfig;
     use crate::paper_lane::PaperLane;
     use crate::test_support::{env_lock, EnvGuard};
+    use rusqlite::Connection;
+    use serde_json::Value;
+    use std::os::unix::fs::PermissionsExt;
 
     fn config_yaml(interval: &str) -> String {
         format!(
@@ -5140,6 +5143,102 @@ symbols:
       leverage: 4.0
 "#
         .to_string()
+    }
+
+    fn write_candles_fixture(path: &Path, interval: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE candles (
+                symbol TEXT,
+                interval TEXT,
+                t INTEGER,
+                t_close INTEGER,
+                o REAL,
+                h REAL,
+                l REAL,
+                c REAL,
+                v REAL,
+                n INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        for symbol in ["BTC", "ETH", "SOL"] {
+            for ts in 1_i64..=10_i64 {
+                conn.execute(
+                    "INSERT INTO candles VALUES (?1, ?2, ?3, ?4, 1.0, 1.1, 0.9, 1.0, 100.0, 1)",
+                    rusqlite::params![symbol, interval, ts, ts + 1],
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    fn write_fake_factory_backtester(path: &Path) {
+        let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="$1"
+shift
+
+output=""
+slippage=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    --slippage-bps)
+      slippage="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$output")"
+
+case "$cmd" in
+  sweep)
+    cat >"$output" <<'JSON'
+{"candidate_mode":true,"config_id":"cfg-one","overrides":{"trade.leverage":7.0},"total_pnl":120.0,"total_trades":40,"profit_factor":1.8,"max_drawdown_pct":0.12}
+JSON
+    ;;
+  replay)
+    if [[ -n "$slippage" ]]; then
+      cat >"$output" <<'JSON'
+{"initial_balance":10000.0,"final_balance":10030.0,"total_pnl":30.0,"total_trades":40,"profit_factor":1.3,"max_drawdown_pct":0.10,"total_fees":1.0,"by_symbol":[{"symbol":"BTC","trades":14,"pnl":10.0,"win_rate":0.5},{"symbol":"ETH","trades":13,"pnl":10.0,"win_rate":0.5},{"symbol":"SOL","trades":13,"pnl":10.0,"win_rate":0.5}]}
+JSON
+    else
+      cat >"$output" <<'JSON'
+{"initial_balance":10000.0,"final_balance":10050.0,"total_pnl":50.0,"total_trades":40,"profit_factor":1.5,"max_drawdown_pct":0.10,"total_fees":1.0,"by_symbol":[{"symbol":"BTC","trades":14,"pnl":20.0,"win_rate":0.5},{"symbol":"ETH","trades":13,"pnl":15.0,"win_rate":0.5},{"symbol":"SOL","trades":13,"pnl":15.0,"win_rate":0.5}]}
+JSON
+    fi
+    ;;
+  *)
+    echo "unsupported command: $cmd" >&2
+    exit 1
+    ;;
+esac
+"#;
+
+        fs::write(path, script).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap()
     }
 
     fn paper_promotion_db(project_dir: &Path) -> PathBuf {
@@ -5609,6 +5708,145 @@ parity_enforce: true
 
         assert_eq!(settings.holdout_splits, 4);
         assert!((settings.holdout_fraction - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn factory_run_emits_consistent_holdout_artifacts_end_to_end() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("strategy_overrides.yaml");
+        let settings_path = dir.path().join("factory_defaults.yaml");
+        let candles_dir = dir.path().join("candles");
+        let artifacts_dir = dir.path().join("artifacts");
+        let fake_backtester = dir.path().join("fake-backtester.sh");
+        let sweep_spec_path = dir.path().join("sweep.yaml");
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::create_dir_all(&artifacts_dir).unwrap();
+        fs::write(&config_path, factory_root_config_yaml()).unwrap();
+        fs::write(&sweep_spec_path, "initial_balance: 10000\nlookback: 10\naxes: []\n").unwrap();
+        write_candles_fixture(&candles_dir.join("candles_30m.db"), "30m");
+        write_candles_fixture(&candles_dir.join("candles_3m.db"), "3m");
+        fs::write(candles_dir.join("funding_rates.db"), "").unwrap();
+        write_fake_factory_backtester(&fake_backtester);
+
+        let settings_yaml = format!(
+            r#"
+version: 1
+backtester_bin: {}
+artifacts_dir: {}
+candles_db_dir: {}
+funding_db: {}
+balance:
+  mode: fixed
+comparison:
+  require_challenger_win: true
+validation:
+  min_trades: 30
+  slippage_bps: 20.0
+  max_top1_pnl_pct: 0.50
+  holdout_fraction: 0.25
+  holdout_splits: 2
+  parity_abs_eps: 0.001
+  parity_rel_eps: 0.000001
+  parity_trade_delta_max: 0
+  parity_enforce: false
+selection:
+  selected_roles:
+    - primary
+  paper_targets:
+    - role: primary
+      slot: 1
+      service: openclaw-ai-quant-trader-v8-paper1
+      yaml_path: config/strategy_overrides.paper1.yaml
+deployment:
+  apply_to_paper: false
+  restart_services: false
+  apply_to_live: false
+  restart_live_service: false
+  live_yaml_path: config/strategy_overrides.live.yaml
+  live_service: openclaw-ai-quant-live-v8
+live_governance:
+  live_db_path: trading_engine_v8_live.db
+  state_path: artifacts/state/factory_live_primary.json
+  stage1_exposure_factor: 0.25
+  stage2_exposure_factor: 0.50
+  stage3_exposure_factor: 1.00
+  min_stage_hours: 24.0
+  rotation_trade_window: 30
+  min_live_profit_factor: 1.0
+  max_live_drawdown_pct: 15.0
+  max_config_age_days: 14.0
+profiles:
+  daily:
+    sweep_spec: {}
+    initial_balance: 10000.0
+    gpu: false
+    tpe: false
+    tpe_trials: 1
+    tpe_batch: 1
+    tpe_seed: 42
+    sweep_top_k: 1
+    shortlist_per_mode: 1
+    allow_unsafe_gpu_sweep: false
+"#,
+            fake_backtester.display(),
+            artifacts_dir.display(),
+            candles_dir.display(),
+            candles_dir.join("funding_rates.db").display(),
+            sweep_spec_path.display(),
+        );
+        fs::write(&settings_path, settings_yaml).unwrap();
+
+        let summary = run_factory_cycle(RunArgs {
+            project_dir: Some(repo_root()),
+            config: config_path,
+            settings: settings_path,
+            profile: FactoryProfile::Daily,
+            json: true,
+        })
+        .unwrap();
+
+        let run_dir = PathBuf::from(&summary.run_dir);
+        let metadata: Value =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("run_metadata.json")).unwrap())
+                .unwrap();
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&summary.report_json).unwrap()).unwrap();
+        let selection: Value =
+            serde_json::from_str(&fs::read_to_string(&summary.selection_json).unwrap()).unwrap();
+
+        let windows = &metadata["args"]["validation_windows"];
+        assert_eq!(windows["coverage"]["start_ts_ms"], 1);
+        assert_eq!(windows["coverage"]["end_ts_ms"], 10);
+        assert_eq!(windows["train"]["start_ts_ms"], 1);
+        assert_eq!(windows["train"]["end_ts_ms"], 7);
+        assert_eq!(windows["holdout"]["start_ts_ms"], 8);
+        assert_eq!(windows["holdout"]["end_ts_ms"], 10);
+
+        let item = &report["items"][0];
+        assert_eq!(item["validation_windows"], *windows);
+        let train_replay = PathBuf::from(item["train_parity_replay_report_path"].as_str().unwrap());
+        let holdout_summary_path = PathBuf::from(item["holdout_summary_path"].as_str().unwrap());
+        assert!(train_replay.is_file());
+        assert!(holdout_summary_path.is_file());
+
+        let holdout_summary: Value =
+            serde_json::from_str(&fs::read_to_string(&holdout_summary_path).unwrap()).unwrap();
+        assert_eq!(holdout_summary["holdout_window"], windows["holdout"]);
+        assert_eq!(holdout_summary["split_count"], 2);
+        assert_eq!(holdout_summary["splits"][0]["start_ts_ms"], 8);
+        assert_eq!(holdout_summary["splits"][0]["end_ts_ms"], 9);
+        assert_eq!(holdout_summary["splits"][1]["start_ts_ms"], 9);
+        assert_eq!(holdout_summary["splits"][1]["end_ts_ms"], 10);
+
+        assert_eq!(
+            selection["selected"]["validation_windows"]["holdout"]["start_ts_ms"],
+            8
+        );
+        assert_eq!(
+            selection["selected"]["holdout_summary_path"].as_str().unwrap(),
+            holdout_summary_path.display().to_string()
+        );
     }
 
     #[test]
