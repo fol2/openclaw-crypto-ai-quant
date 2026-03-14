@@ -457,6 +457,44 @@ Service-level tuning knobs:
 - `AI_QUANT_LIVE_FILL_SYNC_OVERLAP_MINUTES`: overlap replay window for safe hourly re-checks.
 - `AI_QUANT_LIVE_FILL_SYNC_CURSOR_KEY`: cursor namespace stored in `runtime_sync_cursors`.
 
+When you need the last successful or last non-success sync run without
+trawling logs, query the live DB directly:
+
+```bash
+sqlite3 "$PWD/trading_engine_v8_live.db" "
+SELECT id, status, started_at, finished_at, unsupported_remote_fills, error_text
+FROM exchange_sync_runs
+ORDER BY id DESC
+LIMIT 10;
+"
+
+sqlite3 "$PWD/trading_engine_v8_live.db" "
+SELECT started_at, finished_at, id
+FROM exchange_sync_runs
+WHERE status = 'success'
+ORDER BY id DESC
+LIMIT 1;
+"
+
+sqlite3 "$PWD/trading_engine_v8_live.db" "
+SELECT started_at, finished_at, id, status, error_text
+FROM exchange_sync_runs
+WHERE status != 'success'
+ORDER BY id DESC
+LIMIT 1;
+"
+
+sqlite3 "$PWD/trading_engine_v8_live.db" "
+SELECT sync_key, last_start_ts_ms, last_end_ts_ms, last_run_id, updated_at
+FROM runtime_sync_cursors;
+"
+```
+
+`runtime_account_snapshots`, `runtime_exchange_positions`, `oms_intents`,
+`oms_fills`, and `trades` now carry `sync_run_id` so you can trace the latest
+mutable row back to the append-only run header. `runtime_sync_cursors.last_run_id`
+records which successful run advanced the cursor.
+
 ## Diagnostics
 
 ```bash

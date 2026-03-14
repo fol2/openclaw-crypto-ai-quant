@@ -8,8 +8,9 @@ Activated on 2026-03-14.
 
 Current execution status:
 
-- PR 1 implementation, documentation updates, and reviewer subagent pass are
-  complete on branch `codex/live-fin-recon-pr1-balance-semantics`; merge and
+- PR 1 is merged to `master` and cleaned up.
+- PR 2 implementation, documentation updates, and reviewer subagent pass are
+  complete on branch `codex/live-fin-recon-pr2-sync-run-records`; merge and
   cleanup are pending.
 - Remaining PRs are pending.
 

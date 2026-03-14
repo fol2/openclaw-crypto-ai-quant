@@ -1770,6 +1770,9 @@ fn run_live(command: LiveCommand) -> Result<()> {
             let report = live_fill_sync::run_sync(live_fill_sync::LiveFillSyncInput {
                 live_db: Path::new(&manifest.live_db),
                 secrets_path: Path::new(&manifest.secrets_path),
+                profile: Some(manifest.runtime_bootstrap.pipeline.profile.as_str()),
+                config_path: Some(Path::new(&manifest.config_path)),
+                config_id: Some(manifest.config_id.as_str()),
                 start_ms: args.start_ms,
                 end_ms: args.end_ms,
                 lookback_hours: args.lookback_hours,
@@ -1782,7 +1785,9 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "live sync-fills ok: window={}..{} fetched={} supported={} inserted_oms_fills={} inserted_trades={} backfilled_existing_trades={} manual_intents={} positions={} account_value_usd={} dry_run={}",
+                    "live sync-fills ok: run_id={} status={} window={}..{} fetched={} supported={} inserted_oms_fills={} inserted_trades={} backfilled_existing_trades={} manual_intents={} positions={} account_value_usd={} dry_run={}",
+                    report.sync_run_id,
+                    report.sync_run_status,
                     report.window.start_ms,
                     report.window.end_ms,
                     report.fetched_remote_fills,

@@ -51,6 +51,19 @@ Hub live read paths now split exchange-observed equity from realised cash:
 - realised cash remains a separate legacy trade-ledger field and is not yet an
   audit-grade exchange cash figure
 
+Each `live sync-fills` run now leaves an append-only `exchange_sync_runs`
+header row before reconciliation starts and finalises that row with status,
+window, counts, and warning/error metadata when the run finishes. Mutable rows
+written by the sync path now carry `sync_run_id`, and cursor advancement also
+records `last_run_id`, so operators can trace which run produced the current
+snapshot/fill/trade state without reading logs.
+
+Use the JSON output or query `exchange_sync_runs` directly when you need the
+last successful run, the last non-success run (including
+`unsupported_remote_fills`), or the exact run that advanced the cursor. Dry
+runs still use a temporary working DB, so their run headers are not durable in
+the live DB.
+
 ## Ownership
 
 The runtime now owns:
