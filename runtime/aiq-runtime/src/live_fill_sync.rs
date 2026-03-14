@@ -405,6 +405,15 @@ fn reconcile_remote_fills(
     let conn = open_sync_connection(db_path)?;
     for fill in fills {
         let Some(parsed) = parse_fill(&fill.raw) else {
+            let fill_hash = fill.raw.get("hash").and_then(json_to_text);
+            let fill_tid = fill.raw.get("tid").and_then(parse_json_integer);
+            if fill_fully_present_locally(&conn, fill_hash, fill_tid)? {
+                stats.warnings.push(format!(
+                    "unsupported remote fill already present locally: {}",
+                    compact_fill_identity(&fill.raw)
+                ));
+                continue;
+            }
             stats.unsupported_remote_fills += 1;
             stats.warnings.push(format!(
                 "unsupported remote fill skipped: {}",
@@ -1019,6 +1028,19 @@ fn find_trade_id_by_fill(
     .context("failed to query trade row by fill")
 }
 
+fn fill_fully_present_locally(
+    conn: &Connection,
+    fill_hash: Option<&str>,
+    fill_tid: Option<i64>,
+) -> Result<bool> {
+    if fill_hash.is_none() && fill_tid.is_none() {
+        return Ok(false);
+    }
+    let oms_fill_id = load_existing_oms_fill(conn, fill_hash, fill_tid)?.map(|row| row.id);
+    let trade_id = find_trade_id_by_fill(conn, fill_hash, fill_tid)?;
+    Ok(oms_fill_id.is_some() && trade_id.is_some())
+}
+
 fn load_oms_fills_without_trade(conn: &Connection) -> Result<Vec<ExistingOmsFillWithoutTrade>> {
     let mut stmt = conn.prepare(
         "
@@ -1460,5 +1482,112 @@ mod tests {
             .unwrap();
         assert_eq!(trade_count, 1);
         assert_eq!(stats.backfilled_existing_trades, 1);
+    }
+
+    #[test]
+    fn unsupported_remote_fill_does_not_fail_when_already_present_locally() {
+        let db = temp_db();
+        let conn = Connection::open(db.path()).unwrap();
+        let fill_hash = "0x2836bb61531ec60e29b00436ce797102143c0046ee11e4e0cbff66b412129ff8";
+        let fill_tid = 855885986782764_i64;
+        let raw_fill = json!({
+            "coin": "DOGE",
+            "px": "0.20",
+            "sz": "1000",
+            "time": 1_773_162_768_225_i64,
+            "dir": "Long > Short",
+            "startPosition": "500",
+            "fee": "0.07",
+            "closedPnl": "3.5",
+            "hash": fill_hash,
+            "tid": fill_tid,
+            "oid": "7001"
+        });
+        conn.execute(
+            "
+            INSERT INTO oms_fills (
+                ts_ms, symbol, intent_id, order_id, action, side, pos_type, price, size, notional,
+                fee_usd, fee_token, fee_rate, pnl_usd, fill_hash, fill_tid, matched_via, raw_json
+            ) VALUES (
+                ?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+            )
+            ",
+            params![
+                1_773_162_768_225_i64,
+                "DOGE",
+                7001_i64,
+                "UNKNOWN",
+                "BUY",
+                "UNKNOWN",
+                0.20_f64,
+                1000.0_f64,
+                200.0_f64,
+                0.07_f64,
+                Option::<String>::None,
+                Option::<f64>::None,
+                3.5_f64,
+                fill_hash,
+                fill_tid,
+                "exchange_order_id",
+                raw_fill.to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "
+            INSERT INTO trades (
+                timestamp, symbol, type, action, price, size, notional, reason, reason_code,
+                confidence, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage,
+                margin_used, meta_json, fill_hash, fill_tid
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21
+            )
+            ",
+            params![
+                "2026-03-10T17:12:48.225000+00:00",
+                "DOGE",
+                "LONG",
+                "CLOSE",
+                0.20_f64,
+                500.0_f64,
+                100.0_f64,
+                "manual_trade",
+                "manual_trade",
+                "MANUAL",
+                3.5_f64,
+                0.07_f64,
+                Option::<String>::None,
+                Option::<f64>::None,
+                Option::<f64>::None,
+                Option::<f64>::None,
+                Option::<f64>::None,
+                Option::<f64>::None,
+                "{}",
+                fill_hash,
+                fill_tid
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let oms = LiveOms::new(db.path()).unwrap();
+        let mut stats = SyncStats::default();
+        reconcile_remote_fills(
+            db.path(),
+            &oms,
+            &[HyperliquidFill { raw: raw_fill }],
+            "aiq_",
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(stats.unsupported_remote_fills, 0);
+        assert!(stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("already present locally")));
     }
 }
