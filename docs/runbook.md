@@ -66,7 +66,7 @@ financial-grade defaults are `primary` `+50.0` total PnL uplift with at most
 
 When only the `primary` lane has a deployable challenger, the factory now
 allows a truthful partial rollout instead of blocking the whole cycle. Inspect
-`reports/report.json` for `selection_stage: selected_partial`,
+`reports/selection.json` for `selection_stage: selected_partial`,
 `deploy_stage: paper_partial`, `step5_gate_status: partial`, and per-role
 deployment statuses such as `incumbent_holds`.
 
