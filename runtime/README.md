@@ -29,6 +29,11 @@ cargo run -p aiq-runtime --bin aiq-maintenance -- fetch-funding-rates --days 30 
 cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db trading_engine.db
 ```
 
+Paper supervision now treats `decision_events` as a canonical compatibility
+contract. `paper daemon` and `paper service apply` reconcile legacy/full paper
+DBs before launch and fail closed on unreconcilable schema drift instead of
+letting a daemon enter a restart loop after start-up.
+
 `live sync-fills` fails closed when it encounters unsupported fill shapes, so
 hourly automation should treat a failed run as an operator review signal rather
 than a silent partial success.

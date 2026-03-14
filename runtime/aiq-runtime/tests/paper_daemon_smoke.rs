@@ -752,6 +752,77 @@ fn paper_service_apply_starts_bootstrap_ready_lane() {
 }
 
 #[test]
+fn paper_service_apply_starts_bootstrap_ready_lane_with_legacy_decision_events() {
+    let fixture = seed_empty_fixture();
+    seed_legacy_decision_events_schema(&fixture.paper_db);
+
+    let output = service_apply_command(&fixture)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper service apply legacy-schema smoke should spawn");
+
+    assert!(
+        output.status.success(),
+        "paper service apply should start cleanly with a legacy decision_events schema; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    let spawned_pid = report
+        .pointer("/spawned_pid")
+        .and_then(Value::as_u64)
+        .expect("apply should report the spawned pid") as i32;
+    assert_eq!(
+        report.pointer("/applied_action").and_then(Value::as_str),
+        Some("start"),
+        "legacy decision_events schema should remain launchable",
+    );
+
+    send_sigterm_pid(spawned_pid);
+    let stopped_status = wait_for_status_pid(
+        &fixture.status_path,
+        spawned_pid as u32,
+        false,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        stopped_status.pointer("/running").and_then(Value::as_bool),
+        Some(false),
+        "the legacy-schema daemon should stop cleanly during test cleanup",
+    );
+}
+
+#[test]
+fn paper_service_apply_fails_closed_on_unmigratable_decision_events_schema() {
+    let fixture = seed_empty_fixture();
+    seed_unmigratable_decision_events_schema(&fixture.paper_db);
+
+    let output = service_apply_command(&fixture)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper service apply unmigratable-schema smoke should spawn");
+
+    assert!(
+        !output.status.success(),
+        "paper service apply must fail closed on an unmigratable decision_events schema; output:\n{}",
+        combined_output(&output)
+    );
+    assert!(
+        combined_output(&output)
+            .to_ascii_lowercase()
+            .contains("decision_events schema preflight failed"),
+        "schema preflight error should be explicit; output:\n{}",
+        combined_output(&output)
+    );
+}
+
+#[test]
 fn paper_service_apply_resumes_stopped_lane() {
     let fixture = prepare_idle_fixture();
     let child = daemon_command(&fixture)
@@ -2254,6 +2325,48 @@ fn seed_empty_paper_db(path: &Path) {
         "#,
     )
     .expect("empty paper schema should be created");
+}
+
+fn seed_legacy_decision_events_schema(path: &Path) {
+    let conn = Connection::open(path).expect("paper db should open");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE decision_events (
+            id TEXT PRIMARY KEY,
+            timestamp_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decision_phase TEXT NOT NULL,
+            parent_decision_id TEXT,
+            trade_id INTEGER,
+            triggered_by TEXT,
+            action_taken TEXT,
+            rejection_reason TEXT,
+            context_json TEXT,
+            config_fingerprint TEXT,
+            run_fingerprint TEXT,
+            reason_code TEXT
+        );
+        "#,
+    )
+    .expect("legacy decision_events schema should be created");
+}
+
+fn seed_unmigratable_decision_events_schema(path: &Path) {
+    let conn = Connection::open(path).expect("paper db should open");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE decision_events (
+            id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        INSERT INTO decision_events (id, event_type, status)
+        VALUES ('evt-bad', 'fill', 'executed');
+        "#,
+    )
+    .expect("unmigratable decision_events schema should be created");
 }
 
 fn seed_candles_db(path: &Path) {
