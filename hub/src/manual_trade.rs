@@ -265,6 +265,30 @@ enum ManualExecutionClaim {
     Existing(Box<ExistingManualIntent>),
 }
 
+#[derive(Debug, Clone)]
+struct ExistingManualCancelRequest {
+    request_id: String,
+    created_ts_ms: i64,
+    symbol: String,
+    intent_id: Option<String>,
+    exchange_order_id: Option<String>,
+    client_order_id: Option<String>,
+    status: String,
+    last_error: Option<String>,
+    response_json: Option<String>,
+}
+
+pub enum ManualCancelPreflight {
+    NewSubmission,
+    ExistingPendingRequest,
+    ExistingTerminal(Value),
+}
+
+enum ManualCancelRequestClaim {
+    Submit { request_id: String },
+    Existing(Box<ExistingManualCancelRequest>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualExecutionPreflight {
     NewSubmission,
@@ -982,9 +1006,39 @@ pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubEr
         return Ok(payload);
     }
 
+    if let Some(cancel_request) = load_manual_cancel_request_by_id(&conn, lookup_id)? {
+        return Ok(existing_manual_cancel_request_payload(
+            &cancel_request,
+            "request_id",
+            true,
+        )?);
+    }
+
     Err(HubError::NotFound(format!(
         "manual trade result {lookup_id} not found"
     )))
+}
+
+pub fn preflight_cancel_request(
+    cfg: &HubConfig,
+    request: &ManualTradeCancelRequest,
+) -> Result<ManualCancelPreflight, HubError> {
+    enforce_manual_trade_ready(cfg, false)?;
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    let dedupe_key = manual_cancel_dedupe_key(request)?;
+    if let Some(existing) = load_manual_cancel_request_by_dedupe_key(&conn, &dedupe_key)? {
+        return Ok(match existing.status.trim().to_ascii_uppercase().as_str() {
+            "NEW" | "ERROR" | "REJECTED" => ManualCancelPreflight::ExistingPendingRequest,
+            "CANCELLED" => ManualCancelPreflight::ExistingTerminal(
+                existing_manual_cancel_request_payload(&existing, "dedupe_key", true)?,
+            ),
+            _ => ManualCancelPreflight::NewSubmission,
+        });
+    }
+    if let Some(existing) = preflight_cancel_retry(cfg, request)? {
+        return Ok(ManualCancelPreflight::ExistingTerminal(existing));
+    }
+    Ok(ManualCancelPreflight::NewSubmission)
 }
 
 pub fn preflight_cancel_retry(
@@ -1539,6 +1593,7 @@ pub fn cancel_order(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
+        let dedupe_key = manual_cancel_dedupe_key(request)?;
         let order_id_text = oid.trim().to_string();
         let parsed_oid = oid
             .trim()
@@ -1546,17 +1601,35 @@ pub fn cancel_order(
             .map_err(|_| HubError::BadRequest("oid must be a positive integer".into()))?;
         let cancel_context =
             load_manual_cancel_context_by_exchange_order_id(&conn, &symbol, &order_id_text)?;
+        let request_id = match initialise_manual_cancel_request(
+            &conn,
+            &symbol,
+            &dedupe_key,
+            cancel_context.as_ref(),
+            Some(order_id_text.as_str()),
+        )? {
+            ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
+            ManualCancelRequestClaim::Existing(existing) => {
+                if let Some(recovered) =
+                    recover_existing_pending_cancel_request(cfg, &mut conn, request, &existing)?
+                {
+                    return Ok(recovered);
+                }
+                existing.request_id
+            }
+        };
         write_manual_runtime_log(
             &conn,
             "INFO",
             &format!(
-                "manual_trade cancel_requested symbol={} exchange_order_id={} intent_id={}",
+                "manual_trade cancel_requested symbol={} exchange_order_id={} intent_id={} request_id={}",
                 symbol,
                 order_id_text,
                 cancel_context
                     .as_ref()
                     .and_then(|item| item.intent_id.as_deref())
-                    .unwrap_or("unknown")
+                    .unwrap_or("unknown"),
+                request_id,
             ),
         )?;
         write_manual_audit_event(
@@ -1565,6 +1638,7 @@ pub fn cancel_order(
             "MANUAL_CANCEL_REQUESTED",
             "INFO",
             json!({
+                "request_id": &request_id,
                 "exchange_order_id": &order_id_text,
                 "intent_id": cancel_context
                     .as_ref()
@@ -1576,6 +1650,7 @@ pub fn cancel_order(
             Ok(response) => response,
             Err(error) => {
                 let error_text = error.to_string();
+                update_manual_cancel_request(&conn, &request_id, "ERROR", Some(&error_text), None)?;
                 record_manual_cancel_audit(
                     &mut conn,
                     cancel_context.as_ref(),
@@ -1614,6 +1689,7 @@ pub fn cancel_order(
                     "MANUAL_CANCEL_FAILED",
                     "ERROR",
                     json!({
+                        "request_id": &request_id,
                         "exchange_order_id": &order_id_text,
                         "intent_id": cancel_context
                             .as_ref()
@@ -1626,6 +1702,13 @@ pub fn cancel_order(
         };
         let response_text = response.to_string();
         if response_has_embedded_error(&response) {
+            update_manual_cancel_request(
+                &conn,
+                &request_id,
+                "REJECTED",
+                Some(&response_text),
+                Some(&response),
+            )?;
             record_manual_cancel_audit(
                 &mut conn,
                 cancel_context.as_ref(),
@@ -1662,6 +1745,7 @@ pub fn cancel_order(
                 "MANUAL_CANCEL_REJECTED",
                 "ERROR",
                 json!({
+                    "request_id": &request_id,
                     "exchange_order_id": &order_id_text,
                     "intent_id": cancel_context
                         .as_ref()
@@ -1693,6 +1777,7 @@ pub fn cancel_order(
                 raw_json: response_text.clone(),
             },
         )?;
+        update_manual_cancel_request(&conn, &request_id, "CANCELLED", None, Some(&response))?;
         write_manual_runtime_log(
             &conn,
             "INFO",
@@ -1703,7 +1788,7 @@ pub fn cancel_order(
                 cancel_context
                     .as_ref()
                     .and_then(|item| item.intent_id.as_deref())
-                    .unwrap_or("unknown")
+                    .unwrap_or("unknown"),
             ),
         )?;
         write_manual_audit_event(
@@ -1712,6 +1797,7 @@ pub fn cancel_order(
             "MANUAL_CANCELLED",
             "INFO",
             json!({
+                "request_id": &request_id,
                 "exchange_order_id": &order_id_text,
                 "intent_id": cancel_context
                     .as_ref()
@@ -1721,6 +1807,7 @@ pub fn cancel_order(
         )?;
         return Ok(json!({
             "ok": true,
+            "request_id": request_id,
             "symbol": symbol,
             "oid": parsed_oid,
             "intent_id": cancel_context.and_then(|item| item.intent_id),
@@ -1733,6 +1820,7 @@ pub fn cancel_order(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
+        let dedupe_key = manual_cancel_dedupe_key(request)?;
         let cloid = manual_cloid_from_intent_id(intent_id);
         let cancel_context = load_manual_cancel_context_by_intent_id(&conn, intent_id)?
             .unwrap_or_else(|| ManualCancelContext {
@@ -1747,12 +1835,29 @@ pub fn cancel_order(
                 exchange_order_id: None,
             });
         let effective_symbol = cancel_context.symbol.clone();
+        let request_id = match initialise_manual_cancel_request(
+            &conn,
+            &effective_symbol,
+            &dedupe_key,
+            Some(&cancel_context),
+            None,
+        )? {
+            ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
+            ManualCancelRequestClaim::Existing(existing) => {
+                if let Some(recovered) =
+                    recover_existing_pending_cancel_request(cfg, &mut conn, request, &existing)?
+                {
+                    return Ok(recovered);
+                }
+                existing.request_id
+            }
+        };
         write_manual_runtime_log(
             &conn,
             "INFO",
             &format!(
-                "manual_trade cancel_requested symbol={} intent_id={} client_order_id={}",
-                effective_symbol, intent_id, cloid
+                "manual_trade cancel_requested symbol={} intent_id={} client_order_id={} request_id={}",
+                effective_symbol, intent_id, cloid, request_id
             ),
         )?;
         write_manual_audit_event(
@@ -1761,6 +1866,7 @@ pub fn cancel_order(
             "MANUAL_CANCEL_REQUESTED",
             "INFO",
             json!({
+                "request_id": &request_id,
                 "intent_id": intent_id,
                 "client_order_id": &cloid,
             }),
@@ -1770,6 +1876,7 @@ pub fn cancel_order(
             Ok(response) => response,
             Err(error) => {
                 let error_text = error.to_string();
+                update_manual_cancel_request(&conn, &request_id, "ERROR", Some(&error_text), None)?;
                 record_manual_cancel_audit(
                     &mut conn,
                     Some(&cancel_context),
@@ -1800,6 +1907,7 @@ pub fn cancel_order(
                     "MANUAL_CANCEL_FAILED",
                     "ERROR",
                     json!({
+                        "request_id": &request_id,
                         "intent_id": intent_id,
                         "client_order_id": &cloid,
                         "error": &error_text,
@@ -1810,6 +1918,13 @@ pub fn cancel_order(
         };
         let response_text = response.to_string();
         if response_has_embedded_error(&response) {
+            update_manual_cancel_request(
+                &conn,
+                &request_id,
+                "REJECTED",
+                Some(&response_text),
+                Some(&response),
+            )?;
             record_manual_cancel_audit(
                 &mut conn,
                 Some(&cancel_context),
@@ -1840,6 +1955,7 @@ pub fn cancel_order(
                 "MANUAL_CANCEL_REJECTED",
                 "ERROR",
                 json!({
+                    "request_id": &request_id,
                     "intent_id": intent_id,
                     "client_order_id": &cloid,
                     "response": &response,
@@ -1863,6 +1979,7 @@ pub fn cancel_order(
                 raw_json: response_text.clone(),
             },
         )?;
+        update_manual_cancel_request(&conn, &request_id, "CANCELLED", None, Some(&response))?;
         write_manual_runtime_log(
             &conn,
             "INFO",
@@ -1877,6 +1994,7 @@ pub fn cancel_order(
             "MANUAL_CANCELLED",
             "INFO",
             json!({
+                "request_id": &request_id,
                 "intent_id": intent_id,
                 "client_order_id": &cloid,
                 "response": &response,
@@ -1884,6 +2002,7 @@ pub fn cancel_order(
         )?;
         return Ok(json!({
             "ok": true,
+            "request_id": request_id,
             "symbol": effective_symbol,
             "intent_id": intent_id,
             "cloid": cloid,
@@ -2313,6 +2432,23 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
             ON manual_trade_confirmations(status, expires_ts_ms);
         CREATE INDEX IF NOT EXISTS idx_manual_trade_confirmations_intent
             ON manual_trade_confirmations(intent_id);
+
+        CREATE TABLE IF NOT EXISTS manual_cancel_requests (
+            request_id TEXT PRIMARY KEY,
+            created_ts_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            intent_id TEXT,
+            exchange_order_id TEXT,
+            client_order_id TEXT,
+            status TEXT NOT NULL,
+            last_error TEXT,
+            response_json TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_cancel_requests_dedupe
+            ON manual_cancel_requests(dedupe_key);
+        CREATE INDEX IF NOT EXISTS idx_manual_cancel_requests_created
+            ON manual_cancel_requests(created_ts_ms);
 
         CREATE TABLE IF NOT EXISTS oms_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2943,6 +3079,395 @@ fn load_manual_cancel_context_by_exchange_order_id(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(HubError::Db(error.to_string())),
     }
+}
+
+fn manual_cancel_dedupe_key(request: &ManualTradeCancelRequest) -> Result<String, HubError> {
+    if let Some(intent_id) = request
+        .intent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(format!("cancel:intent:{intent_id}"));
+    }
+    if let Some(oid) = request
+        .oid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(format!(
+            "cancel:oid:{}:{}",
+            request.symbol.trim().to_ascii_uppercase(),
+            oid
+        ));
+    }
+    Err(HubError::BadRequest(
+        "oid or intent_id required for cancel".into(),
+    ))
+}
+
+fn manual_cancel_request_id_from_dedupe_key(dedupe_key: &str) -> String {
+    let digest = sha3::Sha3_256::digest(dedupe_key.as_bytes());
+    format!("cancel_{}", hex::encode(&digest[..16]))
+}
+
+fn load_manual_cancel_request_by_dedupe_key(
+    conn: &Connection,
+    dedupe_key: &str,
+) -> Result<Option<ExistingManualCancelRequest>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT request_id, created_ts_ms, symbol, dedupe_key, intent_id, exchange_order_id,
+                client_order_id, status, last_error, response_json
+         FROM manual_cancel_requests
+         WHERE dedupe_key = ?1
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([dedupe_key], |row| {
+        Ok(ExistingManualCancelRequest {
+            request_id: row.get(0)?,
+            created_ts_ms: row.get(1)?,
+            symbol: row.get(2)?,
+            intent_id: row.get(4)?,
+            exchange_order_id: row.get(5)?,
+            client_order_id: row.get(6)?,
+            status: row.get(7)?,
+            last_error: row.get(8)?,
+            response_json: row.get(9)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn load_manual_cancel_request_by_id(
+    conn: &Connection,
+    request_id: &str,
+) -> Result<Option<ExistingManualCancelRequest>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT request_id, created_ts_ms, symbol, dedupe_key, intent_id, exchange_order_id,
+                client_order_id, status, last_error, response_json
+         FROM manual_cancel_requests
+         WHERE request_id = ?1
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([request_id], |row| {
+        Ok(ExistingManualCancelRequest {
+            request_id: row.get(0)?,
+            created_ts_ms: row.get(1)?,
+            symbol: row.get(2)?,
+            intent_id: row.get(4)?,
+            exchange_order_id: row.get(5)?,
+            client_order_id: row.get(6)?,
+            status: row.get(7)?,
+            last_error: row.get(8)?,
+            response_json: row.get(9)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn parse_manual_cancel_response(raw: Option<&str>) -> Result<Value, HubError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => serde_json::from_str(raw).map_err(HubError::from),
+        None => Ok(Value::Null),
+    }
+}
+
+fn existing_manual_cancel_request_payload(
+    existing: &ExistingManualCancelRequest,
+    lookup: &str,
+    deduped: bool,
+) -> Result<Value, HubError> {
+    Ok(json!({
+        "ok": true,
+        "kind": "cancel",
+        "status": existing.status.to_ascii_lowercase(),
+        "deduped": deduped,
+        "lookup": lookup,
+        "request_id": existing.request_id,
+        "created_ts_ms": existing.created_ts_ms,
+        "symbol": existing.symbol,
+        "intent_id": existing.intent_id,
+        "exchange_order_id": existing.exchange_order_id,
+        "cloid": existing.client_order_id,
+        "last_error": existing.last_error,
+        "response": parse_manual_cancel_response(existing.response_json.as_deref())?,
+    }))
+}
+
+fn initialise_manual_cancel_request(
+    conn: &Connection,
+    symbol: &str,
+    dedupe_key: &str,
+    context: Option<&ManualCancelContext>,
+    request_exchange_order_id: Option<&str>,
+) -> Result<ManualCancelRequestClaim, HubError> {
+    if let Some(existing) = load_manual_cancel_request_by_dedupe_key(conn, dedupe_key)? {
+        let status = existing.status.trim().to_ascii_uppercase();
+        if status == "CANCELLED" {
+            return Ok(ManualCancelRequestClaim::Existing(Box::new(existing)));
+        }
+        if status == "NEW" {
+            return Ok(ManualCancelRequestClaim::Existing(Box::new(existing)));
+        }
+        if matches!(status.as_str(), "ERROR" | "REJECTED") {
+            conn.execute(
+                "UPDATE manual_cancel_requests
+                 SET created_ts_ms = ?1,
+                     symbol = ?2,
+                     intent_id = ?3,
+                     exchange_order_id = ?4,
+                     client_order_id = ?5,
+                     status = 'NEW',
+                     last_error = NULL,
+                     response_json = NULL
+                 WHERE request_id = ?6",
+                params![
+                    chrono::Utc::now().timestamp_millis(),
+                    symbol.trim().to_ascii_uppercase(),
+                    context.and_then(|item| item.intent_id.as_deref()),
+                    context
+                        .and_then(|item| item.exchange_order_id.as_deref())
+                        .or(request_exchange_order_id),
+                    context.and_then(|item| item.client_order_id.as_deref()),
+                    existing.request_id,
+                ],
+            )?;
+            return Ok(ManualCancelRequestClaim::Submit {
+                request_id: existing.request_id,
+            });
+        }
+        return Ok(ManualCancelRequestClaim::Existing(Box::new(existing)));
+    }
+
+    let request_id = manual_cancel_request_id_from_dedupe_key(dedupe_key);
+    conn.execute(
+        "INSERT INTO manual_cancel_requests (
+            request_id, created_ts_ms, symbol, dedupe_key, intent_id, exchange_order_id,
+            client_order_id, status
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'NEW')",
+        params![
+            request_id,
+            chrono::Utc::now().timestamp_millis(),
+            symbol.trim().to_ascii_uppercase(),
+            dedupe_key,
+            context.and_then(|item| item.intent_id.as_deref()),
+            context
+                .and_then(|item| item.exchange_order_id.as_deref())
+                .or(request_exchange_order_id),
+            context.and_then(|item| item.client_order_id.as_deref()),
+        ],
+    )?;
+    Ok(ManualCancelRequestClaim::Submit { request_id })
+}
+
+fn manual_cancel_target_is_still_open(
+    orders: &[Value],
+    symbol: &str,
+    client_order_id: Option<&str>,
+    exchange_order_id: Option<&str>,
+) -> bool {
+    let symbol_upper = symbol.trim().to_ascii_uppercase();
+    orders.iter().any(|order| {
+        let order_symbol = order
+            .get("coin")
+            .or_else(|| order.get("symbol"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_ascii_uppercase());
+        if order_symbol.as_deref() != Some(symbol_upper.as_str()) {
+            return false;
+        }
+        let order_cloid = order
+            .get("cloid")
+            .or_else(|| order.get("clientOrderId"))
+            .or_else(|| order.get("client_order_id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim);
+        if client_order_id.is_some() && order_cloid == client_order_id {
+            return true;
+        }
+        let order_exchange_id = order
+            .get("oid")
+            .and_then(parse_json_integer)
+            .map(|value| value.to_string());
+        exchange_order_id.is_some() && order_exchange_id.as_deref() == exchange_order_id
+    })
+}
+
+fn recover_existing_pending_cancel_request(
+    cfg: &HubConfig,
+    conn: &mut Connection,
+    request: &ManualTradeCancelRequest,
+    existing: &ExistingManualCancelRequest,
+) -> Result<Option<Value>, HubError> {
+    if !existing.status.eq_ignore_ascii_case("NEW") {
+        return Ok(None);
+    }
+
+    let symbol = existing.symbol.trim().to_ascii_uppercase();
+    let client = build_client(cfg)?;
+    let open_orders = client
+        .open_orders()
+        .map_err(|error| HubError::Internal(format!("failed to inspect open orders: {error}")))?;
+
+    let mut recovered_cancel_context: Option<ManualCancelContext> = None;
+    let target_still_open = if let Some(intent_id) = request
+        .intent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(context) = load_manual_cancel_context_by_intent_id(conn, intent_id)? {
+            recovered_cancel_context = Some(context.clone());
+            if is_terminal_cancelled_status(context.current_status.as_deref()) {
+                update_manual_cancel_request(
+                    conn,
+                    &existing.request_id,
+                    "CANCELLED",
+                    None,
+                    Some(&json!({
+                        "status": "ok",
+                        "reason": "intent_already_cancelled_on_retry",
+                    })),
+                )?;
+                return Ok(Some(existing_manual_cancel_request_payload(
+                    &ExistingManualCancelRequest {
+                        status: "CANCELLED".to_string(),
+                        response_json: Some(
+                            json!({
+                                "status": "ok",
+                                "reason": "intent_already_cancelled_on_retry",
+                            })
+                            .to_string(),
+                        ),
+                        last_error: None,
+                        ..existing.clone()
+                    },
+                    "request_id",
+                    true,
+                )?));
+            }
+            manual_cancel_target_is_still_open(
+                &open_orders,
+                &context.symbol,
+                context.client_order_id.as_deref(),
+                context.exchange_order_id.as_deref(),
+            )
+        } else {
+            manual_cancel_target_is_still_open(
+                &open_orders,
+                &symbol,
+                existing.client_order_id.as_deref(),
+                existing.exchange_order_id.as_deref(),
+            )
+        }
+    } else {
+        let request_exchange_order_id = request
+            .oid
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        recovered_cancel_context = load_manual_cancel_context_by_exchange_order_id(
+            conn,
+            &symbol,
+            request_exchange_order_id.unwrap_or_default(),
+        )?;
+        manual_cancel_target_is_still_open(
+            &open_orders,
+            &symbol,
+            existing.client_order_id.as_deref(),
+            existing
+                .exchange_order_id
+                .as_deref()
+                .or(request_exchange_order_id),
+        )
+    };
+
+    if target_still_open {
+        return Ok(None);
+    }
+
+    let recovered_response = json!({
+        "status": "ok",
+        "reason": "target_not_open_on_retry",
+    });
+    record_manual_cancel_audit(
+        conn,
+        recovered_cancel_context.as_ref(),
+        ManualCancelAudit {
+            intent_id: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.intent_id.as_deref()),
+            symbol: &symbol,
+            side: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.side.as_deref()),
+            order_type: "cancel_recovered",
+            requested_size: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.requested_size),
+            reduce_only: recovered_cancel_context
+                .as_ref()
+                .and_then(|item| item.reduce_only),
+            client_order_id: existing.client_order_id.as_deref(),
+            exchange_order_id: existing.exchange_order_id.as_deref(),
+            status: "CANCELLED",
+            raw_json: recovered_response.to_string(),
+        },
+    )?;
+    update_manual_cancel_request(
+        conn,
+        &existing.request_id,
+        "CANCELLED",
+        None,
+        Some(&recovered_response),
+    )?;
+    Ok(Some(existing_manual_cancel_request_payload(
+        &ExistingManualCancelRequest {
+            status: "CANCELLED".to_string(),
+            response_json: Some(recovered_response.to_string()),
+            last_error: None,
+            ..existing.clone()
+        },
+        "request_id",
+        true,
+    )?))
+}
+
+fn update_manual_cancel_request(
+    conn: &Connection,
+    request_id: &str,
+    status: &str,
+    last_error: Option<&str>,
+    response: Option<&Value>,
+) -> Result<(), HubError> {
+    let changed = conn.execute(
+        "UPDATE manual_cancel_requests
+         SET status = ?1,
+             last_error = ?2,
+             response_json = ?3
+         WHERE request_id = ?4",
+        params![
+            status,
+            last_error,
+            response.map(Value::to_string),
+            request_id,
+        ],
+    )?;
+    if changed == 0 {
+        return Err(HubError::Internal(format!(
+            "failed to update manual cancel request {request_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn is_terminal_cancelled_status(current_status: Option<&str>) -> bool {
@@ -5945,6 +6470,198 @@ mod tests {
         assert_eq!(
             result.get("intent_id").and_then(|value| value.as_str()),
             Some("manual_cancelled_intent")
+        );
+    }
+
+    #[test]
+    fn manual_cancel_dedupe_key_normalises_oid_and_prefers_intent_id() {
+        assert_eq!(
+            manual_cancel_dedupe_key(&ManualTradeCancelRequest {
+                symbol: " eth ".to_string(),
+                oid: Some(" 12345 ".to_string()),
+                intent_id: None,
+            })
+            .unwrap(),
+            "cancel:oid:ETH:12345"
+        );
+        assert_eq!(
+            manual_cancel_dedupe_key(&ManualTradeCancelRequest {
+                symbol: "ETH".to_string(),
+                oid: Some("12345".to_string()),
+                intent_id: Some("manual_intent".to_string()),
+            })
+            .unwrap(),
+            "cancel:intent:manual_intent"
+        );
+    }
+
+    #[test]
+    fn manual_cancel_target_probe_matches_retry_oid_without_stored_context() {
+        let orders = vec![json!({
+            "coin": "ETH",
+            "oid": 12345_i64,
+            "side": "A",
+            "limitPx": "2100.5",
+            "sz": "0.0515"
+        })];
+
+        assert!(manual_cancel_target_is_still_open(
+            &orders,
+            " eth ",
+            None,
+            Some("12345")
+        ));
+    }
+
+    #[test]
+    fn manual_cancel_target_probe_matches_fallback_client_order_id() {
+        let orders = vec![json!({
+            "coin": "ETH",
+            "cloid": "0x6d616e5f1234567890abcdef12345678",
+            "side": "A",
+            "limitPx": "2100.5",
+            "sz": "0.0515"
+        })];
+
+        assert!(manual_cancel_target_is_still_open(
+            &orders,
+            "ETH",
+            Some("0x6d616e5f1234567890abcdef12345678"),
+            None
+        ));
+    }
+
+    #[test]
+    fn preflight_cancel_request_returns_existing_cancel_request_payload() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO manual_cancel_requests (
+                request_id, created_ts_ms, symbol, dedupe_key, intent_id, exchange_order_id,
+                client_order_id, status, response_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'CANCELLED', ?8)",
+            params![
+                "cancel_request_existing",
+                1_773_500_400_000_i64,
+                "ETH",
+                "cancel:intent:manual_cancelled_intent",
+                "manual_cancelled_intent",
+                "348262211344",
+                "0x6d616e5f1234567890abcdef12345678",
+                json!({"status":"ok"}).to_string(),
+            ],
+        )
+        .unwrap();
+
+        let preflight = preflight_cancel_request(
+            &cfg,
+            &ManualTradeCancelRequest {
+                symbol: "ETH".to_string(),
+                oid: None,
+                intent_id: Some("manual_cancelled_intent".to_string()),
+            },
+        )
+        .unwrap();
+
+        if let ManualCancelPreflight::ExistingTerminal(payload) = preflight {
+            assert_eq!(
+                payload.get("request_id").and_then(|value| value.as_str()),
+                Some("cancel_request_existing")
+            );
+            assert_eq!(
+                payload.get("status").and_then(|value| value.as_str()),
+                Some("cancelled")
+            );
+        } else {
+            panic!("expected existing terminal cancel payload");
+        }
+    }
+
+    #[test]
+    fn preflight_cancel_request_marks_failed_retry_as_pending_resumption() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO manual_cancel_requests (
+                request_id, created_ts_ms, symbol, dedupe_key, intent_id, status, last_error
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'ERROR', ?6)",
+            params![
+                "cancel_request_retry",
+                1_773_500_450_000_i64,
+                "ETH",
+                "cancel:intent:manual_cancelled_intent",
+                "manual_cancelled_intent",
+                "temporary error",
+            ],
+        )
+        .unwrap();
+
+        let preflight = preflight_cancel_request(
+            &cfg,
+            &ManualTradeCancelRequest {
+                symbol: "ETH".to_string(),
+                oid: None,
+                intent_id: Some("manual_cancelled_intent".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            preflight,
+            ManualCancelPreflight::ExistingPendingRequest
+        ));
+    }
+
+    #[test]
+    fn execution_result_returns_cancel_request_state() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO manual_cancel_requests (
+                request_id, created_ts_ms, symbol, dedupe_key, intent_id, exchange_order_id,
+                client_order_id, status, last_error, response_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ERROR', ?8, ?9)",
+            params![
+                "cancel_request_lookup",
+                1_773_500_500_000_i64,
+                "ETH",
+                "cancel:intent:manual_lookup",
+                "manual_lookup",
+                "348262211344",
+                "0x6d616e5f1234567890abcdef12345678",
+                "network error",
+                json!({"error":"network error"}).to_string(),
+            ],
+        )
+        .unwrap();
+
+        let result = execution_result(&cfg, "cancel_request_lookup").unwrap();
+        assert_eq!(
+            result.get("kind").and_then(|value| value.as_str()),
+            Some("cancel")
+        );
+        assert_eq!(
+            result.get("lookup").and_then(|value| value.as_str()),
+            Some("request_id")
+        );
+        assert_eq!(
+            result.get("last_error").and_then(|value| value.as_str()),
+            Some("network error")
         );
     }
 
