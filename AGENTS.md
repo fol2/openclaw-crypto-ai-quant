@@ -12,15 +12,19 @@ Do not change this section unless the user explicitly asks to update `AGENTS.md`
 - Never run `git checkout`, `git switch`, or any branch-changing command inside `/home/fol2hk/openclaw-plugins/ai_quant`.
 - Never edit application code in `/home/fol2hk/openclaw-plugins/ai_quant` directly. Treat this folder as production-run only.
 - All code changes MUST be done in a separate worktree folder on a non-`master` branch (for example `/home/fol2hk/openclaw-plugins/ai_quant_wt/<ticket-branch>`).
-- All AQC ticket work MUST be delivered through atomic PRs targeting `master` (one logical change per PR, no batching of unrelated fixes).
+- All AQC ticket work MUST be delivered through atomic PRs targeting `master` (exactly one logical change per PR; no batching of unrelated fixes).
+- Treat the atomic-PR rule as part of the SDLC, not as a suggestion: do not combine separate fixes, docs, refactors, or housekeeping into the same PR unless they are inseparable parts of one logical change.
 - Do not commit ticket changes directly on `master`. Use a dedicated ticket branch/worktree, open a PR, complete review, then merge.
 - Multi-agent collaboration is expected: multiple active worktrees/branches/PRs may coexist at the same time.
 - Mandatory PR flow for every successful code update:
   1. Create an atomic PR to `master`.
   2. Run a reviewer subagent to review the PR.
   3. Merge only after the review is acceptable.
-  4. Continue to the next task only after merge completion.
-  5. After merge, clean up only branches/worktrees created by the current agent/session (local + remote); never delete branches/worktrees owned by other concurrent agents.
+  4. After merge, delete the merged PR branch both locally and remotely if it was created by the current agent/session.
+  5. After merge, remove the merged PR worktree(s) created for that PR if they were created by the current agent/session.
+  6. After merge, close every subagent that was opened specifically for that PR once their work is no longer needed.
+  7. Continue to the next task only after merge completion and the related local cleanup are complete.
+  8. Never delete branches, worktrees, or subagents owned by other concurrent agents/sessions.
 
 ## Project Overview
 
