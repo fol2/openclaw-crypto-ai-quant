@@ -27,9 +27,10 @@ live YAML before mutation, and reports success only after
 - on the intended materialised `config_id`
 
 If the supervised apply proof fails, the Hub restores the incumbent live YAML
-and runs a recovery restart against that incumbent contract before returning the
-failure response. The emitted artefacts now record both the previous and target
-`config_id` values.
+and runs a supervised recovery apply against that incumbent contract before
+returning the failure response. Depending on the recovered lane state, that
+recovery can resolve as a start, restart, or no-op. The emitted artefacts now
+record both the previous and target `config_id` values.
 
 Transactional live apply artefacts live under:
 

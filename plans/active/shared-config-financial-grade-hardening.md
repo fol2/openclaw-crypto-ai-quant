@@ -63,8 +63,8 @@ Current execution stage as of 2026-03-14:
   `config_id`.
 - Live rollback now shares that same transactional boundary: it snapshots the
   incumbent live YAML before mutation, stages the restored payload, and
-  automatically restores the incumbent YAML plus a supervised recovery restart
-  if the rollback proof fails.
+  automatically restores the incumbent YAML plus a supervised recovery apply if
+  the rollback proof fails.
 - PR 6 (`Launch daemons from immutable config artefacts`) is the next active
   implementation stage once PR 5 finishes review and merge.
 
