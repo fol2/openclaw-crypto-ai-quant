@@ -304,6 +304,14 @@ fn resolve_config_path(config_dir: &Path, file: &str) -> Result<PathBuf, HubErro
     Ok(config_dir.join(filename))
 }
 
+fn resolve_config_path_for_state(state: &AppState, file: &str) -> Result<PathBuf, HubError> {
+    if file == "live" {
+        Ok(state.config.live_yaml_path.clone())
+    } else {
+        resolve_config_path(&state.config.config_dir, file)
+    }
+}
+
 /// Variant name from ConfigQuery, defaulting to "main".
 fn variant(q: &ConfigQuery) -> &str {
     q.file.as_deref().unwrap_or("main")
@@ -507,7 +515,7 @@ fn resolve_current_config_state(
     state: &AppState,
     file_variant: &str,
 ) -> Result<ResolvedConfigState, HubError> {
-    let path = resolve_config_path(&state.config.config_dir, file_variant)?;
+    let path = resolve_config_path_for_state(state, file_variant)?;
     if !path.exists() {
         return Err(HubError::NotFound(format!(
             "config file not found: {}",
@@ -833,7 +841,7 @@ async fn execute_live_config_transaction(
                         let raw = run_live_service_apply_command(
                             state,
                             &state.config.live_yaml_path,
-                            "restart",
+                            "auto",
                         )
                         .await;
                         let recovery_error = parse_live_service_apply_proof(&raw)
@@ -958,7 +966,7 @@ async fn post_config_reload(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ConfigQuery>,
 ) -> Result<Json<Value>, HubError> {
-    let path = resolve_config_path(&state.config.config_dir, variant(&q))?;
+    let path = resolve_config_path_for_state(&state, variant(&q))?;
     if !path.exists() {
         return Err(HubError::NotFound(format!(
             "config file not found: {}",
@@ -1073,7 +1081,7 @@ async fn get_config_history(
     Query(q): Query<ConfigQuery>,
 ) -> Result<Json<Vec<BackupEntry>>, HubError> {
     let file_variant = variant(&q);
-    let path = resolve_config_path(&state.config.config_dir, file_variant)?;
+    let path = resolve_config_path_for_state(&state, file_variant)?;
     let stem = path
         .file_name()
         .unwrap_or_default()
@@ -1118,7 +1126,7 @@ async fn get_config_diff(
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<Value>, HubError> {
     let file_variant = q.file.as_deref().unwrap_or("main");
-    let config_path = resolve_config_path(&state.config.config_dir, file_variant)?;
+    let config_path = resolve_config_path_for_state(&state, file_variant)?;
     let bk_dir = backups_dir(&state.config.config_dir)?;
 
     let read_version = |version: &str| -> Result<String, HubError> {
@@ -1191,7 +1199,7 @@ async fn get_config_files(
 
     let mut files = Vec::new();
     for v in &variants {
-        if let Ok(path) = resolve_config_path(&state.config.config_dir, v) {
+        if let Ok(path) = resolve_config_path_for_state(&state, v) {
             let exists = path.exists();
             let (modified, size) = if exists {
                 let meta = fs::metadata(&path).ok();
@@ -1394,6 +1402,21 @@ mod tests {
         config.aiq_root = root.to_path_buf();
         config.config_dir = root.join("config");
         config.live_yaml_path = config.config_dir.join("strategy_overrides.live.yaml");
+        config.artifacts_dir = root.join("artifacts");
+        config.admin_actions_enabled = true;
+        config.runtime_bin = runtime_bin.to_path_buf();
+        AppState::new(config)
+    }
+
+    fn admin_test_state_with_live_yaml(
+        root: &Path,
+        runtime_bin: &Path,
+        live_yaml_path: &Path,
+    ) -> Arc<AppState> {
+        let mut config = crate::config::HubConfig::from_env();
+        config.aiq_root = root.to_path_buf();
+        config.config_dir = root.join("config");
+        config.live_yaml_path = live_yaml_path.to_path_buf();
         config.artifacts_dir = root.join("artifacts");
         config.admin_actions_enabled = true;
         config.runtime_bin = runtime_bin.to_path_buf();
@@ -1729,6 +1752,84 @@ fi
             event["what"]["candidate_config_id"],
             Value::String(candidate.config_id)
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn apply_live_uses_live_yaml_override_for_read_and_write_boundaries() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let config_dir_live = write_live_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let override_live = dir.path().join("runtime").join("live-override.yaml");
+        fs::create_dir_all(override_live.parent().unwrap()).unwrap();
+        fs::write(
+            &override_live,
+            "global:\n  engine:\n    interval: 1h\nsymbols:\n  ETH:\n    trade:\n      leverage: 1.5\n",
+        )
+        .unwrap();
+        let candidate_yaml =
+            "global:\n  engine:\n    interval: 15m\nsymbols:\n  ETH:\n    trade:\n      leverage: 3.0\n";
+
+        let bootstrap_state =
+            admin_test_state_with_live_yaml(dir.path(), Path::new("/bin/true"), &override_live);
+        let current = resolve_current_config_state(&bootstrap_state, "live").unwrap();
+        let candidate = validate_candidate_config_write(
+            &bootstrap_state,
+            "live",
+            &override_live,
+            candidate_yaml,
+        )
+        .unwrap();
+        let success_report = fake_live_service_apply_report(&candidate.config_id, "running", true);
+        let (runtime_bin, count_path, first_path, second_path) =
+            write_fake_runtime_script(dir.path(), &success_report, &success_report);
+        let _env = EnvGuard::set(&[
+            (
+                "AIQ_TEST_RUNTIME_COUNT_FILE",
+                Some(count_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_1",
+                Some(first_path.to_str().unwrap()),
+            ),
+            (
+                "AIQ_TEST_RUNTIME_RESPONSE_2",
+                Some(second_path.to_str().unwrap()),
+            ),
+        ]);
+        let state = admin_test_state_with_live_yaml(dir.path(), &runtime_bin, &override_live);
+
+        let Json(response) = post_apply_live(
+            State(Arc::clone(&state)),
+            if_match_headers(&current.lock_id),
+            Json(ApplyLiveBody {
+                yaml: candidate_yaml.to_string(),
+                expected_config_id: None,
+                reason: Some("test override".to_string()),
+                restart: Some("auto".to_string()),
+                dry_run: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["ok"], Value::Bool(true));
+        assert_eq!(
+            response["previous_lock_id"],
+            Value::String(current.lock_id.clone())
+        );
+        assert_eq!(
+            fs::read_to_string(&override_live).unwrap(),
+            normalise_yaml_payload(candidate_yaml)
+        );
+        assert!(fs::read_to_string(&config_dir_live)
+            .unwrap()
+            .contains("interval: 30m"));
     }
 
     #[tokio::test]
