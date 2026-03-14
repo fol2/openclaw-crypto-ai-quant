@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, rollbackLiveConfig } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, requestLiveRollbackConfig } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -1157,18 +1157,15 @@
     configActionNotice = '';
     configActionError = '';
     try {
-      const res = await rollbackLiveConfig({ steps: 1, restart: 'auto', reason, dry_run: false });
+      const res = await requestLiveRollbackConfig({ steps: 1, restart: 'auto', reason, dry_run: false });
       if (!res?.ok) {
-        throw new Error(actionErrorMessage(res, 'Rollback failed.'));
+        throw new Error(actionErrorMessage(res, 'Rollback request failed.'));
       }
-      const restarted = Boolean(res?.restart?.result?.ok);
-      const restartNote = restarted
-        ? ` ${liveServiceName} restarted.`
-        : (res?.restart_required ? ` Restart required for ${liveServiceName}.` : '');
-      configActionNotice = `Rollback complete: live config restored to previous version.${restartNote}`;
-      await refresh();
+      const requestId = String(res?.request_id || '').trim();
+      const requestNote = requestId ? ` Request ID: ${requestId}.` : '';
+      configActionNotice = `Rollback request created.${requestNote} An approver must approve it before the live service changes.`;
     } catch (e: any) {
-      configActionError = e?.message || 'Rollback failed.';
+      configActionError = e?.message || 'Rollback request failed.';
     } finally {
       configActionBusy = '';
     }

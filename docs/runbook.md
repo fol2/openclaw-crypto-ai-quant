@@ -234,6 +234,42 @@ Operators may attach a weak actor hint through `X-AIQ-Actor`; when absent, the
 Hub falls back to the `admin_token` auth scope label in the diagnostics audit
 event.
 
+## Maker-Checker Live Approvals
+
+The Hub now separates three live control-plane roles:
+
+- viewer: read-only access through `AIQ_MONITOR_TOKEN` or the trusted read
+  bypass rules
+- editor: config save access plus live request creation through
+  `AIQ_MONITOR_EDITOR_TOKEN`
+- approver: live request approval / rejection through
+  `AIQ_MONITOR_APPROVER_TOKEN`
+
+The existing `AIQ_MONITOR_ADMIN_TOKEN` remains reserved for privileged
+diagnostics and system actions. It no longer acts as the one undifferentiated
+bearer for high-risk live config execution.
+
+The live workflow is now:
+
+1. editor previews live apply with `POST /api/config/actions/apply-live`
+   and `dry_run: true`
+2. editor creates a pending request through
+   `POST /api/config/actions/apply-live/request` or
+   `POST /api/config/actions/rollback-live/request`
+3. approver lists pending requests through `GET /api/config/approvals`
+4. approver executes or rejects through:
+   `POST /api/config/approvals/<request_id>/approve`
+   `POST /api/config/approvals/<request_id>/reject`
+
+Pending approval requests are stored under:
+
+```bash
+artifacts/config_approvals/
+```
+
+High-risk config audit events now include both requester and approver identities
+when the live request is approved or rejected.
+
 ## Snapshot Operations
 
 ```bash

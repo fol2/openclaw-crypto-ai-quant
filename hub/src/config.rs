@@ -11,8 +11,12 @@ pub struct HubConfig {
     pub port: u16,
     /// Bearer token for read-only and viewer APIs.
     pub token: String,
-    /// Bearer token required for mutation APIs.
+    /// Bearer token reserved for privileged diagnostics and system actions.
     pub admin_token: String,
+    /// Bearer token allowed to edit config and create pending live requests.
+    pub editor_token: String,
+    /// Bearer token allowed to approve or reject pending live requests.
+    pub approver_token: String,
     /// Explicit development-mode opt-in for local unsecured read-only access.
     pub dev_mode: bool,
     /// Explicit browser origins allowed to call the Hub cross-origin.
@@ -286,6 +290,8 @@ impl HubConfig {
             port: env_u16("AIQ_MONITOR_PORT", 61010),
             token: env_str("AIQ_MONITOR_TOKEN", ""),
             admin_token: env_str("AIQ_MONITOR_ADMIN_TOKEN", ""),
+            editor_token: env_str("AIQ_MONITOR_EDITOR_TOKEN", ""),
+            approver_token: env_str("AIQ_MONITOR_APPROVER_TOKEN", ""),
             dev_mode: env_bool("AIQ_MONITOR_DEV_MODE", false),
             cors_allowed_origins: env_csv("AIQ_MONITOR_CORS_ALLOWED_ORIGINS"),
             live_db,
