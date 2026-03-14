@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bt_core::config::{
-    load_config_document_checked, strategy_config_fingerprint_sha256,
+    load_config_document_checked, materialise_runtime_document, strategy_config_fingerprint_sha256,
     strategy_config_to_yaml_value, StrategyConfig,
 };
 use bt_core::sweep::apply_one_pub;
@@ -432,6 +432,7 @@ struct ValidationItem {
     canonical_cpu_verified: bool,
     config_id: String,
     config_path: String,
+    source_config_path: String,
     config_sha256: String,
     final_balance: f64,
     initial_balance: f64,
@@ -591,6 +592,7 @@ struct DeploymentChallenge {
     slot: usize,
     service: String,
     target_yaml_path: String,
+    source_config_path: String,
     decision: String,
     reason: String,
     incumbent: Option<PerformanceSummary>,
@@ -1802,6 +1804,7 @@ fn validate_candidate(
         canonical_cpu_verified: true,
         config_id,
         config_path: candidate_effective_config_path.display().to_string(),
+        source_config_path: candidate_config_path.display().to_string(),
         config_sha256,
         final_balance: replay_report.final_balance,
         initial_balance: replay_report.initial_balance,
@@ -1835,30 +1838,6 @@ fn validate_candidate(
     })
 }
 
-fn performance_summary_from_validation(item: &ValidationItem) -> PerformanceSummary {
-    PerformanceSummary {
-        config_id: item.config_id.clone(),
-        config_path: item.config_path.clone(),
-        config_sha256: item.config_sha256.clone(),
-        final_balance: item.final_balance,
-        initial_balance: item.initial_balance,
-        max_drawdown_pct: item.max_drawdown_pct,
-        profit_factor: item.profit_factor,
-        total_pnl: item.total_pnl,
-        total_trades: item.total_trades,
-        total_fees: item.total_fees,
-        top1_pnl_pct: item.top1_pnl_pct,
-        slippage_pnl_at_reject_bps: item.slippage_pnl_at_reject_bps,
-        slippage_reject_bps: item.slippage_reject_bps,
-        wf_median_oos_daily_return: item.wf_median_oos_daily_return,
-        replay_report_path: item.replay_report_path.clone(),
-        walk_forward_summary_path: item.walk_forward_summary_path.clone(),
-        rejected: item.rejected,
-        reject_reason: item.reject_reason.clone(),
-        blocked_reasons: item.blocked_reasons.clone(),
-    }
-}
-
 fn evaluate_config_performance(
     paths: &ResolvedPaths,
     validation: &ValidationSettings,
@@ -1866,22 +1845,39 @@ fn evaluate_config_performance(
     output_prefix: &Path,
     db_window: &ResolvedDbWindow,
     initial_balance: f64,
+    role: Option<&str>,
 ) -> Result<PerformanceSummary> {
-    let raw_document: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(config_path)
-            .with_context(|| format!("read config {}", config_path.display()))?,
-    )
-    .with_context(|| format!("parse config {}", config_path.display()))?;
-    let config = load_config_document_checked(&raw_document, None, false, None)
+    let raw_document = read_yaml_document(config_path)?;
+    let runtime_document =
+        materialise_runtime_document(&raw_document, false, role.and_then(role_strategy_mode))
+            .map_err(|err| anyhow!(err))
+            .with_context(|| format!("materialise config {}", config_path.display()))?;
+    let runtime_config_path = output_prefix.with_extension("runtime.yaml");
+    let header = if let Some(role) = role {
+        format!(
+            "# Materialised by aiq-factory at {}\n# Source: {}\n# Role: {}\n",
+            Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            config_path.display(),
+            role,
+        )
+    } else {
+        format!(
+            "# Materialised by aiq-factory at {}\n# Source: {}\n",
+            Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            config_path.display(),
+        )
+    };
+    write_yaml_document(&runtime_config_path, header, &runtime_document)?;
+    let config = load_config_document_checked(&runtime_document, None, false, None)
         .map_err(|err| anyhow!(err))
         .with_context(|| format!("load config {}", config_path.display()))?;
     let config_id = strategy_config_fingerprint_sha256(&config);
-    let config_sha256 = file_sha256_hex(config_path)?;
+    let config_sha256 = file_sha256_hex(&runtime_config_path)?;
 
     let replay_report_path = output_prefix.with_extension("replay.json");
     let replay = run_replay(ReplayCommandInput {
         paths,
-        config_path,
+        config_path: &runtime_config_path,
         initial_balance,
         db_window,
         output_path: &replay_report_path,
@@ -1891,7 +1887,7 @@ fn evaluate_config_performance(
     })?;
     let slippage_report = run_replay(ReplayCommandInput {
         paths,
-        config_path,
+        config_path: &runtime_config_path,
         initial_balance,
         db_window,
         output_path: &output_prefix.with_extension("slippage_20bps.json"),
@@ -1911,7 +1907,7 @@ fn evaluate_config_performance(
         ));
     let walk_forward_summary = build_walk_forward_summary(
         paths,
-        config_path,
+        &runtime_config_path,
         initial_balance,
         db_window,
         validation.walk_forward_splits,
@@ -1949,7 +1945,7 @@ fn evaluate_config_performance(
     let reject_reason = blocked_reasons.join("; ");
     Ok(PerformanceSummary {
         config_id,
-        config_path: config_path.display().to_string(),
+        config_path: runtime_config_path.display().to_string(),
         config_sha256,
         final_balance: replay.final_balance,
         initial_balance: replay.initial_balance,
@@ -1984,7 +1980,7 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
     } = ctx;
     let mut reports = Vec::new();
     for role in selected {
-        let challenger = validated
+        let selected_candidate = validated
             .iter()
             .find(|item| item.config_id == role.config_id)
             .ok_or_else(|| anyhow!("missing selected candidate for role={}", role.role))?;
@@ -1993,7 +1989,17 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
             .iter()
             .find(|item| item.role == role.role)
             .ok_or_else(|| anyhow!("missing paper target for role={}", role.role))?;
-        let challenger_summary = performance_summary_from_validation(challenger);
+        let challenger_summary = evaluate_config_performance(
+            paths,
+            validation,
+            Path::new(&selected_candidate.config_path),
+            &run_dir
+                .join("lane_effective")
+                .join(format!("challenger_{}", target.role.to_ascii_lowercase())),
+            db_window,
+            initial_balance,
+            Some(target.role.as_str()),
+        )?;
         let incumbent = incumbent_performance(
             paths,
             validation,
@@ -2006,6 +2012,7 @@ fn build_deployment_challenges(ctx: ChallengeContext<'_>) -> Result<Vec<Deployme
         reports.push(compare_challenger_to_incumbent(
             target,
             comparison,
+            selected_candidate.source_config_path.as_str(),
             challenger_summary,
             incumbent,
         ));
@@ -2037,16 +2044,32 @@ fn incumbent_performance(
         &output_prefix,
         db_window,
         initial_balance,
+        Some(role),
     )?))
 }
 
 fn compare_challenger_to_incumbent(
     target: &PaperTarget,
     comparison: &ComparisonSettings,
+    source_config_path: &str,
     challenger: PerformanceSummary,
     incumbent: Option<PerformanceSummary>,
 ) -> DeploymentChallenge {
     let (decision, reason) = match incumbent.as_ref() {
+        Some(_) if challenger.rejected => (
+            "incumbent_holds".to_string(),
+            format!(
+                "lane-effective challenger fails the validation suite: {}",
+                challenger.reject_reason
+            ),
+        ),
+        None if challenger.rejected => (
+            "challenger_rejected".to_string(),
+            format!(
+                "lane-effective challenger fails the validation suite: {}",
+                challenger.reject_reason
+            ),
+        ),
         None => (
             "no_incumbent".to_string(),
             "no incumbent config deployed on target".to_string(),
@@ -2077,6 +2100,7 @@ fn compare_challenger_to_incumbent(
         slot: target.slot,
         service: target.service.clone(),
         target_yaml_path: target.yaml_path.display().to_string(),
+        source_config_path: source_config_path.to_string(),
         decision,
         reason,
         incumbent,
@@ -2686,6 +2710,11 @@ fn assess_primary_paper_promotion_gate(
         .iter()
         .find(|target| target.role.eq_ignore_ascii_case("primary"))
         .ok_or_else(|| anyhow!("missing paper target for primary role"))?;
+    let expected_config_id = current_target_config_id(
+        Path::new(&primary_candidate.config_path),
+        target.role.as_str(),
+    )?
+    .ok_or_else(|| anyhow!("missing selected primary candidate config payload"))?;
     let paper_db_path = paper_db_path_for_slot(project_dir, target.slot)?;
     let Some(marker) = load_paper_soak_marker(project_dir, target.role.as_str())? else {
         return Ok(blocked_paper_promotion_gate(
@@ -2711,13 +2740,25 @@ fn assess_primary_paper_promotion_gate(
             )],
         ));
     }
-    if marker.config_id != primary_candidate.config_id {
+    let current_target_config_id =
+        current_target_config_id(target_yaml_path.as_path(), target.role.as_str())?;
+    if current_target_config_id.as_deref() != Some(marker.config_id.as_str()) {
+        return Ok(blocked_paper_promotion_gate(
+            &paper_db_path,
+            primary_candidate,
+            vec![format!(
+                "paper soak marker for role `{}` no longer matches the deployed target fingerprint",
+                target.role
+            )],
+        ));
+    }
+    if marker.config_id != expected_config_id {
         return Ok(blocked_paper_promotion_gate(
             &paper_db_path,
             primary_candidate,
             vec![format!(
                 "paper soak marker for role `{}` points to config {} rather than selected {}",
-                target.role, marker.config_id, primary_candidate.config_id
+                target.role, marker.config_id, expected_config_id
             )],
         ));
     }
@@ -3206,18 +3247,18 @@ fn deploy_selected_configs(
     let mut plans = Vec::new();
     let mut passthrough_events = Vec::new();
     for challenge in challenges {
-        let config_path = PathBuf::from(&challenge.challenger.config_path);
+        let config_path = PathBuf::from(&challenge.source_config_path);
         let target_yaml_path =
             resolve_under_project(project_dir, Path::new(&challenge.target_yaml_path));
         let existing_marker = load_paper_soak_marker(project_dir, challenge.role.as_str())?;
         if matches!(
             challenge.decision.as_str(),
-            "same_config" | "incumbent_holds"
+            "same_config" | "incumbent_holds" | "challenger_rejected"
         ) {
             passthrough_events.push(DeploymentEvent {
                 role: challenge.role.clone(),
                 slot: challenge.slot,
-                source_config_path: challenge.challenger.config_path.clone(),
+                source_config_path: challenge.source_config_path.clone(),
                 config_id: challenge.challenger.config_id.clone(),
                 config_sha256: challenge.challenger.config_sha256.clone(),
                 promoted_config_path: String::new(),
@@ -3229,10 +3270,9 @@ fn deploy_selected_configs(
                         .to_string()
                 }),
                 restarted_service: false,
-                status: if challenge.decision == "same_config" {
-                    "already_applied".to_string()
-                } else {
-                    challenge.decision.clone()
+                status: match challenge.decision.as_str() {
+                    "same_config" => "already_applied".to_string(),
+                    other => other.to_string(),
                 },
             });
             continue;
@@ -3904,30 +3944,13 @@ symbols:
         }
     }
 
-    fn challenge_for(
-        target: &PaperTarget,
-        decision: &str,
-        challenger: PerformanceSummary,
-        incumbent: Option<PerformanceSummary>,
-    ) -> DeploymentChallenge {
-        DeploymentChallenge {
-            role: target.role.clone(),
-            slot: target.slot,
-            service: target.service.clone(),
-            target_yaml_path: target.yaml_path.display().to_string(),
-            decision: decision.to_string(),
-            reason: "test".to_string(),
-            incumbent,
-            challenger,
-        }
-    }
-
     fn validation_item(mode: &str, config_id: &str, pnl: f64, pf: f64, dd: f64) -> ValidationItem {
         ValidationItem {
             candidate_mode: true,
             canonical_cpu_verified: true,
             config_id: config_id.to_string(),
             config_path: format!("/tmp/{config_id}.yaml"),
+            source_config_path: format!("/tmp/{config_id}.raw.yaml"),
             config_sha256: config_id.to_string(),
             final_balance: 10_000.0 + pnl,
             initial_balance: 10_000.0,
@@ -4256,13 +4279,33 @@ symbols:
         let target = paper_target_primary();
         let challenger = performance_summary("challenger", 100.0, 1.2, 0.3);
         let incumbent = performance_summary("incumbent", 120.0, 1.3, 0.25);
+        let source_config_path = challenger.config_path.clone();
         let report = compare_challenger_to_incumbent(
             &target,
             &ComparisonSettings::default(),
+            source_config_path.as_str(),
             challenger,
             Some(incumbent),
         );
         assert_eq!(report.decision, "incumbent_holds");
+    }
+
+    #[test]
+    fn rejected_lane_effective_challenger_never_deploys_without_incumbent() {
+        let target = paper_target_primary();
+        let mut challenger = performance_summary("challenger", 100.0, 1.2, 0.3);
+        challenger.rejected = true;
+        challenger.reject_reason = "lane validation failed".to_string();
+        let source_config_path = challenger.config_path.clone();
+        let report = compare_challenger_to_incumbent(
+            &target,
+            &ComparisonSettings::default(),
+            source_config_path.as_str(),
+            challenger,
+            None,
+        );
+        assert_eq!(report.decision, "challenger_rejected");
+        assert!(report.reason.contains("lane-effective challenger fails"));
     }
 
     #[test]
@@ -4469,7 +4512,17 @@ symbols:
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
 
-        let mut candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        let yaml = config_yaml("30m");
+        let config_id = strategy_fingerprint_from_yaml(&yaml);
+        let source_config = project_dir.join("candidate_primary.yaml");
+        let target_yaml = project_dir
+            .join("config")
+            .join("strategy_overrides.paper1.yaml");
+        fs::write(&source_config, &yaml).unwrap();
+        fs::create_dir_all(target_yaml.parent().unwrap()).unwrap();
+        fs::write(&target_yaml, &yaml).unwrap();
+        let mut candidate = validation_item("efficient", &config_id, 100.0, 1.2, 0.3);
+        candidate.config_path = source_config.display().to_string();
         candidate.config_sha256 = "new-file-sha".to_string();
         insert_paper_fill(
             &conn,
@@ -4505,11 +4558,7 @@ symbols:
             deployed_at_ms: parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap(),
             deployed_by_run_id: "run-123".to_string(),
             source_config_path: "/tmp/source.yaml".to_string(),
-            target_yaml_path: project_dir
-                .join("config")
-                .join("strategy_overrides.paper1.yaml")
-                .display()
-                .to_string(),
+            target_yaml_path: target_yaml.display().to_string(),
         };
         write_json(&paper_soak_marker_path(project_dir, "primary"), &marker).unwrap();
 
@@ -4568,12 +4617,25 @@ symbols:
         };
         write_json(&paper_soak_marker_path(project_dir, "primary"), &old_marker).unwrap();
 
-        let challenge = challenge_for(
-            &paper_target_primary(),
-            "same_config",
-            performance_summary(&config_id, 100.0, 1.2, 0.3),
-            Some(performance_summary(&config_id, 90.0, 1.1, 0.4)),
-        );
+        let runtime_config = run_dir
+            .join("lane_effective")
+            .join("challenger_primary.runtime.yaml");
+        fs::create_dir_all(runtime_config.parent().unwrap()).unwrap();
+        fs::write(&runtime_config, &yaml).unwrap();
+        let challenge = DeploymentChallenge {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            target_yaml_path: paper_target_primary().yaml_path.display().to_string(),
+            source_config_path: source_config.display().to_string(),
+            decision: "same_config".to_string(),
+            reason: "test".to_string(),
+            incumbent: Some(performance_summary(&config_id, 90.0, 1.1, 0.4)),
+            challenger: PerformanceSummary {
+                config_path: runtime_config.display().to_string(),
+                ..performance_summary(&config_id, 100.0, 1.2, 0.3)
+            },
+        };
         let events = deploy_selected_configs(
             project_dir,
             "run-new",
@@ -4592,6 +4654,10 @@ symbols:
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].status, "already_applied");
+        assert_eq!(
+            events[0].source_config_path,
+            source_config.display().to_string()
+        );
         let marker = load_paper_soak_marker(project_dir, "primary")
             .unwrap()
             .unwrap();
@@ -4608,7 +4674,12 @@ symbols:
         let conn = Connection::open(&db_path).unwrap();
         create_paper_gate_schema(&conn);
 
-        let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        let yaml = config_yaml("30m");
+        let config_id = strategy_fingerprint_from_yaml(&yaml);
+        let source_config = project_dir.join("candidate_primary.yaml");
+        fs::write(&source_config, &yaml).unwrap();
+        let mut candidate = validation_item("efficient", &config_id, 100.0, 1.2, 0.3);
+        candidate.config_path = source_config.display().to_string();
         insert_paper_fill(
             &conn,
             1,
