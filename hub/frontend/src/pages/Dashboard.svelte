@@ -105,6 +105,9 @@
         journeyCandles = [];
         journeyMarks = [];
         journeyTunnelPoints = [];
+        if (batch.length > 0) {
+          await selectJourney(batch[0]);
+        }
       } else {
         journeys = [...journeys, ...batch];
         journeyOffset += batch.length;
@@ -121,6 +124,13 @@
     const dur = closeTs - openTs;
     const pad = Math.max(dur * 0.1, 60_000);
     return { openTs, closeTs, dur, fromTs: Math.floor(openTs - pad), toTs: Math.ceil(closeTs + pad) };
+  }
+
+  function tradeTimeLabel(ts: string | null | undefined): string {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts).slice(11, 19);
+    return `${d.toISOString().slice(11, 19)}Z`;
   }
 
   async function selectJourney(j: any) {
@@ -1712,24 +1722,24 @@
             <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(livePos?.unreal_pnl_est)}">{fmtNum(livePos?.unreal_pnl_est)}</span></div>
             <div class="kv"><span class="k">Leverage</span><span class="v">{fmtNum(p.leverage, 1)}x</span></div>
           </div>
-          {#if marks?.entries?.length}
-            <div class="kv-section">
-              <h4>Entries</h4>
-              {#each marks.entries as e}
-                <div class="kv">
-                  <span class="k">
-                    {entryActionLabel(e.action)}
-                    {#if e.source === 'manual'}<span class="trade-source-badge">MANUAL</span>{/if}
-                  </span>
-                  <span class="v mono">@ {fmtNum(e.price, 6)} &times; {fmtNum(e.size, 4)}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
         {:else}
           <div class="empty-state">
             <span class="empty-label">Flat</span>
             <span class="empty-sub">No open position</span>
+          </div>
+        {/if}
+        {#if marks?.entries?.length}
+          <div class="kv-section">
+            <h4>Entries</h4>
+            {#each marks.entries as e}
+              <div class="kv">
+                <span class="k">
+                  {entryActionLabel(e.action)}
+                  {#if e.source === 'manual'}<span class="trade-source-badge">MANUAL</span>{/if}
+                </span>
+                <span class="v mono">@ {fmtNum(e.price, 6)} &times; {fmtNum(e.size, 4)}</span>
+              </div>
+            {/each}
           </div>
         {/if}
 
@@ -1800,6 +1810,27 @@
           </div>
           {#if selectedJourney}
             <div class="journey-chart-splitter" class:active={journeyChartDragging} role="separator" aria-orientation="horizontal" onpointerdown={onJourneyChartSplitterDown}></div>
+          {/if}
+          {#if selectedJourney?.legs?.length}
+            <div class="journey-leg-list">
+              {#each selectedJourney.legs as leg (leg.id)}
+                <div class="journey-leg-row">
+                  <div class="journey-leg-top">
+                    <span class="journey-leg-action">{entryActionLabel(leg.action)}</span>
+                    {#if leg.source === 'manual'}<span class="trade-source-badge">MANUAL</span>{/if}
+                    {#if leg.confidence}<span class="journey-leg-confidence">{leg.confidence}</span>{/if}
+                    <span class="journey-leg-time">{tradeTimeLabel(leg.timestamp)}</span>
+                  </div>
+                  <div class="journey-leg-sub">
+                    <span class="mono">@ {fmtNum(leg.price, 6)} &times; {fmtNum(leg.size, 4)}</span>
+                    {#if leg.reason}<span>{leg.reason}</span>{/if}
+                    {#if leg.pnl != null}
+                      <span class:green={leg.pnl >= 0} class:red={leg.pnl < 0}>PnL {leg.pnl >= 0 ? '+' : ''}{fmtNum(leg.pnl)}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
           {/if}
           <!-- Journey list -->
           <div class="journey-list">
@@ -2933,6 +2964,50 @@
     height: 100%;
     color: var(--text-dim);
     font-size: 12px;
+  }
+  .journey-leg-list {
+    max-height: 180px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-subtle);
+    border-bottom: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.01);
+  }
+  .journey-leg-row {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 12px;
+  }
+  .journey-leg-row:last-child {
+    border-bottom: none;
+  }
+  .journey-leg-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .journey-leg-action {
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .journey-leg-confidence {
+    font-size: 9px;
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .journey-leg-time {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .journey-leg-sub {
+    margin-top: 3px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    color: var(--text-muted);
+    font-size: 11px;
   }
   .journey-list {
     overflow-y: auto;

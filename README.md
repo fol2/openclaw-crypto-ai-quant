@@ -17,7 +17,7 @@ Historical Python runtime and tooling surfaces have been removed from the tree.
 | GPU sweep | `backtester/crates/bt-gpu` | CUDA sweep acceleration and parity helpers |
 | Data loader | `backtester/crates/bt-data` | SQLite candle and universe-history loading |
 | WS sidecar | `ws_sidecar/` | Hyperliquid stream ingestion and candle persistence |
-| Hub | `hub/` | Rust + frontend operator dashboard and service controls |
+| Hub | `hub/` | Rust + frontend operator dashboard, symbol-detail trade review, and service controls |
 
 ## Quick Start
 

@@ -1026,7 +1026,7 @@ async fn api_marks(
     let conn = pool.get()?;
 
     let ledger_pos = trading::open_position_for_symbol(&conn, &sym)?;
-    let entries = if let Some(ref p) = ledger_pos {
+    let mut entries = if let Some(ref p) = ledger_pos {
         if p.open_trade_id > 0 {
             trading::position_entries(&conn, &sym, p.open_trade_id)?
         } else {
@@ -1035,6 +1035,9 @@ async fn api_marks(
     } else {
         Vec::new()
     };
+    if entries.is_empty() {
+        entries = trading::latest_journey_entries(&conn, &sym)?;
+    }
 
     // Fetch mid price and compute unrealised PnL
     let mid = state
