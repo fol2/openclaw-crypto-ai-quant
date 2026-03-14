@@ -2876,7 +2876,6 @@ fn upsert_manual_open_order_snapshot(
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
         ))
     });
     let materially_changed = match existing {
@@ -2888,7 +2887,6 @@ fn upsert_manual_open_order_snapshot(
                 || existing.4.unwrap_or_default() != if snapshot.reduce_only { 1 } else { 0 }
                 || existing.5.as_deref() != snapshot.exchange_order_id
                 || existing.6.as_deref() != Some(snapshot.intent_id)
-                || existing.7.as_deref() != Some(snapshot.raw_json.as_str())
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => true,
         Err(error) => return Err(HubError::Db(error.to_string())),
