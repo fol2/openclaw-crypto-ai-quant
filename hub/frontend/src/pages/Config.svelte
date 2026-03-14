@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { getConfigRaw, putConfig, reloadConfig, getConfigHistory, getConfigDiff, getConfigFiles } from '../lib/api';
+  import { applyLiveConfig, getConfigDiff, getConfigFiles, getConfigHistory, getConfigRaw, putConfig } from '../lib/api';
 
   let files: any[] = $state([]);
   let selectedFile = $state('main');
   let yamlText = $state('');
   let originalText = $state('');
   let currentLockId = $state<string | null>(null);
+  let currentRuntimeConfigId = $state<string | null>(null);
   let dirty = $derived(yamlText !== originalText);
+  let liveFile = $derived(selectedFile === 'live');
   let saving = $state(false);
   let loading = $state(false);
   let error = $state('');
@@ -32,7 +34,8 @@
       const res = await getConfigRaw(selectedFile);
       yamlText = res.raw;
       originalText = res.raw;
-      currentLockId = res.configId;
+      currentLockId = res.lockId;
+      currentRuntimeConfigId = res.runtimeConfigId;
     } catch (e: any) {
       error = e.message || 'Failed to load config';
     } finally {
@@ -46,12 +49,13 @@
       const res = await putConfig(yamlText, selectedFile, currentLockId);
       originalText = yamlText;
       currentLockId = res.lock_id || currentLockId;
+      currentRuntimeConfigId = res.config_id || currentRuntimeConfigId;
       success = `Saved! Backup: ${res.backup || 'none'}`;
       setTimeout(() => { success = ''; }, 5000);
     } catch (e: any) {
       const message = e.message || 'Failed to save';
       if (message.includes('409')) {
-        error = 'This config changed since you loaded it. Reload the latest version and try again.';
+        error = 'This config changed since you loaded it. Load the latest version and try again.';
       } else {
         error = message;
       }
@@ -60,16 +64,55 @@
     }
   }
 
-  async function saveAndReload() {
-    await save();
-    if (!error) {
-      try {
-        await reloadConfig(selectedFile);
-        success = 'Saved & hot-reload triggered!';
-        setTimeout(() => { success = ''; }, 5000);
-      } catch (e: any) {
-        error = `Saved but reload failed: ${e.message}`;
+  async function applyLive() {
+    saving = true; error = ''; success = '';
+    try {
+      const preview = await applyLiveConfig({
+        yaml: yamlText,
+        restart: 'auto',
+        dry_run: true,
+      }, currentLockId);
+      const serviceName = String(preview?.service || 'live service');
+      const targetConfigId = String(preview?.config_id || 'unknown');
+      const currentConfigId = String(preview?.previous_config_id || currentRuntimeConfigId || 'unknown');
+      const restartLine = preview?.restart_required
+        ? `Restart required: yes. ${serviceName} will be restarted to apply the new config identity.`
+        : `Restart required: no. ${serviceName} should keep running if it already matches the approved contract. Stale or stopped lanes may still be supervised.`;
+      const confirmText = `Apply live config now?\n\nService: ${serviceName}\nCurrent config ID: ${currentConfigId}\nTarget config ID: ${targetConfigId}\n${restartLine}`;
+      if (typeof window !== 'undefined' && !window.confirm(confirmText)) return;
+
+      const res = await applyLiveConfig({
+        yaml: yamlText,
+        restart: 'auto',
+        dry_run: false,
+      }, currentLockId);
+      if (!res?.ok) {
+        throw new Error(res?.error || 'Live apply failed');
       }
+
+      originalText = yamlText;
+      currentLockId = res.lock_id || currentLockId;
+      currentRuntimeConfigId = res.config_id || currentRuntimeConfigId;
+
+      const appliedAction = String(res?.restart?.result?.parsed?.applied_action || '').trim();
+      const actionNote = appliedAction === 'restart'
+        ? ` ${serviceName} restarted.`
+        : appliedAction === 'start'
+          ? ` ${serviceName} started.`
+          : appliedAction === 'noop'
+            ? ` ${serviceName} already matched the approved contract.`
+            : '';
+      success = `Live config applied.${actionNote}`;
+      setTimeout(() => { success = ''; }, 5000);
+    } catch (e: any) {
+      const message = e.message || 'Failed to apply live config';
+      if (message.includes('409')) {
+        error = 'This live config changed since you loaded it. Load the latest version and try again.';
+      } else {
+        error = message;
+      }
+    } finally {
+      saving = false;
     }
   }
 
@@ -141,13 +184,23 @@
         {/if}
         <div class="toolbar-actions">
           <button class="btn btn-ghost" onclick={() => { yamlText = originalText; }} disabled={!dirty}>Revert</button>
-          <button class="btn btn-primary" onclick={save} disabled={!dirty || saving}>
-            {saving ? 'Saving...' : 'Save'}
-          </button>
-          <button class="btn btn-green" onclick={saveAndReload} disabled={!dirty || saving}>
-            Save & Reload
-          </button>
+          {#if liveFile}
+            <button class="btn btn-green" onclick={applyLive} disabled={!dirty || saving}>
+              {saving ? 'Applying...' : 'Apply to Live'}
+            </button>
+          {:else}
+            <button class="btn btn-primary" onclick={save} disabled={!dirty || saving}>
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+          {/if}
         </div>
+      </div>
+      <div class="editor-note" class:editor-note-live={liveFile}>
+        {#if liveFile}
+          Applying live config uses the supervised live apply contract. A config identity change requires a service restart, and stale or stopped lanes may still be supervised.
+        {:else}
+          Saving writes YAML only. Running services are not hot-reloaded from this editor.
+        {/if}
       </div>
       {#if loading}
         <div class="loading-state">Loading config...</div>
@@ -267,6 +320,23 @@
     cursor: pointer;
     border-radius: 5px;
     transition: all var(--t-fast);
+  }
+
+  .editor-note {
+    margin-bottom: var(--sp-sm);
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 92%, white 8%);
+    color: var(--text-soft);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .editor-note-live {
+    border-color: color-mix(in srgb, var(--success) 40%, var(--border) 60%);
+    background: color-mix(in srgb, var(--success) 12%, var(--surface) 88%);
+    color: var(--text);
   }
   .tab.active {
     color: var(--accent);

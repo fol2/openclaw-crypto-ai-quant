@@ -180,7 +180,11 @@ export async function getConfig(file = 'main') {
   return apiFetch(`/api/config?file=${encodeURIComponent(file)}`);
 }
 
-export async function getConfigRaw(file = 'main'): Promise<{ raw: string; configId: string | null }> {
+export async function getConfigRaw(file = 'main'): Promise<{
+  raw: string;
+  lockId: string | null;
+  runtimeConfigId: string | null;
+}> {
   const headers: Record<string, string> = {};
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
   const resp = await fetch(`/api/config/raw?file=${encodeURIComponent(file)}`, { headers });
@@ -190,7 +194,8 @@ export async function getConfigRaw(file = 'main'): Promise<{ raw: string; config
     || null;
   return {
     raw: await resp.text(),
-    configId: lockId,
+    lockId,
+    runtimeConfigId: resp.headers.get('x-aiq-config-id'),
   };
 }
 
@@ -200,10 +205,6 @@ export async function putConfig(yaml: string, file = 'main', expectedConfigId?: 
     headers: expectedConfigId ? { 'If-Match': expectedConfigId } : undefined,
     body: JSON.stringify({ yaml }),
   });
-}
-
-export async function reloadConfig(file = 'main') {
-  return apiFetch(`/api/config/reload?file=${encodeURIComponent(file)}`, { method: 'POST' });
 }
 
 export async function getConfigHistory(file = 'main') {
@@ -232,9 +233,24 @@ export interface RollbackLiveRequest {
   dry_run?: boolean;
 }
 
+export interface ApplyLiveRequest {
+  yaml: string;
+  reason?: string;
+  restart?: 'auto' | 'always' | 'never';
+  dry_run?: boolean;
+}
+
 export async function promoteLiveConfig(body: PromoteLiveRequest = {}) {
   return apiFetch('/api/config/actions/promote-live', {
     method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function applyLiveConfig(body: ApplyLiveRequest, expectedConfigId?: string | null) {
+  return apiFetch('/api/config/actions/apply-live', {
+    method: 'POST',
+    headers: expectedConfigId ? { 'If-Match': expectedConfigId } : undefined,
     body: JSON.stringify(body),
   });
 }
