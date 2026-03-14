@@ -1764,13 +1764,14 @@ fn resolve_validation_windows(
             holdout_fraction
         );
     }
-    let total_span = coverage.end_ts_ms - coverage.start_ts_ms;
-    if total_span < 2 {
+    let total_points = (coverage.end_ts_ms - coverage.start_ts_ms) + 1;
+    if total_points < 3 {
         bail!("validation coverage window is too small to split into train and holdout windows");
     }
-    let holdout_span =
-        ((total_span as f64 * holdout_fraction).ceil() as i64).clamp(1, total_span - 1);
-    let holdout_start_ts_ms = coverage.end_ts_ms - holdout_span;
+    let holdout_points =
+        ((total_points as f64 * holdout_fraction).ceil() as i64).clamp(1, total_points - 1);
+    let holdout_start_ts_ms = coverage.end_ts_ms - holdout_points + 1;
+    let train_end_ts_ms = holdout_start_ts_ms - 1;
     if holdout_start_ts_ms <= coverage.start_ts_ms || holdout_start_ts_ms >= coverage.end_ts_ms {
         bail!(
             "failed to derive non-empty train and holdout windows from the common coverage range"
@@ -1778,7 +1779,7 @@ fn resolve_validation_windows(
     }
     Ok(ResolvedValidationWindows {
         coverage: coverage.clone(),
-        train: clone_db_window_with_range(coverage, coverage.start_ts_ms, holdout_start_ts_ms),
+        train: clone_db_window_with_range(coverage, coverage.start_ts_ms, train_end_ts_ms),
         holdout: clone_db_window_with_range(coverage, holdout_start_ts_ms, coverage.end_ts_ms),
     })
 }
@@ -5486,10 +5487,11 @@ symbols:
         assert_eq!(windows.coverage.start_ts_ms, 100);
         assert_eq!(windows.coverage.end_ts_ms, 500);
         assert_eq!(windows.train.start_ts_ms, 100);
-        assert_eq!(windows.train.end_ts_ms, 400);
+        assert_eq!(windows.train.end_ts_ms, 399);
         assert_eq!(windows.holdout.start_ts_ms, 400);
         assert_eq!(windows.holdout.end_ts_ms, 500);
         assert_eq!(windows.record().holdout.start_ts_ms, 400);
+        assert!(windows.train.end_ts_ms < windows.holdout.start_ts_ms);
     }
 
     #[test]
