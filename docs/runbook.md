@@ -33,6 +33,28 @@ field preserves the latest exchange payload for rejected, resting, retried, or
 deduplicated manual-trade submissions, and falls back to raw text when the
 payload is not valid JSON.
 
+## Hub Read Auth
+
+Hub read auth now bypasses `AIQ_MONITOR_TOKEN` for trusted LAN and Tailscale
+read clients, while mutation routes still require
+`AIQ_MONITOR_ADMIN_TOKEN`.
+
+Trusted read sources include:
+
+- RFC1918 IPv4 private ranges
+- IPv4 link-local
+- Tailscale IPv4 CGNAT `100.64.0.0/10`
+- IPv6 link-local, unique-local, and the common Tailscale ULA prefix
+
+When the Hub sits behind a local proxy or gateway, it only trusts
+`X-Forwarded-For` / `X-Real-IP` when the direct peer is loopback. Direct
+non-loopback clients cannot spoof the trusted-read bypass with forwarded
+headers, and bare loopback peers do not bypass read auth on their own.
+
+Keep `AIQ_MONITOR_TOKEN` configured for non-trusted read clients and WebSocket
+consumers outside those local/Tailscale ranges. Keep
+`AIQ_MONITOR_ADMIN_TOKEN` configured for all admin and manual-trade actions.
+
 ### Immutable Launch Contract
 
 The current Rust paper/live launch contract already starts daemons from the
