@@ -25,6 +25,8 @@ Progress as of 2026-03-14:
     artefacts, and train-window parity replays. Implementation, local
     validation, and documentation refresh are complete; PR/reviewer flow is
     still pending.
+  - PR 3 follow-up via PR #1006: fix the inclusive train/holdout boundary so
+    the two validation windows never share the same replay bar.
 - Pending:
   - PR 6.
 
