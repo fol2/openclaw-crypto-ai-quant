@@ -52,6 +52,41 @@ pub struct ManualTradeCancelRequest {
     pub intent_id: Option<String>,
 }
 
+pub fn open_request_hash(request: &ManualTradeOpenRequest) -> String {
+    manual_request_hash(json!({
+        "kind": "open",
+        "symbol": request.symbol.trim().to_ascii_uppercase(),
+        "side": request.side.trim().to_ascii_uppercase(),
+        "notional_usd_bits": encode_f64_bits(request.notional_usd),
+        "leverage": request.leverage,
+        "order_type": request.order_type.trim().to_ascii_lowercase(),
+        "limit_price_bits": encode_optional_f64_bits(request.limit_price),
+    }))
+}
+
+pub fn close_request_hash(request: &ManualTradeCloseRequest) -> String {
+    manual_request_hash(json!({
+        "kind": "close",
+        "symbol": request.symbol.trim().to_ascii_uppercase(),
+        "close_pct_bits": encode_f64_bits(request.close_pct),
+        "order_type": request.order_type.trim().to_ascii_lowercase(),
+        "limit_price_bits": encode_optional_f64_bits(request.limit_price),
+    }))
+}
+
+fn manual_request_hash(payload: Value) -> String {
+    let digest = sha3::Sha3_256::digest(payload.to_string().as_bytes());
+    hex::encode(digest)
+}
+
+fn encode_f64_bits(value: f64) -> String {
+    format!("{:016x}", value.to_bits())
+}
+
+fn encode_optional_f64_bits(value: Option<f64>) -> Option<String> {
+    value.map(encode_f64_bits)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParsedOrderType {
     Market,
@@ -232,6 +267,7 @@ pub fn issue_confirm_token(
     let now_ms = chrono::Utc::now().timestamp_millis();
     purge_stale_manual_confirmations(&conn, now_ms)?;
     if let Some(token) = find_reusable_manual_confirmation(&conn, action, param_hash, now_ms)? {
+        refresh_reusable_manual_confirmation(&conn, &token, symbol, preview, now_ms)?;
         write_manual_audit_event(
             &conn,
             Some(symbol),
@@ -241,6 +277,7 @@ pub fn issue_confirm_token(
                 "action": action,
                 "confirm_token": token.clone(),
                 "param_hash": param_hash,
+                "expires_ts_ms": now_ms + MANUAL_CONFIRM_TTL_MS,
             }),
         )?;
         return Ok(token);
@@ -286,9 +323,11 @@ pub fn execute_open(
     enforce_manual_trade_ready(cfg, true)?;
     let mut conn = open_manual_trade_db(&cfg.live_db)?;
     let mut early_retry_claim: Option<(String, String)> = None;
+    let mut preview_contract: Option<Value> = None;
     if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
         if should_resume_existing_manual_submission(&existing) {
             validate_resumed_open_request(&existing, request)?;
+            preview_contract = load_manual_confirmation_preview(&conn, confirm_token)?;
             if let Some(recovered) =
                 recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
             {
@@ -303,7 +342,7 @@ pub fn execute_open(
         }
     }
     if early_retry_claim.is_none() {
-        validate_manual_confirmation(
+        preview_contract = validate_manual_confirmation(
             &conn,
             confirm_token,
             MANUAL_CONFIRM_ACTION_OPEN,
@@ -314,6 +353,17 @@ pub fn execute_open(
 
     let client = build_client(cfg)?;
     let prepared = prepare_open(&client, cfg, request)?;
+    let drift_fields = open_preview_drift_fields(preview_contract.as_ref(), &prepared);
+    if !drift_fields.is_empty() {
+        record_manual_preview_stale(
+            &conn,
+            &prepared.symbol,
+            MANUAL_CONFIRM_ACTION_OPEN,
+            confirm_token,
+            &drift_fields,
+        )?;
+        return Err(preview_stale_error(&drift_fields));
+    }
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
     let created_ts_ms = chrono::Utc::now().timestamp_millis();
     let intent_id = manual_intent_id_from_confirm_token(confirm_token);
@@ -702,9 +752,11 @@ pub fn execute_close(
     enforce_manual_trade_ready(cfg, true)?;
     let mut conn = open_manual_trade_db(&cfg.live_db)?;
     let mut early_retry_claim: Option<(String, String)> = None;
+    let mut preview_contract: Option<Value> = None;
     if let Some(existing) = load_existing_manual_intent_by_dedupe_key(&conn, confirm_token)? {
         if should_resume_existing_manual_submission(&existing) {
             validate_resumed_close_request(&existing, request)?;
+            preview_contract = load_manual_confirmation_preview(&conn, confirm_token)?;
             if let Some(recovered) =
                 recover_existing_new_manual_execution(cfg, &mut conn, &existing)?
             {
@@ -719,7 +771,7 @@ pub fn execute_close(
         }
     }
     if early_retry_claim.is_none() {
-        validate_manual_confirmation(
+        preview_contract = validate_manual_confirmation(
             &conn,
             confirm_token,
             MANUAL_CONFIRM_ACTION_CLOSE,
@@ -730,6 +782,17 @@ pub fn execute_close(
 
     let client = build_client(cfg)?;
     let prepared = prepare_close(&client, request)?;
+    let drift_fields = close_preview_drift_fields(preview_contract.as_ref(), &prepared);
+    if !drift_fields.is_empty() {
+        record_manual_preview_stale(
+            &conn,
+            &prepared.symbol,
+            MANUAL_CONFIRM_ACTION_CLOSE,
+            confirm_token,
+            &drift_fields,
+        )?;
+        return Err(preview_stale_error(&drift_fields));
+    }
     let start_ms = chrono::Utc::now().timestamp_millis() - 5_000;
     let created_ts_ms = chrono::Utc::now().timestamp_millis();
     let side = if prepared.is_buy { "BUY" } else { "SELL" };
@@ -2049,15 +2112,41 @@ fn find_reusable_manual_confirmation(
     }
 }
 
+fn refresh_reusable_manual_confirmation(
+    conn: &Connection,
+    confirm_token: &str,
+    symbol: &str,
+    preview: &Value,
+    now_ms: i64,
+) -> Result<(), HubError> {
+    conn.execute(
+        "UPDATE manual_trade_confirmations
+         SET created_ts_ms = ?1,
+             expires_ts_ms = ?2,
+             symbol = ?3,
+             preview_json = ?4,
+             last_error = NULL
+         WHERE confirm_token = ?5",
+        params![
+            now_ms,
+            now_ms + MANUAL_CONFIRM_TTL_MS,
+            symbol.trim().to_ascii_uppercase(),
+            preview.to_string(),
+            confirm_token,
+        ],
+    )?;
+    Ok(())
+}
+
 fn validate_manual_confirmation(
     conn: &Connection,
     confirm_token: &str,
     action: &str,
     expected_hash: &str,
     now_ms: i64,
-) -> Result<(), HubError> {
+) -> Result<Option<Value>, HubError> {
     let mut stmt = conn.prepare(
-        "SELECT action, param_hash, expires_ts_ms
+        "SELECT action, param_hash, expires_ts_ms, preview_json
          FROM manual_trade_confirmations
          WHERE confirm_token = ?1",
     )?;
@@ -2066,9 +2155,10 @@ fn validate_manual_confirmation(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?,
         ))
     });
-    let (stored_action, stored_hash, expires_ts_ms) = match row {
+    let (stored_action, stored_hash, expires_ts_ms, preview_json) = match row {
         Ok(value) => value,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             return Err(HubError::BadRequest(
@@ -2085,7 +2175,44 @@ fn validate_manual_confirmation(
             "confirm token does not match parameters".into(),
         ));
     }
-    Ok(())
+    parse_manual_confirmation_preview(confirm_token, preview_json)
+}
+
+fn load_manual_confirmation_preview(
+    conn: &Connection,
+    confirm_token: &str,
+) -> Result<Option<Value>, HubError> {
+    let preview_json = conn
+        .query_row(
+            "SELECT preview_json
+             FROM manual_trade_confirmations
+             WHERE confirm_token = ?1",
+            [confirm_token],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                HubError::BadRequest("invalid or expired confirm token".into())
+            }
+            other => HubError::Db(other.to_string()),
+        })?;
+    parse_manual_confirmation_preview(confirm_token, preview_json)
+}
+
+fn parse_manual_confirmation_preview(
+    confirm_token: &str,
+    preview_json: Option<String>,
+) -> Result<Option<Value>, HubError> {
+    match preview_json {
+        Some(raw) if !raw.trim().is_empty() => {
+            serde_json::from_str(&raw).map(Some).map_err(|error| {
+                HubError::Internal(format!(
+                    "manual preview payload for {confirm_token} is invalid: {error}"
+                ))
+            })
+        }
+        _ => Ok(None),
+    }
 }
 
 fn bind_manual_confirmation_to_intent(
@@ -2434,6 +2561,134 @@ fn validate_resumed_close_request(
             "confirm token does not match parameters".into(),
         ));
     }
+    Ok(())
+}
+
+fn preview_order_type_name(order_type: ParsedOrderType) -> &'static str {
+    match order_type {
+        ParsedOrderType::Market => "market",
+        ParsedOrderType::LimitIoc => "limit_ioc",
+        ParsedOrderType::LimitGtc => "limit_gtc",
+    }
+}
+
+fn open_preview_drift_fields(preview: Option<&Value>, prepared: &PreparedOpen) -> Vec<String> {
+    let Some(preview) = preview else {
+        return vec!["preview_missing".to_string()];
+    };
+    let mut fields = Vec::new();
+    let stored_symbol = preview
+        .get("symbol")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_uppercase());
+    if stored_symbol.as_deref() != Some(prepared.symbol.as_str()) {
+        fields.push("symbol".to_string());
+    }
+    let stored_side = preview
+        .get("side")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_uppercase());
+    if stored_side.as_deref() != Some(prepared.side.as_str()) {
+        fields.push("side".to_string());
+    }
+    let stored_order_type = preview
+        .get("order_type")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase());
+    if stored_order_type.as_deref() != Some(preview_order_type_name(prepared.order_type)) {
+        fields.push("order_type".to_string());
+    }
+    let stored_leverage = preview.get("leverage").and_then(parse_json_integer);
+    if stored_leverage != Some(i64::from(prepared.leverage)) {
+        fields.push("leverage".to_string());
+    }
+    let stored_est_size = preview.get("est_size").and_then(parse_json_number);
+    if stored_est_size.map(|value| (value - prepared.est_size).abs() < 1e-9) != Some(true) {
+        fields.push("est_size".to_string());
+    }
+    let stored_limit_price = preview.get("limit_price").and_then(parse_json_number);
+    if !same_optional_price(stored_limit_price, prepared.limit_price) {
+        fields.push("limit_price".to_string());
+    }
+    fields
+}
+
+fn close_preview_drift_fields(preview: Option<&Value>, prepared: &PreparedClose) -> Vec<String> {
+    let Some(preview) = preview else {
+        return vec!["preview_missing".to_string()];
+    };
+    let mut fields = Vec::new();
+    let prepared_pos_type = prepared.pos_type.trim().to_ascii_uppercase();
+    let stored_symbol = preview
+        .get("symbol")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_uppercase());
+    if stored_symbol.as_deref() != Some(prepared.symbol.as_str()) {
+        fields.push("symbol".to_string());
+    }
+    let stored_pos_type = preview
+        .get("pos_type")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_uppercase());
+    if stored_pos_type.as_deref() != Some(prepared_pos_type.as_str()) {
+        fields.push("pos_type".to_string());
+    }
+    let stored_order_type = preview
+        .get("order_type")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase());
+    if stored_order_type.as_deref() != Some(preview_order_type_name(prepared.order_type)) {
+        fields.push("order_type".to_string());
+    }
+    let stored_close_size = preview.get("close_size").and_then(parse_json_number);
+    if stored_close_size.map(|value| (value - prepared.close_size).abs() < 1e-9) != Some(true) {
+        fields.push("close_size".to_string());
+    }
+    let stored_current_size = preview.get("current_size").and_then(parse_json_number);
+    if stored_current_size.map(|value| (value - prepared.current_size).abs() < 1e-9) != Some(true) {
+        fields.push("current_size".to_string());
+    }
+    let stored_limit_price = preview.get("limit_price").and_then(parse_json_number);
+    if !same_optional_price(stored_limit_price, prepared.limit_price) {
+        fields.push("limit_price".to_string());
+    }
+    fields
+}
+
+fn preview_stale_error(drift_fields: &[String]) -> HubError {
+    HubError::BadRequest(format!(
+        "manual preview is stale; {} changed, preview again",
+        drift_fields.join(", ")
+    ))
+}
+
+fn record_manual_preview_stale(
+    conn: &Connection,
+    symbol: &str,
+    action: &str,
+    confirm_token: &str,
+    drift_fields: &[String],
+) -> Result<(), HubError> {
+    let drift_summary = drift_fields.join(",");
+    write_manual_runtime_log(
+        conn,
+        "WARN",
+        &format!(
+            "manual_trade preview_stale symbol={} action={} confirm_token={} drift_fields={}",
+            symbol, action, confirm_token, drift_summary
+        ),
+    )?;
+    write_manual_audit_event(
+        conn,
+        Some(symbol),
+        "MANUAL_PREVIEW_STALE",
+        "WARN",
+        json!({
+            "action": action,
+            "confirm_token": confirm_token,
+            "drift_fields": drift_fields,
+        }),
+    )?;
     Ok(())
 }
 
@@ -4135,6 +4390,74 @@ mod tests {
     }
 
     #[test]
+    fn reused_preview_refreshes_preview_payload_and_expiry() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let created_ts_ms = chrono::Utc::now().timestamp_millis() - 30_000;
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash,
+                status, preview_json, last_error
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED', ?7, ?8)",
+            params![
+                "confirm-refresh-token",
+                created_ts_ms,
+                created_ts_ms + 10_000,
+                MANUAL_CONFIRM_ACTION_OPEN,
+                "ETH",
+                "hash_open",
+                json!({"symbol":"ETH","est_size":0.0515}).to_string(),
+                "old_preview"
+            ],
+        )
+        .unwrap();
+
+        let refreshed_preview = json!({
+            "symbol": "ETH",
+            "side": "SELL",
+            "order_type": "market",
+            "est_size": 0.0615,
+            "leverage": 10,
+        });
+        let refresh_start_ms = chrono::Utc::now().timestamp_millis();
+        refresh_reusable_manual_confirmation(
+            &conn,
+            "confirm-refresh-token",
+            "eth",
+            &refreshed_preview,
+            refresh_start_ms,
+        )
+        .unwrap();
+
+        let row: (i64, i64, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT created_ts_ms, expires_ts_ms, symbol, preview_json, last_error
+                 FROM manual_trade_confirmations
+                 WHERE confirm_token = ?1",
+                ["confirm-refresh-token"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert!(row.0 >= refresh_start_ms);
+        assert!(row.1 >= refresh_start_ms + MANUAL_CONFIRM_TTL_MS);
+        assert_eq!(row.2, "ETH");
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.3).unwrap(),
+            refreshed_preview
+        );
+        assert!(row.4.is_none());
+    }
+
+    #[test]
     fn manual_execution_claim_reuses_existing_intent_for_same_confirm_token() {
         let db = NamedTempFile::new().unwrap();
         let conn = open_manual_trade_db(db.path()).unwrap();
@@ -4282,6 +4605,108 @@ mod tests {
         assert!(error
             .to_string()
             .contains("confirm token does not match parameters"));
+    }
+
+    #[test]
+    fn manual_request_hashes_are_case_normalised_and_collision_resistant_format() {
+        let upper_open = ManualTradeOpenRequest {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: "MARKET".to_string(),
+            limit_price: None,
+        };
+        let lower_open = ManualTradeOpenRequest {
+            symbol: " eth ".to_string(),
+            side: "sell".to_string(),
+            notional_usd: 500.0,
+            leverage: 10,
+            order_type: "market".to_string(),
+            limit_price: None,
+        };
+        let upper_close = ManualTradeCloseRequest {
+            symbol: "HYPE".to_string(),
+            close_pct: 34.0,
+            order_type: "LIMIT_IOC".to_string(),
+            limit_price: Some(36.25),
+        };
+        let lower_close = ManualTradeCloseRequest {
+            symbol: " hype ".to_string(),
+            close_pct: 34.0,
+            order_type: "limit_ioc".to_string(),
+            limit_price: Some(36.25),
+        };
+
+        let open_hash = open_request_hash(&upper_open);
+        let close_hash = close_request_hash(&upper_close);
+
+        assert_eq!(open_hash, open_request_hash(&lower_open));
+        assert_eq!(close_hash, close_request_hash(&lower_close));
+        assert_eq!(open_hash.len(), 64);
+        assert_eq!(close_hash.len(), 64);
+    }
+
+    #[test]
+    fn open_preview_drift_fields_require_fresh_preview_when_size_changes() {
+        let preview = json!({
+            "symbol": "ETH",
+            "side": "SELL",
+            "order_type": "market",
+            "est_size": 0.0515,
+            "leverage": 10,
+            "limit_price": Value::Null,
+        });
+        let prepared = PreparedOpen {
+            symbol: "ETH".to_string(),
+            side: "SELL".to_string(),
+            direction: "SHORT".to_string(),
+            is_buy: false,
+            mid_price: 2_088.6,
+            est_size: 0.0615,
+            est_notional_usd: 128.4489,
+            est_margin_usd: 12.84489,
+            est_fee_usd: 0.04495,
+            leverage: 10,
+            max_leverage: 25,
+            sz_decimals: 4,
+            order_type: ParsedOrderType::Market,
+            limit_price: None,
+            account_value_usd: 214.97,
+        };
+
+        let drift = open_preview_drift_fields(Some(&preview), &prepared);
+        assert_eq!(drift, vec!["est_size".to_string()]);
+    }
+
+    #[test]
+    fn close_preview_drift_fields_require_fresh_preview_when_position_moves() {
+        let preview = json!({
+            "symbol": "HYPE",
+            "pos_type": "SHORT",
+            "order_type": "market",
+            "close_size": 2.82,
+            "current_size": 8.31,
+            "limit_price": Value::Null,
+        });
+        let prepared = PreparedClose {
+            symbol: "HYPE".to_string(),
+            pos_type: "SHORT".to_string(),
+            is_buy: true,
+            current_size: 6.0,
+            close_size: 2.04,
+            leverage: 4.0,
+            account_value_usd: 223.84,
+            mid_price: 36.309,
+            order_type: ParsedOrderType::Market,
+            limit_price: None,
+        };
+
+        let drift = close_preview_drift_fields(Some(&preview), &prepared);
+        assert_eq!(
+            drift,
+            vec!["close_size".to_string(), "current_size".to_string()]
+        );
     }
 
     #[test]

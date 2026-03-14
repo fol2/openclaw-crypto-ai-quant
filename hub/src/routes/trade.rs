@@ -5,7 +5,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha3::Digest;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -60,39 +59,24 @@ fn require_trade_enabled(state: &AppState) -> Result<(), HubError> {
     Ok(())
 }
 
-fn encode_f64_bits(value: f64) -> String {
-    format!("{:016x}", value.to_bits())
-}
-
-fn encode_optional_f64_bits(value: Option<f64>) -> Option<String> {
-    value.map(encode_f64_bits)
-}
-
-fn param_fingerprint(payload: Value) -> String {
-    let digest = sha3::Sha3_256::digest(payload.to_string().as_bytes());
-    hex::encode(digest)
-}
-
 fn open_param_fingerprint(body: &TradeOpenBody) -> String {
-    param_fingerprint(json!({
-        "kind": "open",
-        "symbol": body.symbol.trim().to_ascii_uppercase(),
-        "side": body.side.trim().to_ascii_uppercase(),
-        "notional_usd_bits": encode_f64_bits(body.notional_usd),
-        "leverage": body.leverage,
-        "order_type": body.order_type.trim().to_ascii_lowercase(),
-        "limit_price_bits": encode_optional_f64_bits(body.limit_price),
-    }))
+    manual_trade::open_request_hash(&manual_trade::ManualTradeOpenRequest {
+        symbol: body.symbol.clone(),
+        side: body.side.clone(),
+        notional_usd: body.notional_usd,
+        leverage: body.leverage,
+        order_type: body.order_type.clone(),
+        limit_price: body.limit_price,
+    })
 }
 
 fn close_param_fingerprint(body: &TradeCloseBody) -> String {
-    param_fingerprint(json!({
-        "kind": "close",
-        "symbol": body.symbol.trim().to_ascii_uppercase(),
-        "close_pct_bits": encode_f64_bits(body.close_pct),
-        "order_type": body.order_type.trim().to_ascii_lowercase(),
-        "limit_price_bits": encode_optional_f64_bits(body.limit_price),
-    }))
+    manual_trade::close_request_hash(&manual_trade::ManualTradeCloseRequest {
+        symbol: body.symbol.clone(),
+        close_pct: body.close_pct,
+        order_type: body.order_type.clone(),
+        limit_price: body.limit_price,
+    })
 }
 
 async fn check_rate_limit(
@@ -223,9 +207,6 @@ async fn trade_preview(
     Json(body): Json<TradeOpenBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let param_fingerprint = open_param_fingerprint(&body);
-    let config = state.config.clone();
-    let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
         side: body.side,
@@ -234,15 +215,13 @@ async fn trade_preview(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
+    let param_hash = manual_trade::open_request_hash(&request);
+    let config = state.config.clone();
+    let symbol = request.symbol.clone();
     let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
         let preview = manual_trade::preview_open(&config, &request)?;
-        let confirm_token = manual_trade::issue_confirm_token(
-            &config,
-            "OPEN",
-            &param_fingerprint,
-            &symbol,
-            &preview,
-        )?;
+        let confirm_token =
+            manual_trade::issue_confirm_token(&config, "OPEN", &param_hash, &symbol, &preview)?;
         Ok::<_, HubError>((preview, confirm_token))
     })
     .await
@@ -261,14 +240,6 @@ async fn trade_execute(
     require_trade_enabled(&state)?;
     ensure_live_orders_enabled(&state, &body.symbol, "OPEN").await?;
     check_manual_order_risk(&state, &body.symbol, OrderAction::Open, false, "OPEN").await?;
-    let token = body
-        .confirm_token
-        .as_deref()
-        .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
-    check_rate_limit(&state, &body.symbol, Some(token)).await?;
-    let param_fingerprint = open_param_fingerprint(&body);
-
-    let config = state.config.clone();
     let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeOpenRequest {
         symbol: body.symbol,
@@ -278,9 +249,16 @@ async fn trade_execute(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
+    let token = body
+        .confirm_token
+        .as_deref()
+        .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
+    check_rate_limit(&state, &request.symbol, Some(token)).await?;
+    let param_hash = manual_trade::open_request_hash(&request);
+    let config = state.config.clone();
     let token = token.to_string();
     let result = tokio::task::spawn_blocking(move || {
-        manual_trade::execute_open(&config, &request, &token, &param_fingerprint)
+        manual_trade::execute_open(&config, &request, &token, &param_hash)
     })
     .await
     .map_err(|error| HubError::Internal(format!("execute task failed: {error}")))??;
@@ -295,24 +273,22 @@ async fn trade_close(
     Json(body): Json<TradeCloseBody>,
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
-    let fingerprint = close_param_fingerprint(&body);
-
     if body.confirm_token.is_none() {
-        let config = state.config.clone();
-        let symbol = body.symbol.clone();
-        let fingerprint_for_preview = fingerprint.clone();
         let request = manual_trade::ManualTradeCloseRequest {
             symbol: body.symbol,
             close_pct: body.close_pct,
             order_type: body.order_type,
             limit_price: body.limit_price,
         };
+        let hash_for_preview = manual_trade::close_request_hash(&request);
+        let config = state.config.clone();
+        let symbol = request.symbol.clone();
         let (preview, confirm_token) = tokio::task::spawn_blocking(move || {
             let preview = manual_trade::preview_close(&config, &request)?;
             let confirm_token = manual_trade::issue_confirm_token(
                 &config,
                 "CLOSE",
-                &fingerprint_for_preview,
+                &hash_for_preview,
                 &symbol,
                 &preview,
             )?;
@@ -329,7 +305,6 @@ async fn trade_close(
 
     ensure_live_orders_enabled(&state, &body.symbol, "CLOSE").await?;
     check_manual_order_risk(&state, &body.symbol, OrderAction::Close, true, "CLOSE").await?;
-    let config = state.config.clone();
     let symbol = body.symbol.clone();
     let request = manual_trade::ManualTradeCloseRequest {
         symbol: body.symbol,
@@ -337,13 +312,15 @@ async fn trade_close(
         order_type: body.order_type,
         limit_price: body.limit_price,
     };
+    let hash = manual_trade::close_request_hash(&request);
+    let config = state.config.clone();
     let token = body
         .confirm_token
         .as_deref()
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?
         .to_string();
     let result = tokio::task::spawn_blocking(move || {
-        manual_trade::execute_close(&config, &request, &token, &fingerprint)
+        manual_trade::execute_close(&config, &request, &token, &hash)
     })
     .await
     .map_err(|error| HubError::Internal(format!("close task failed: {error}")))??;
