@@ -52,8 +52,8 @@ async fn main() {
     // Start background HL balance poller (live mode only).
     spawn_hl_poller(Arc::clone(&state));
 
-    // Start background manual-trade recovery poller.
-    spawn_manual_trade_recovery_poller(Arc::clone(&state));
+    // Start background manual-trade reconcile poller.
+    spawn_manual_trade_reconcile_poller(Arc::clone(&state));
 
     // Build router.
     let api = routes::api_router();
@@ -290,7 +290,7 @@ fn spawn_hl_poller(state: Arc<AppState>) {
     });
 }
 
-fn spawn_manual_trade_recovery_poller(state: Arc<AppState>) {
+fn spawn_manual_trade_reconcile_poller(state: Arc<AppState>) {
     if !state.config.manual_trade_enabled {
         return;
     }
@@ -300,7 +300,7 @@ fn spawn_manual_trade_recovery_poller(state: Arc<AppState>) {
         loop {
             match tokio::task::spawn_blocking({
                 let cfg = cfg.clone();
-                move || manual_trade::recover_unknown_manual_intents(&cfg, 20)
+                move || manual_trade::reconcile_manual_intents(&cfg, 20)
             })
             .await
             {
@@ -312,16 +312,28 @@ fn spawn_manual_trade_recovery_poller(state: Arc<AppState>) {
                         + summary
                             .get("recovered_open_orders")
                             .and_then(|value| value.as_u64())
+                            .unwrap_or(0)
+                        + summary
+                            .get("tracked_open_orders")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0)
+                        + summary
+                            .get("cleared_open_orders")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0)
+                        + summary
+                            .get("status_updates")
+                            .and_then(|value| value.as_u64())
                             .unwrap_or(0);
                     if recovered > 0 {
-                        tracing::info!(summary = %summary, "manual unknown recovery applied");
+                        tracing::info!(summary = %summary, "manual reconcile applied");
                     }
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(error = %error, "manual unknown recovery failed");
+                    tracing::warn!(error = %error, "manual reconcile failed");
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "manual unknown recovery task failed");
+                    tracing::warn!(error = %error, "manual reconcile task failed");
                 }
             }
             tokio::time::sleep(poll_interval).await;
