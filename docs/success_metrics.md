@@ -36,6 +36,9 @@ The validation surface in `config/factory_defaults.yaml` is:
 - `validation.holdout_fraction` for the trailing holdout share of common DB coverage
 - `validation.holdout_splits` for the number of equal holdout slices summarised in the artefacts
 
+The financial-grade defaults keep the trailing 25% of common coverage as the
+holdout window and summarise it in 3 equal slices.
+
 Holdout promotion into `validated` still requires:
 
 - Median holdout daily return > 0

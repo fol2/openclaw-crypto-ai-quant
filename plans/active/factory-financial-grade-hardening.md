@@ -21,9 +21,10 @@ Progress as of 2026-03-14:
   - PR 5 via PR #998: manifest-driven `live_small` / `live_full` governance
     with persisted live governance state.
 - In progress:
-  - PR 3: explicit train/holdout validation windows, holdout artefacts, and
-    train-window parity replays. Implementation, local validation, and
-    documentation refresh are complete; PR/reviewer flow is still pending.
+  - PR 3 via PR #1004: explicit train/holdout validation windows, holdout
+    artefacts, and train-window parity replays. Implementation, local
+    validation, and documentation refresh are complete; PR/reviewer flow is
+    still pending.
 - Pending:
   - PR 6.
 

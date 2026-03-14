@@ -87,7 +87,9 @@ All conditions must be met:
 
 The trailing holdout window is derived from the common DB coverage using
 `validation.holdout_fraction`, while `validation.holdout_splits` controls how
-many equal holdout slices are summarised in the holdout report.
+many equal holdout slices are summarised in the holdout report. The
+financial-grade defaults reserve the trailing 25% of common coverage and split
+that holdout into 3 equal slices.
 
 **Source**: validation pipeline output, `run_metadata.json`, holdout summaries,
 and the train-window parity replay artefacts.
