@@ -1840,23 +1840,26 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
 
         CREATE TABLE IF NOT EXISTS audit_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts_ms INTEGER NOT NULL,
             timestamp TEXT NOT NULL,
             symbol TEXT,
             event TEXT NOT NULL,
             level TEXT,
             data_json TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_audit_events_ts_ms ON audit_events(ts_ms);
-        CREATE INDEX IF NOT EXISTS idx_audit_events_event_ts_ms ON audit_events(event, ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_event_timestamp
+            ON audit_events(event, timestamp);
 
         CREATE TABLE IF NOT EXISTS oms_reconcile_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_ms INTEGER NOT NULL,
             kind TEXT NOT NULL,
             symbol TEXT,
+            intent_id TEXT,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
             result TEXT,
-            data_json TEXT
+            detail_json TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_ts_ms ON oms_reconcile_events(ts_ms);
         CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_kind_ts_ms
@@ -2683,18 +2686,23 @@ fn write_manual_audit_event(
     let ts = chrono::DateTime::from_timestamp_millis(ts_ms)
         .map(|value| value.to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    conn.execute(
-        "INSERT INTO audit_events (ts_ms, timestamp, symbol, event, level, data_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            ts_ms,
-            ts,
-            symbol.map(|value| value.trim().to_ascii_uppercase()),
-            event.trim().to_ascii_uppercase(),
-            level.trim().to_ascii_uppercase(),
-            data.to_string(),
-        ],
-    )?;
+    let symbol = symbol.map(|value| value.trim().to_ascii_uppercase());
+    let event = event.trim().to_ascii_uppercase();
+    let level = level.trim().to_ascii_uppercase();
+    let payload = data.to_string();
+    if table_has_column(conn, "audit_events", "ts_ms")? {
+        conn.execute(
+            "INSERT INTO audit_events (ts_ms, timestamp, symbol, event, level, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![ts_ms, ts, symbol, event, level, payload],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO audit_events (timestamp, symbol, event, level, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ts, symbol, event, level, payload],
+        )?;
+    }
     Ok(())
 }
 
@@ -2706,18 +2714,33 @@ fn write_manual_reconcile_event(
     data: Value,
 ) -> Result<(), HubError> {
     let ts_ms = chrono::Utc::now().timestamp_millis();
-    conn.execute(
-        "INSERT INTO oms_reconcile_events (ts_ms, kind, symbol, result, data_json)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            ts_ms,
-            kind.trim().to_ascii_lowercase(),
-            symbol.map(|value| value.trim().to_ascii_uppercase()),
-            result,
-            data.to_string(),
-        ],
-    )?;
+    let kind = kind.trim().to_ascii_lowercase();
+    let symbol = symbol.map(|value| value.trim().to_ascii_uppercase());
+    let payload = data.to_string();
+    if table_has_column(conn, "oms_reconcile_events", "detail_json")? {
+        conn.execute(
+            "INSERT INTO oms_reconcile_events (ts_ms, kind, symbol, result, detail_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ts_ms, kind, symbol, result, payload],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO oms_reconcile_events (ts_ms, kind, symbol, result, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ts_ms, kind, symbol, result, payload],
+        )?;
+    }
     Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, HubError> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|row| row.ok())
+        .collect::<Vec<_>>();
+    Ok(rows.into_iter().any(|name| name == column))
 }
 
 fn submission_order_type(order_type: ParsedOrderType, reduce_only: bool) -> &'static str {
@@ -4215,5 +4238,131 @@ mod tests {
         assert_eq!(row.0, "manual_unknown_recovery");
         assert_eq!(row.1, "ETH");
         assert_eq!(row.2, "fills_recovered");
+    }
+
+    #[test]
+    fn manual_audit_event_helper_supports_old_and_new_schemas() {
+        let old_db = NamedTempFile::new().unwrap();
+        let old_conn = Connection::open(old_db.path()).unwrap();
+        old_conn
+            .execute_batch(
+                "
+                CREATE TABLE audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT,
+                    event TEXT NOT NULL,
+                    level TEXT,
+                    data_json TEXT
+                );
+                ",
+            )
+            .unwrap();
+        write_manual_audit_event(
+            &old_conn,
+            Some("ETH"),
+            "manual_test_event",
+            "info",
+            json!({ "ok": true }),
+        )
+        .unwrap();
+        let old_count: i64 = old_conn
+            .query_row("SELECT COUNT(*) FROM audit_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_count, 1);
+
+        let new_db = NamedTempFile::new().unwrap();
+        let new_conn = Connection::open(new_db.path()).unwrap();
+        new_conn
+            .execute_batch(
+                "
+                CREATE TABLE audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT,
+                    event TEXT NOT NULL,
+                    level TEXT,
+                    data_json TEXT
+                );
+                ",
+            )
+            .unwrap();
+        write_manual_audit_event(
+            &new_conn,
+            Some("ETH"),
+            "manual_test_event",
+            "info",
+            json!({ "ok": true }),
+        )
+        .unwrap();
+        let new_count: i64 = new_conn
+            .query_row("SELECT COUNT(*) FROM audit_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(new_count, 1);
+    }
+
+    #[test]
+    fn manual_reconcile_event_helper_supports_old_and_new_schemas() {
+        let old_db = NamedTempFile::new().unwrap();
+        let old_conn = Connection::open(old_db.path()).unwrap();
+        old_conn
+            .execute_batch(
+                "
+                CREATE TABLE oms_reconcile_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER,
+                    kind TEXT,
+                    symbol TEXT,
+                    intent_id TEXT,
+                    client_order_id TEXT,
+                    exchange_order_id TEXT,
+                    result TEXT,
+                    detail_json TEXT
+                );
+                ",
+            )
+            .unwrap();
+        write_manual_reconcile_event(
+            &old_conn,
+            "manual_unknown_recovery",
+            Some("ETH"),
+            "fills_recovered",
+            json!({ "ok": true }),
+        )
+        .unwrap();
+        let old_count: i64 = old_conn
+            .query_row("SELECT COUNT(*) FROM oms_reconcile_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_count, 1);
+
+        let new_db = NamedTempFile::new().unwrap();
+        let new_conn = Connection::open(new_db.path()).unwrap();
+        new_conn
+            .execute_batch(
+                "
+                CREATE TABLE oms_reconcile_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    symbol TEXT,
+                    result TEXT,
+                    data_json TEXT
+                );
+                ",
+            )
+            .unwrap();
+        write_manual_reconcile_event(
+            &new_conn,
+            "manual_unknown_recovery",
+            Some("ETH"),
+            "fills_recovered",
+            json!({ "ok": true }),
+        )
+        .unwrap();
+        let new_count: i64 = new_conn
+            .query_row("SELECT COUNT(*) FROM oms_reconcile_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(new_count, 1);
     }
 }
