@@ -17,8 +17,10 @@ Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 # The Hub does not require AI_QUANT_LIVE_ENABLE / AI_QUANT_LIVE_CONFIRM for
 # manual-trade routes; use AI_QUANT_HARD_KILL_SWITCH=1 to fail closed.
 # Read-only Hub routes may bypass AIQ_MONITOR_TOKEN for trusted LAN/Tailscale
-# clients. Loopback alone does not bypass read auth; admin/manual-trade routes
-# still require AIQ_MONITOR_ADMIN_TOKEN.
+# clients. Loopback alone does not bypass read auth; use a Tailscale
+# HTTP/HTTPS Serve-style front layer (not raw TCP localhost forwarding) when
+# you need Tailscale identity-header bypass. Admin/manual-trade routes still
+# require AIQ_MONITOR_ADMIN_TOKEN.
 Environment=AIQ_MANUAL_TRADE_ENABLE=true
 ExecStart=$PROJECT_DIR/hub/target/release/aiq-hub
 Restart=always

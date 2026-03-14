@@ -113,9 +113,10 @@ fn auth_error(status: StatusCode, message: &str) -> Response {
 }
 
 fn read_auth_bypassed(request: &Request) -> bool {
-    request_client_ip(request)
-        .map(is_trusted_read_ip)
-        .unwrap_or(false)
+    trusted_tailscale_identity(request)
+        || request_client_ip(request)
+            .map(is_trusted_read_ip)
+            .unwrap_or(false)
 }
 
 fn request_client_ip(request: &Request) -> Option<IpAddr> {
@@ -128,6 +129,36 @@ fn request_client_ip(request: &Request) -> Option<IpAddr> {
         Some(ip) => Some(ip),
         None => None,
     }
+}
+
+fn trusted_tailscale_identity(request: &Request) -> bool {
+    if !direct_peer_is_loopback(request) {
+        return false;
+    }
+    [
+        "tailscale-user-login",
+        "tailscale-user-name",
+        "tailscale-user-profile-pic",
+        "tailscale-headers-info",
+    ]
+    .into_iter()
+    .any(|header| {
+        request
+            .headers()
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+    })
+}
+
+fn direct_peer_is_loopback(request: &Request) -> bool {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|value| value.0.ip().is_loopback())
+        .unwrap_or(false)
 }
 
 fn forwarded_client_ip(request: &Request) -> Option<IpAddr> {
@@ -375,6 +406,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trusted_tailscale_identity_requires_loopback_peer() {
+        let mut proxied = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        proxied
+            .headers_mut()
+            .insert("tailscale-user-login", "me@example.com".parse().unwrap());
+        proxied
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        assert!(trusted_tailscale_identity(&proxied));
+
+        let mut spoofed = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        spoofed
+            .headers_mut()
+            .insert("tailscale-user-login", "me@example.com".parse().unwrap());
+        spoofed
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([8, 8, 8, 8], 12345))));
+        assert!(!trusted_tailscale_identity(&spoofed));
+    }
+
     #[tokio::test]
     async fn startup_validation_rejects_shared_read_and_admin_tokens() {
         let config = HubAuthConfig {
@@ -413,6 +465,28 @@ mod tests {
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 23456))));
+
+        let response = read_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn read_auth_allows_loopback_tailscale_identity_without_token() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .headers_mut()
+            .insert("tailscale-user-login", "me@example.com".parse().unwrap());
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
 
         let response = read_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
@@ -471,6 +545,28 @@ mod tests {
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([100, 90, 12, 34], 23456))));
+
+        let response = admin_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(request)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_still_requires_token_with_tailscale_identity_header() {
+        let mut request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        request
+            .headers_mut()
+            .insert("tailscale-user-login", "me@example.com".parse().unwrap());
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 23456))));
 
         let response = admin_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
