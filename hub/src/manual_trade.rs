@@ -251,6 +251,12 @@ enum ManualExecutionClaim {
     Existing(Box<ExistingManualIntent>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualExecutionPreflight {
+    NewSubmission,
+    ExistingIntent,
+}
+
 pub fn preview_open(cfg: &HubConfig, request: &ManualTradeOpenRequest) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, false)?;
     let client = build_client(cfg)?;
@@ -777,6 +783,40 @@ pub fn preview_close(
     }))
 }
 
+pub fn preflight_open_execution(
+    cfg: &HubConfig,
+    request: &ManualTradeOpenRequest,
+    confirm_token: &str,
+    param_hash: &str,
+) -> Result<ManualExecutionPreflight, HubError> {
+    enforce_manual_trade_ready(cfg, false)?;
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    preflight_manual_execution(
+        &conn,
+        confirm_token,
+        MANUAL_CONFIRM_ACTION_OPEN,
+        param_hash,
+        |existing| validate_resumed_open_request(existing, request),
+    )
+}
+
+pub fn preflight_close_execution(
+    cfg: &HubConfig,
+    request: &ManualTradeCloseRequest,
+    confirm_token: &str,
+    param_hash: &str,
+) -> Result<ManualExecutionPreflight, HubError> {
+    enforce_manual_trade_ready(cfg, false)?;
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    preflight_manual_execution(
+        &conn,
+        confirm_token,
+        MANUAL_CONFIRM_ACTION_CLOSE,
+        param_hash,
+        |existing| validate_resumed_close_request(existing, request),
+    )
+}
+
 pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubError> {
     let conn = open_manual_trade_db(&cfg.live_db)?;
     let lookup_id = lookup_id.trim();
@@ -874,6 +914,66 @@ pub fn execution_result(cfg: &HubConfig, lookup_id: &str) -> Result<Value, HubEr
     Err(HubError::NotFound(format!(
         "manual trade result {lookup_id} not found"
     )))
+}
+
+pub fn preflight_cancel_retry(
+    cfg: &HubConfig,
+    request: &ManualTradeCancelRequest,
+) -> Result<Option<Value>, HubError> {
+    enforce_manual_trade_ready(cfg, false)?;
+    let conn = open_manual_trade_db(&cfg.live_db)?;
+    let symbol = request.symbol.trim().to_ascii_uppercase();
+
+    if let Some(oid) = request
+        .oid
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let order_id_text = oid.trim().to_string();
+        let parsed_oid = oid
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| HubError::BadRequest("oid must be a positive integer".into()))?;
+        if let Some(context) =
+            load_manual_cancel_context_by_exchange_order_id(&conn, &symbol, &order_id_text)?
+        {
+            if is_terminal_cancelled_status(context.current_status.as_deref()) {
+                return Ok(Some(json!({
+                    "ok": true,
+                    "deduped": true,
+                    "status": "cancelled",
+                    "symbol": context.symbol,
+                    "oid": parsed_oid,
+                    "intent_id": context.intent_id,
+                    "cloid": context.client_order_id,
+                    "exchange_order_id": context.exchange_order_id,
+                })));
+            }
+        }
+        return Ok(None);
+    }
+
+    if let Some(intent_id) = request
+        .intent_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Some(context) = load_manual_cancel_context_by_intent_id(&conn, intent_id)? {
+            if is_terminal_cancelled_status(context.current_status.as_deref()) {
+                return Ok(Some(json!({
+                    "ok": true,
+                    "deduped": true,
+                    "status": "cancelled",
+                    "symbol": context.symbol,
+                    "intent_id": context.intent_id,
+                    "cloid": context.client_order_id,
+                    "exchange_order_id": context.exchange_order_id,
+                })));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 pub fn execute_close(
@@ -2638,6 +2738,13 @@ fn load_manual_cancel_context_by_exchange_order_id(
     }
 }
 
+fn is_terminal_cancelled_status(current_status: Option<&str>) -> bool {
+    current_status
+        .map(|status| status.trim().to_ascii_uppercase())
+        .map(|status| matches!(status.as_str(), "CANCELLED" | "PARTIAL_CANCELLED"))
+        .unwrap_or(false)
+}
+
 fn cancelled_intent_status(current_status: Option<&str>) -> Option<&'static str> {
     let status = current_status?.trim().to_ascii_uppercase();
     match status.as_str() {
@@ -3179,6 +3286,33 @@ fn recover_existing_new_manual_execution(
     }
 
     Ok(None)
+}
+
+fn preflight_manual_execution<F>(
+    conn: &Connection,
+    confirm_token: &str,
+    action: &str,
+    expected_hash: &str,
+    validate_existing: F,
+) -> Result<ManualExecutionPreflight, HubError>
+where
+    F: FnOnce(&ExistingManualIntent) -> Result<(), HubError>,
+{
+    if let Some(existing) = load_existing_manual_intent_by_dedupe_key(conn, confirm_token)? {
+        if should_resume_existing_manual_submission(&existing) {
+            validate_existing(&existing)?;
+        }
+        return Ok(ManualExecutionPreflight::ExistingIntent);
+    }
+
+    validate_manual_confirmation(
+        conn,
+        confirm_token,
+        action,
+        expected_hash,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    Ok(ManualExecutionPreflight::NewSubmission)
 }
 
 fn initialise_manual_execution(
@@ -5087,6 +5221,168 @@ mod tests {
 
         assert_eq!(intent_count, 1);
         assert_eq!(confirmation_status, "BOUND");
+    }
+
+    #[test]
+    fn open_execution_preflight_treats_matching_new_intent_as_existing_retry() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id: "manual_retry_open",
+                created_ts_ms: 1_773_500_000_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "NEW",
+                dedupe_key: Some("confirm-open-retry"),
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: json!({
+                    "request": {
+                        "order_type": "market",
+                        "side": "SELL",
+                        "notional_usd": 500.0,
+                        "leverage": 10,
+                        "limit_price": Value::Null
+                    }
+                })
+                .to_string(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let outcome = preflight_open_execution(
+            &cfg,
+            &ManualTradeOpenRequest {
+                symbol: "ETH".to_string(),
+                side: "SELL".to_string(),
+                notional_usd: 500.0,
+                leverage: 10,
+                order_type: "market".to_string(),
+                limit_price: None,
+            },
+            "confirm-open-retry",
+            "unused_hash_for_existing_retry",
+        )
+        .unwrap();
+
+        assert_eq!(outcome, ManualExecutionPreflight::ExistingIntent);
+    }
+
+    #[test]
+    fn close_execution_preflight_accepts_fresh_confirmation() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let request = ManualTradeCloseRequest {
+            symbol: "HYPE".to_string(),
+            close_pct: 34.0,
+            order_type: "limit_ioc".to_string(),
+            limit_price: Some(36.25),
+        };
+        let param_hash = close_request_hash(&request);
+        conn.execute(
+            "INSERT INTO manual_trade_confirmations (
+                confirm_token, created_ts_ms, expires_ts_ms, action, symbol, param_hash, status, preview_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PREVIEWED', ?7)",
+            params![
+                "confirm-close-retry",
+                now_ms,
+                now_ms + MANUAL_CONFIRM_TTL_MS,
+                MANUAL_CONFIRM_ACTION_CLOSE,
+                "HYPE",
+                param_hash,
+                json!({
+                    "symbol": "HYPE",
+                    "pos_type": "SHORT",
+                    "order_type": "limit_ioc",
+                    "close_size": 2.82,
+                    "current_size": 8.31,
+                    "limit_price": 36.25,
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let outcome =
+            preflight_close_execution(&cfg, &request, "confirm-close-retry", &param_hash).unwrap();
+
+        assert_eq!(outcome, ManualExecutionPreflight::NewSubmission);
+    }
+
+    #[test]
+    fn cancel_retry_preflight_returns_deduped_payload_for_cancelled_intent() {
+        let db = NamedTempFile::new().unwrap();
+        let cfg = HubConfig {
+            live_db: db.path().to_path_buf(),
+            manual_trade_enabled: true,
+            ..HubConfig::from_env()
+        };
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id: "manual_cancelled_intent",
+                created_ts_ms: 1_773_500_100_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "CANCELLED",
+                dedupe_key: None,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = preflight_cancel_retry(
+            &cfg,
+            &ManualTradeCancelRequest {
+                symbol: "ETH".to_string(),
+                oid: None,
+                intent_id: Some("manual_cancelled_intent".to_string()),
+            },
+        )
+        .unwrap()
+        .expect("cancelled retry should return a deduped payload");
+
+        assert_eq!(
+            result.get("deduped").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            result.get("status").and_then(|value| value.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            result.get("intent_id").and_then(|value| value.as_str()),
+            Some("manual_cancelled_intent")
+        );
     }
 
     #[test]
