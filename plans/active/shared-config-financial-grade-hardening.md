@@ -49,8 +49,8 @@ Current execution stage as of 2026-03-14:
 - The operator explicitly chose to introduce a new, honest `apply` /
   `restart` contract rather than reusing the legacy `reload` endpoint wording.
 - No PR 5 branch has been opened for review yet because the transactional apply
-  contract still needs one structural decision recorded here before coding
-  continues.
+  path still needs its runtime health/config-identity verification boundary
+  fixed before coding continues.
 
 Current blocker:
 
@@ -60,7 +60,10 @@ Current blocker:
   `live service apply` contracts that can prove config identity and daemon
   health, but the current Hub config route does not yet own that verification
   boundary.
-- Because of that, PR 5 now depends on one of two approaches:
+- The endpoint direction is already decided: PR 5 will use the new explicit
+  `apply` / `restart` contract.
+- The remaining open decision is only the delivery boundary for post-apply
+  proof:
   `1.` pull the runtime-side health/config-identity proof into the new Hub
   apply path as part of PR 5
   `2.` land the minimum runtime-status/config-identity primitives from PR 6
