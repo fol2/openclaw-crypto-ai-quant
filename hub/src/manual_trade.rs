@@ -239,6 +239,11 @@ struct ExistingManualIntent {
     meta_json: Option<String>,
 }
 
+struct ManualReconcileCursor {
+    last_sort_ts_ms: i64,
+    last_intent_id: String,
+}
+
 struct ManualConfirmationLookup {
     confirm_token: String,
     action: String,
@@ -1915,6 +1920,9 @@ pub fn reconcile_manual_intents(cfg: &HubConfig, limit: usize) -> Result<Value, 
             "status_updates": 0,
         }));
     }
+    let last_cursor = intents
+        .last()
+        .map(|intent| (manual_reconcile_sort_ts(intent), intent.intent_id.clone()));
 
     let client = build_client(cfg)?;
     let open_orders = client
@@ -2161,6 +2169,9 @@ pub fn reconcile_manual_intents(cfg: &HubConfig, limit: usize) -> Result<Value, 
             }),
         )?;
     }
+    if let Some((last_sort_ts_ms, last_intent_id)) = last_cursor {
+        save_manual_reconcile_cursor(&conn, last_sort_ts_ms, &last_intent_id)?;
+    }
 
     Ok(json!({
         "ok": true,
@@ -2401,6 +2412,13 @@ fn ensure_manual_trade_tables(conn: &mut Connection) -> Result<(), HubError> {
         CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_ts_ms ON oms_reconcile_events(ts_ms);
         CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_kind_ts_ms
             ON oms_reconcile_events(kind, ts_ms);
+
+        CREATE TABLE IF NOT EXISTS manual_reconcile_cursor (
+            cursor_name TEXT PRIMARY KEY,
+            last_sort_ts_ms INTEGER NOT NULL,
+            last_intent_id TEXT NOT NULL,
+            updated_ts_ms INTEGER NOT NULL
+        );
         ",
     )?;
     tx.commit()?;
@@ -2703,16 +2721,135 @@ fn load_reconcilable_manual_intents(
     conn: &Connection,
     limit: usize,
 ) -> Result<Vec<ExistingManualIntent>, HubError> {
-    let mut stmt = conn.prepare(
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let cursor = load_manual_reconcile_cursor(conn)?;
+    let mut rows = if let Some(cursor) = cursor.as_ref() {
+        load_reconcilable_manual_intents_after_cursor(conn, cursor, limit)?
+    } else {
+        load_reconcilable_manual_intents_from_start(conn, None, limit)?
+    };
+    if rows.len() < limit {
+        rows.extend(load_reconcilable_manual_intents_from_start(
+            conn,
+            cursor.as_ref(),
+            limit - rows.len(),
+        )?);
+    }
+    Ok(rows)
+}
+
+fn load_manual_reconcile_cursor(
+    conn: &Connection,
+) -> Result<Option<ManualReconcileCursor>, HubError> {
+    let row = conn.query_row(
+        "SELECT last_sort_ts_ms, last_intent_id
+         FROM manual_reconcile_cursor
+         WHERE cursor_name = 'manual_active_reconcile'
+         LIMIT 1",
+        [],
+        |row| {
+            Ok(ManualReconcileCursor {
+                last_sort_ts_ms: row.get(0)?,
+                last_intent_id: row.get(1)?,
+            })
+        },
+    );
+    match row {
+        Ok(cursor) => Ok(Some(cursor)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn save_manual_reconcile_cursor(
+    conn: &Connection,
+    sort_ts_ms: i64,
+    intent_id: &str,
+) -> Result<(), HubError> {
+    conn.execute(
+        "INSERT INTO manual_reconcile_cursor (
+            cursor_name, last_sort_ts_ms, last_intent_id, updated_ts_ms
+        ) VALUES ('manual_active_reconcile', ?1, ?2, ?3)
+        ON CONFLICT(cursor_name) DO UPDATE SET
+            last_sort_ts_ms = excluded.last_sort_ts_ms,
+            last_intent_id = excluded.last_intent_id,
+            updated_ts_ms = excluded.updated_ts_ms",
+        params![sort_ts_ms, intent_id, chrono::Utc::now().timestamp_millis(),],
+    )?;
+    Ok(())
+}
+
+fn load_reconcilable_manual_intents_after_cursor(
+    conn: &Connection,
+    cursor: &ManualReconcileCursor,
+    limit: usize,
+) -> Result<Vec<ExistingManualIntent>, HubError> {
+    load_reconcilable_manual_intents_with_query(
+        conn,
+        "WHERE reason = 'manual_trade' AND status IN ('NEW', 'UNKNOWN', 'SENT', 'PARTIAL')
+           AND (
+                COALESCE(sent_ts_ms, created_ts_ms) > ?1 OR
+                (
+                    COALESCE(sent_ts_ms, created_ts_ms) = ?1 AND
+                    intent_id > ?2
+                )
+           )
+         ORDER BY COALESCE(sent_ts_ms, created_ts_ms) ASC, intent_id ASC
+         LIMIT ?3",
+        params![cursor.last_sort_ts_ms, cursor.last_intent_id, limit as i64],
+    )
+}
+
+fn load_reconcilable_manual_intents_from_start(
+    conn: &Connection,
+    cursor: Option<&ManualReconcileCursor>,
+    limit: usize,
+) -> Result<Vec<ExistingManualIntent>, HubError> {
+    if let Some(cursor) = cursor {
+        load_reconcilable_manual_intents_with_query(
+            conn,
+            "WHERE reason = 'manual_trade' AND status IN ('NEW', 'UNKNOWN', 'SENT', 'PARTIAL')
+               AND (
+                    COALESCE(sent_ts_ms, created_ts_ms) < ?1 OR
+                    (
+                        COALESCE(sent_ts_ms, created_ts_ms) = ?1 AND
+                        intent_id <= ?2
+                    )
+               )
+             ORDER BY COALESCE(sent_ts_ms, created_ts_ms) ASC, intent_id ASC
+             LIMIT ?3",
+            params![cursor.last_sort_ts_ms, cursor.last_intent_id, limit as i64],
+        )
+    } else {
+        load_reconcilable_manual_intents_with_query(
+            conn,
+            "WHERE reason = 'manual_trade' AND status IN ('NEW', 'UNKNOWN', 'SENT', 'PARTIAL')
+             ORDER BY COALESCE(sent_ts_ms, created_ts_ms) ASC, intent_id ASC
+             LIMIT ?1",
+            params![limit as i64],
+        )
+    }
+}
+
+fn load_reconcilable_manual_intents_with_query<P>(
+    conn: &Connection,
+    suffix_sql: &str,
+    params: P,
+) -> Result<Vec<ExistingManualIntent>, HubError>
+where
+    P: rusqlite::Params,
+{
+    let sql = format!(
         "SELECT intent_id, created_ts_ms, symbol, action, side, status, requested_size, leverage,
                 dedupe_key, client_order_id, exchange_order_id, last_error, sent_ts_ms, meta_json
          FROM oms_intents
-         WHERE reason = 'manual_trade' AND status IN ('NEW', 'UNKNOWN', 'SENT', 'PARTIAL')
-         ORDER BY COALESCE(sent_ts_ms, created_ts_ms) DESC
-         LIMIT ?1",
-    )?;
+         {suffix_sql}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map([limit as i64], |row| {
+        .query_map(params, |row| {
             Ok(ExistingManualIntent {
                 intent_id: row.get(0)?,
                 created_ts_ms: row.get(1)?,
@@ -2733,6 +2870,10 @@ fn load_reconcilable_manual_intents(
         .filter_map(|row| row.ok())
         .collect();
     Ok(rows)
+}
+
+fn manual_reconcile_sort_ts(intent: &ExistingManualIntent) -> i64 {
+    intent.sent_ts_ms.unwrap_or(intent.created_ts_ms)
 }
 
 fn load_manual_cancel_context_by_intent_id(
@@ -5089,6 +5230,43 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_test_manual_intent(
+        conn: &Connection,
+        intent_id: &str,
+        created_ts_ms: i64,
+        sent_ts_ms: Option<i64>,
+        status: &str,
+    ) {
+        let cloid = manual_cloid_from_intent_id(intent_id);
+        insert_manual_intent(
+            conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status,
+                dedupe_key: None,
+                client_order_id: &cloid,
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        if let Some(sent_ts_ms) = sent_ts_ms {
+            conn.execute(
+                "UPDATE oms_intents SET sent_ts_ms = ?1 WHERE intent_id = ?2",
+                params![sent_ts_ms, intent_id],
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     fn manual_db_hardening_persists_intent_submission_fill_and_log() {
         let db = NamedTempFile::new().unwrap();
@@ -6713,6 +6891,41 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, "manual_limit_gtc");
         assert_eq!(row.1, "348262211344");
+    }
+
+    #[test]
+    fn reconcilable_intents_start_from_oldest_when_cursor_is_empty() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_test_manual_intent(&conn, "manual_reconcile_a", 100, Some(100), "SENT");
+        insert_test_manual_intent(&conn, "manual_reconcile_b", 200, Some(200), "UNKNOWN");
+        insert_test_manual_intent(&conn, "manual_reconcile_c", 300, Some(300), "PARTIAL");
+
+        let intents = load_reconcilable_manual_intents(&conn, 2).unwrap();
+        let ids = intents
+            .into_iter()
+            .map(|intent| intent.intent_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["manual_reconcile_a", "manual_reconcile_b"]);
+    }
+
+    #[test]
+    fn reconcilable_intents_wrap_after_saved_cursor() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        insert_test_manual_intent(&conn, "manual_reconcile_a", 100, Some(100), "SENT");
+        insert_test_manual_intent(&conn, "manual_reconcile_b", 200, Some(200), "UNKNOWN");
+        insert_test_manual_intent(&conn, "manual_reconcile_c", 300, Some(300), "PARTIAL");
+        save_manual_reconcile_cursor(&conn, 200, "manual_reconcile_b").unwrap();
+
+        let intents = load_reconcilable_manual_intents(&conn, 2).unwrap();
+        let ids = intents
+            .into_iter()
+            .map(|intent| intent.intent_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["manual_reconcile_c", "manual_reconcile_a"]);
     }
 
     #[test]
