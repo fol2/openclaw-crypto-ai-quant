@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod config_approval;
 mod config_audit;
 mod db;
 mod diagnostic_audit;

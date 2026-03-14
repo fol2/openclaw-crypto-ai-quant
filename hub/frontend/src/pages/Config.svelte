@@ -1,5 +1,16 @@
 <script lang="ts">
-  import { applyLiveConfig, getConfigDiffPrivileged, getConfigFiles, getConfigHistory, getConfigRawPrivileged, putConfig } from '../lib/api';
+  import {
+    applyLiveConfig,
+    approveConfigApproval,
+    getConfigDiffPrivileged,
+    getConfigFiles,
+    getConfigHistory,
+    getConfigRawPrivileged,
+    getPendingConfigApprovals,
+    putConfig,
+    rejectConfigApproval,
+    requestLiveApplyConfig,
+  } from '../lib/api';
 
   let files: any[] = $state([]);
   let selectedFile = $state('main');
@@ -13,7 +24,7 @@
   let loading = $state(false);
   let error = $state('');
   let success = $state('');
-  let tab: 'editor' | 'history' | 'diff' = $state('editor');
+  let tab: 'editor' | 'history' | 'diff' | 'approvals' = $state('editor');
 
   let history: any[] = $state([]);
   let loadingHistory = $state(false);
@@ -22,6 +33,11 @@
   let diffB = $state('current');
   let diffResult: string[] = $state([]);
   let loadingDiff = $state(false);
+  let approvals: any[] = $state([]);
+  let loadingApprovals = $state(false);
+  let approvalError = $state('');
+  let approvalNotice = $state('');
+  let approvalBusyId = $state('');
 
   async function loadFiles() {
     try { files = await getConfigFiles(); } catch {}
@@ -81,31 +97,21 @@
       const confirmText = `Apply live config now?\n\nService: ${serviceName}\nCurrent config ID: ${currentConfigId}\nTarget config ID: ${targetConfigId}\n${restartLine}`;
       if (typeof window !== 'undefined' && !window.confirm(confirmText)) return;
 
-      const res = await applyLiveConfig({
+      const res = await requestLiveApplyConfig({
         yaml: yamlText,
         restart: 'auto',
         dry_run: false,
       }, currentLockId);
       if (!res?.ok) {
-        throw new Error(res?.error || 'Live apply failed');
+        throw new Error(res?.error || 'Failed to create live apply request');
       }
-
-      originalText = yamlText;
-      currentLockId = res.lock_id || currentLockId;
-      currentRuntimeConfigId = res.config_id || currentRuntimeConfigId;
-
-      const appliedAction = String(res?.restart?.result?.applied_action || '').trim();
-      const actionNote = appliedAction === 'restart'
-        ? ` ${serviceName} restarted.`
-        : appliedAction === 'start'
-          ? ` ${serviceName} started.`
-          : appliedAction === 'noop'
-            ? ` ${serviceName} already matched the approved contract.`
-            : '';
-      success = `Live config applied.${actionNote}`;
+      const requestId = String(res?.request_id || '').trim();
+      const requestNote = requestId ? ` Request ID: ${requestId}.` : '';
+      success = `Live apply request created.${requestNote} An approver must approve it before the live service changes.`;
+      await loadApprovals();
       setTimeout(() => { success = ''; }, 5000);
     } catch (e: any) {
-      const message = e.message || 'Failed to apply live config';
+      const message = e.message || 'Failed to create live apply request';
       if (message.includes('409')) {
         error = 'This live config changed since you loaded it. Load the latest version and try again.';
       } else {
@@ -113,6 +119,59 @@
       }
     } finally {
       saving = false;
+    }
+  }
+
+  async function loadApprovals() {
+    loadingApprovals = true;
+    approvalError = '';
+    try {
+      const res = await getPendingConfigApprovals();
+      approvals = res?.requests || [];
+    } catch (e: any) {
+      approvalError = e?.message || 'Failed to load pending approvals';
+      approvals = [];
+    } finally {
+      loadingApprovals = false;
+    }
+  }
+
+  async function approveRequest(requestId: string) {
+    approvalBusyId = requestId;
+    approvalError = '';
+    approvalNotice = '';
+    try {
+      const res = await approveConfigApproval(requestId);
+      if (!res?.ok) throw new Error(res?.error || 'Approval failed');
+      approvalNotice = `Approved request ${requestId}.`;
+      await loadApprovals();
+      if (liveFile) await loadConfig();
+    } catch (e: any) {
+      approvalError = e?.message || 'Approval failed';
+    } finally {
+      approvalBusyId = '';
+    }
+  }
+
+  async function rejectRequest(requestId: string) {
+    approvalBusyId = requestId;
+    approvalError = '';
+    approvalNotice = '';
+    try {
+      let reason = '';
+      if (typeof window !== 'undefined') {
+        const input = window.prompt('Rejection reason (optional):', 'rejected by approver');
+        if (input === null) return;
+        reason = input.trim();
+      }
+      const res = await rejectConfigApproval(requestId, reason ? { reason } : {});
+      if (!res?.ok) throw new Error(res?.error || 'Rejection failed');
+      approvalNotice = `Rejected request ${requestId}.`;
+      await loadApprovals();
+    } catch (e: any) {
+      approvalError = e?.message || 'Rejection failed';
+    } finally {
+      approvalBusyId = '';
     }
   }
 
@@ -141,7 +200,7 @@
     return `<span class="diff-ctx">${escaped}</span>`;
   }
 
-  $effect(() => { loadFiles(); loadConfig(); });
+  $effect(() => { loadFiles(); loadConfig(); loadApprovals(); });
 
   function onFileChange(e: Event) {
     selectedFile = (e.target as HTMLSelectElement).value;
@@ -166,6 +225,7 @@
     <button class="tab" class:active={tab === 'editor'} onclick={() => tab = 'editor'}>Editor</button>
     <button class="tab" class:active={tab === 'history'} onclick={() => { tab = 'history'; loadHistory(); }}>History</button>
     <button class="tab" class:active={tab === 'diff'} onclick={() => { tab = 'diff'; loadHistory(); }}>Diff</button>
+    <button class="tab" class:active={tab === 'approvals'} onclick={() => { tab = 'approvals'; loadApprovals(); }}>Approvals</button>
   </div>
 
   {#if error}
@@ -173,6 +233,12 @@
   {/if}
   {#if success}
     <div class="alert alert-success">{success}</div>
+  {/if}
+  {#if approvalError}
+    <div class="alert alert-error">{approvalError}</div>
+  {/if}
+  {#if approvalNotice}
+    <div class="alert alert-success">{approvalNotice}</div>
   {/if}
 
   {#if tab === 'editor'}
@@ -270,6 +336,47 @@
 {/each}</pre>
       {/if}
     </div>
+
+  {:else if tab === 'approvals'}
+    <div class="approvals-section">
+      <div class="approvals-note">
+        Pending live requests are created by an editor token and must be approved from a separate approver session. If this token is not an approver token, Approve / Reject will fail closed.
+      </div>
+      {#if loadingApprovals}
+        <div class="loading-state">Loading pending approvals...</div>
+      {:else if approvals.length === 0}
+        <div class="empty-state">No pending config approvals</div>
+      {:else}
+        <div class="approvals-list">
+          {#each approvals as item}
+            <div class="approval-card">
+              <div class="approval-header">
+                <div>
+                  <div class="approval-title">{item.action || 'live_request'}</div>
+                  <div class="approval-id mono">{item.request_id || item.id}</div>
+                </div>
+                <span class="approval-status">pending</span>
+              </div>
+              <div class="approval-meta">
+                <span>Requester: <strong>{item.requester?.label || 'unknown'}</strong></span>
+                <span>Reason: <strong>{item.reason || '—'}</strong></span>
+                <span>Current cfg: <strong class="mono">{item.summary?.previous_config_id || '—'}</strong></span>
+                <span>Target cfg: <strong class="mono">{item.summary?.config_id || item.summary?.restored_config_id || '—'}</strong></span>
+                <span>Restart required: <strong>{item.summary?.restart_required ? 'yes' : 'no'}</strong></span>
+              </div>
+              <div class="approval-actions">
+                <button class="btn btn-primary" onclick={() => approveRequest(item.request_id || item.id)} disabled={approvalBusyId === (item.request_id || item.id)}>
+                  {approvalBusyId === (item.request_id || item.id) ? 'Working...' : 'Approve'}
+                </button>
+                <button class="btn btn-ghost" onclick={() => rejectRequest(item.request_id || item.id)} disabled={approvalBusyId === (item.request_id || item.id)}>
+                  Reject
+                </button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -337,6 +444,81 @@
     border-color: color-mix(in srgb, var(--success) 40%, var(--border) 60%);
     background: color-mix(in srgb, var(--success) 12%, var(--surface) 88%);
     color: var(--text);
+  }
+
+  .approvals-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-sm);
+  }
+
+  .approvals-note {
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 90%, white 10%);
+    color: var(--text-soft);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .approvals-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .approval-card {
+    padding: 14px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .approval-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .approval-title {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .approval-id {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .approval-status {
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .approval-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px 12px;
+    font-size: 13px;
+    color: var(--text-soft);
+  }
+
+  .approval-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
   }
   .tab.active {
     color: var(--accent);

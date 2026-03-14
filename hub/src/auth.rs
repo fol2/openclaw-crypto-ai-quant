@@ -12,6 +12,8 @@ use crate::config::HubConfig;
 pub struct HubAuthConfig {
     pub read_token: String,
     pub admin_token: String,
+    pub editor_token: String,
+    pub approver_token: String,
     pub dev_mode: bool,
 }
 
@@ -19,6 +21,8 @@ pub struct HubAuthConfig {
 enum AuthScope {
     Read,
     Admin,
+    Editor,
+    Approver,
 }
 
 impl HubAuthConfig {
@@ -26,6 +30,8 @@ impl HubAuthConfig {
         Self {
             read_token: config.token.clone(),
             admin_token: config.admin_token.clone(),
+            editor_token: config.editor_token.clone(),
+            approver_token: config.approver_token.clone(),
             dev_mode: config.dev_mode,
         }
     }
@@ -34,11 +40,21 @@ impl HubAuthConfig {
         if !self.dev_mode && self.read_token.is_empty() {
             bail!("AIQ_MONITOR_TOKEN is required unless AIQ_MONITOR_DEV_MODE=1 is set explicitly");
         }
-        if !self.read_token.is_empty()
-            && !self.admin_token.is_empty()
-            && self.read_token == self.admin_token
-        {
-            bail!("AIQ_MONITOR_ADMIN_TOKEN must differ from AIQ_MONITOR_TOKEN");
+        let configured = [
+            ("AIQ_MONITOR_TOKEN", self.read_token.as_str()),
+            ("AIQ_MONITOR_ADMIN_TOKEN", self.admin_token.as_str()),
+            ("AIQ_MONITOR_EDITOR_TOKEN", self.editor_token.as_str()),
+            ("AIQ_MONITOR_APPROVER_TOKEN", self.approver_token.as_str()),
+        ];
+        for (index, (lhs_name, lhs_value)) in configured.iter().enumerate() {
+            if lhs_value.is_empty() {
+                continue;
+            }
+            for (rhs_name, rhs_value) in configured.iter().skip(index + 1) {
+                if !rhs_value.is_empty() && lhs_value == rhs_value {
+                    bail!("{lhs_name} must differ from {rhs_name}");
+                }
+            }
         }
         Ok(())
     }
@@ -52,59 +68,96 @@ pub async fn require_admin_auth(request: Request, next: Next) -> Response {
     require_scope(request, next, AuthScope::Admin).await
 }
 
+pub async fn require_editor_auth(request: Request, next: Next) -> Response {
+    require_scope(request, next, AuthScope::Editor).await
+}
+
+pub async fn require_approver_auth(request: Request, next: Next) -> Response {
+    require_scope(request, next, AuthScope::Approver).await
+}
+
+pub async fn require_editor_or_approver_auth(request: Request, next: Next) -> Response {
+    require_any_scope(request, next, &[AuthScope::Editor, AuthScope::Approver]).await
+}
+
 async fn require_scope(request: Request, next: Next, scope: AuthScope) -> Response {
+    require_any_scope(request, next, &[scope]).await
+}
+
+async fn require_any_scope(request: Request, next: Next, scopes: &[AuthScope]) -> Response {
     let config = request
         .extensions()
         .get::<HubAuthConfig>()
         .cloned()
         .unwrap_or_default();
 
-    let expected_token = match scope {
-        AuthScope::Read => {
-            if config.read_token.is_empty() {
-                if config.dev_mode {
-                    return next.run(request).await;
-                }
-                return auth_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "read auth is not configured",
-                );
-            }
-            config.read_token.as_str()
-        }
-        AuthScope::Admin => {
-            if config.admin_token.is_empty() {
-                return auth_error(StatusCode::FORBIDDEN, "admin auth is not configured");
-            }
-            config.admin_token.as_str()
-        }
-    };
-
     let auth_header = request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    match scope {
-        AuthScope::Read => {
-            if read_auth_bypassed(&request)
-                || matches_query_token(&request, expected_token)
-                || matches_bearer_token(auth_header, expected_token)
-                || (!config.admin_token.is_empty()
-                    && (matches_query_token(&request, &config.admin_token)
-                        || matches_bearer_token(auth_header, &config.admin_token)))
-            {
-                return next.run(request).await;
-            }
-        }
-        AuthScope::Admin => {
-            if matches_bearer_token(auth_header, expected_token) {
-                return next.run(request).await;
-            }
-        }
+
+    if scopes == [AuthScope::Read] && config.read_token.is_empty() && config.dev_mode {
+        return next.run(request).await;
+    }
+
+    if scopes == [AuthScope::Read] && read_auth_bypassed(&request) {
+        return next.run(request).await;
+    }
+
+    if scopes
+        .iter()
+        .filter_map(|scope| expected_token_for_scope(&config, *scope))
+        .any(|token| {
+            matches_bearer_token(auth_header, token)
+                || (scopes == [AuthScope::Read] && matches_query_token(&request, token))
+        })
+    {
+        return next.run(request).await;
+    }
+
+    if scopes == [AuthScope::Read]
+        && [
+            config.admin_token.as_str(),
+            config.editor_token.as_str(),
+            config.approver_token.as_str(),
+        ]
+        .into_iter()
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            matches_bearer_token(auth_header, token) || matches_query_token(&request, token)
+        })
+    {
+        return next.run(request).await;
+    }
+
+    if scopes == [AuthScope::Read] && config.read_token.is_empty() {
+        return auth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "read auth is not configured",
+        );
+    }
+    if scopes.contains(&AuthScope::Admin) && config.admin_token.is_empty() {
+        return auth_error(StatusCode::FORBIDDEN, "admin auth is not configured");
+    }
+    if scopes.contains(&AuthScope::Editor) && config.editor_token.is_empty() {
+        return auth_error(StatusCode::FORBIDDEN, "editor auth is not configured");
+    }
+    if scopes.contains(&AuthScope::Approver) && config.approver_token.is_empty() {
+        return auth_error(StatusCode::FORBIDDEN, "approver auth is not configured");
     }
 
     auth_error(StatusCode::UNAUTHORIZED, "unauthorized")
+}
+
+fn expected_token_for_scope<'a>(config: &'a HubAuthConfig, scope: AuthScope) -> Option<&'a str> {
+    let token = match scope {
+        AuthScope::Read => config.read_token.as_str(),
+        AuthScope::Admin => config.admin_token.as_str(),
+        AuthScope::Editor => config.editor_token.as_str(),
+        AuthScope::Approver => config.approver_token.as_str(),
+    };
+    (!token.is_empty()).then_some(token)
 }
 
 fn auth_error(status: StatusCode, message: &str) -> Response {
@@ -311,11 +364,29 @@ mod tests {
             .layer(axum::Extension(config))
     }
 
+    fn editor_app(config: HubAuthConfig) -> Router {
+        Router::new()
+            .route("/test", get(ok_handler))
+            .route_layer(middleware::from_fn(require_editor_auth))
+            .layer(middleware::from_fn(require_read_auth))
+            .layer(axum::Extension(config))
+    }
+
+    fn approver_app(config: HubAuthConfig) -> Router {
+        Router::new()
+            .route("/test", get(ok_handler))
+            .route_layer(middleware::from_fn(require_approver_auth))
+            .layer(middleware::from_fn(require_read_auth))
+            .layer(axum::Extension(config))
+    }
+
     #[tokio::test]
     async fn startup_validation_requires_read_token_outside_dev_mode() {
         let config = HubAuthConfig {
             read_token: String::new(),
             admin_token: String::new(),
+            editor_token: String::new(),
+            approver_token: String::new(),
             dev_mode: false,
         };
 
@@ -328,6 +399,8 @@ mod tests {
         let response = read_app(HubAuthConfig {
             read_token: String::new(),
             admin_token: String::new(),
+            editor_token: String::new(),
+            approver_token: String::new(),
             dev_mode: true,
         })
         .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
@@ -432,6 +505,8 @@ mod tests {
         let config = HubAuthConfig {
             read_token: "shared-secret".to_string(),
             admin_token: "shared-secret".to_string(),
+            editor_token: String::new(),
+            approver_token: String::new(),
             dev_mode: false,
         };
 
@@ -444,6 +519,8 @@ mod tests {
         let response = admin_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(
@@ -469,6 +546,8 @@ mod tests {
         let response = read_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(request)
@@ -491,6 +570,8 @@ mod tests {
         let response = read_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(request)
@@ -510,6 +591,8 @@ mod tests {
         let response = read_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(request)
@@ -530,6 +613,8 @@ mod tests {
         let response = read_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(request)
@@ -549,6 +634,8 @@ mod tests {
         let response = admin_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(request)
@@ -571,6 +658,8 @@ mod tests {
         let response = admin_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(request)
@@ -585,6 +674,8 @@ mod tests {
         let response = read_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: false,
         })
         .oneshot(
@@ -605,6 +696,8 @@ mod tests {
         let response = admin_app(HubAuthConfig {
             read_token: "viewer-secret".to_string(),
             admin_token: String::new(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
             dev_mode: true,
         })
         .oneshot(
@@ -621,6 +714,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn editor_auth_requires_editor_token() {
+        let response = editor_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/test")
+                .header("authorization", "Bearer editor-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn approver_auth_rejects_editor_token() {
+        let response = approver_app(HubAuthConfig {
+            read_token: "viewer-secret".to_string(),
+            admin_token: "admin-secret".to_string(),
+            editor_token: "editor-secret".to_string(),
+            approver_token: "approver-secret".to_string(),
+            dev_mode: false,
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/test")
+                .header("authorization", "Bearer editor-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn websocket_query_token_can_pass_the_read_gate() {
         let app = Router::new()
             .route("/ws", get(ok_handler))
@@ -628,6 +765,8 @@ mod tests {
             .layer(axum::Extension(HubAuthConfig {
                 read_token: "viewer-secret".to_string(),
                 admin_token: "admin-secret".to_string(),
+                editor_token: "editor-secret".to_string(),
+                approver_token: "approver-secret".to_string(),
                 dev_mode: false,
             }));
 
@@ -652,6 +791,8 @@ mod tests {
             .layer(axum::Extension(HubAuthConfig {
                 read_token: "abc+def=".to_string(),
                 admin_token: "admin-secret".to_string(),
+                editor_token: "editor-secret".to_string(),
+                approver_token: "approver-secret".to_string(),
                 dev_mode: false,
             }));
 
@@ -659,6 +800,32 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ws?token=abc%2Bdef%3D")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn websocket_query_editor_token_can_pass_the_read_gate() {
+        let app = Router::new()
+            .route("/ws", get(ok_handler))
+            .layer(middleware::from_fn(require_read_auth))
+            .layer(axum::Extension(HubAuthConfig {
+                read_token: "viewer-secret".to_string(),
+                admin_token: "admin-secret".to_string(),
+                editor_token: "editor-secret".to_string(),
+                approver_token: "approver-secret".to_string(),
+                dev_mode: false,
+            }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws?token=editor-secret")
                     .body(Body::empty())
                     .unwrap(),
             )

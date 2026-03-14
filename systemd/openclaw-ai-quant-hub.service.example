@@ -19,8 +19,12 @@ Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 # Read-only Hub routes may bypass AIQ_MONITOR_TOKEN for trusted LAN/Tailscale
 # clients. Loopback alone does not bypass read auth; use a Tailscale
 # HTTP/HTTPS Serve-style front layer (not raw TCP localhost forwarding) when
-# you need Tailscale identity-header bypass. Admin/manual-trade routes still
-# require AIQ_MONITOR_ADMIN_TOKEN.
+# you need Tailscale identity-header bypass.
+# Configure these tokens in the environment file:
+# - AIQ_MONITOR_TOKEN for viewer/read access
+# - AIQ_MONITOR_EDITOR_TOKEN for config saves and live request creation
+# - AIQ_MONITOR_APPROVER_TOKEN for live approval / rejection
+# - AIQ_MONITOR_ADMIN_TOKEN for privileged diagnostics and system actions
 Environment=AIQ_MANUAL_TRADE_ENABLE=true
 ExecStart=$PROJECT_DIR/hub/target/release/aiq-hub
 Restart=always
