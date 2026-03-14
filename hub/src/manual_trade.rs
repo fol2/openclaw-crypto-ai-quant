@@ -1606,6 +1606,7 @@ pub fn cancel_order(
             &symbol,
             &dedupe_key,
             cancel_context.as_ref(),
+            Some(order_id_text.as_str()),
         )? {
             ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
             ManualCancelRequestClaim::Existing(existing) => {
@@ -1839,6 +1840,7 @@ pub fn cancel_order(
             &effective_symbol,
             &dedupe_key,
             Some(&cancel_context),
+            None,
         )? {
             ManualCancelRequestClaim::Submit { request_id, .. } => request_id,
             ManualCancelRequestClaim::Existing(existing) => {
@@ -3206,6 +3208,7 @@ fn initialise_manual_cancel_request(
     symbol: &str,
     dedupe_key: &str,
     context: Option<&ManualCancelContext>,
+    request_exchange_order_id: Option<&str>,
 ) -> Result<ManualCancelRequestClaim, HubError> {
     if let Some(existing) = load_manual_cancel_request_by_dedupe_key(conn, dedupe_key)? {
         let status = existing.status.trim().to_ascii_uppercase();
@@ -3231,7 +3234,9 @@ fn initialise_manual_cancel_request(
                     chrono::Utc::now().timestamp_millis(),
                     symbol.trim().to_ascii_uppercase(),
                     context.and_then(|item| item.intent_id.as_deref()),
-                    context.and_then(|item| item.exchange_order_id.as_deref()),
+                    context
+                        .and_then(|item| item.exchange_order_id.as_deref())
+                        .or(request_exchange_order_id),
                     context.and_then(|item| item.client_order_id.as_deref()),
                     existing.request_id,
                 ],
@@ -3255,7 +3260,9 @@ fn initialise_manual_cancel_request(
             symbol.trim().to_ascii_uppercase(),
             dedupe_key,
             context.and_then(|item| item.intent_id.as_deref()),
-            context.and_then(|item| item.exchange_order_id.as_deref()),
+            context
+                .and_then(|item| item.exchange_order_id.as_deref())
+                .or(request_exchange_order_id),
             context.and_then(|item| item.client_order_id.as_deref()),
         ],
     )?;
@@ -3358,16 +3365,24 @@ fn recover_existing_pending_cancel_request(
             false
         }
     } else {
+        let request_exchange_order_id = request
+            .oid
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         recovered_cancel_context = load_manual_cancel_context_by_exchange_order_id(
             conn,
             &symbol,
-            request.oid.as_deref().map(str::trim).unwrap_or_default(),
+            request_exchange_order_id.unwrap_or_default(),
         )?;
         manual_cancel_target_is_still_open(
             &open_orders,
             &symbol,
             existing.client_order_id.as_deref(),
-            existing.exchange_order_id.as_deref(),
+            existing
+                .exchange_order_id
+                .as_deref()
+                .or(request_exchange_order_id),
         )
     };
 
@@ -6473,6 +6488,24 @@ mod tests {
             .unwrap(),
             "cancel:intent:manual_intent"
         );
+    }
+
+    #[test]
+    fn manual_cancel_target_probe_matches_retry_oid_without_stored_context() {
+        let orders = vec![json!({
+            "coin": "ETH",
+            "oid": 12345_i64,
+            "side": "A",
+            "limitPx": "2100.5",
+            "sz": "0.0515"
+        })];
+
+        assert!(manual_cancel_target_is_still_open(
+            &orders,
+            " eth ",
+            None,
+            Some("12345")
+        ));
     }
 
     #[test]
