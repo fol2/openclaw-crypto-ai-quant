@@ -20,6 +20,7 @@ cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
 cargo run -p aiq-runtime -- live effective-config --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live manifest --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
+cargo run -p aiq-runtime -- live sync-fills --project-dir "$PWD" --json
 
 cargo run -p aiq-runtime -- snapshot export-paper --db trading_engine.db --output /tmp/paper.json
 cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper.json --target-db trading_engine.db --strict-replace --json
@@ -28,6 +29,10 @@ cargo run -p aiq-runtime --bin aiq-maintenance -- fetch-funding-rates --days 30 
 cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db trading_engine.db
 ```
 
+`live sync-fills` fails closed when it encounters unsupported fill shapes, so
+hourly automation should treat a failed run as an operator review signal rather
+than a silent partial success.
+
 ## Ownership
 
 The runtime now owns:
@@ -35,6 +40,7 @@ The runtime now owns:
 - paper lane effective-config resolution
 - paper/live service manifests and status inspection
 - paper/live daemon processes
+- live fill reconciliation from Hyperliquid back into the local live DB
 - snapshot export and seeding contracts
 - launch/supervision wrappers used by the remaining systemd examples
 
