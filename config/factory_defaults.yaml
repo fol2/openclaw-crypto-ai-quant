@@ -13,7 +13,7 @@ validation:
   parity_abs_eps: 0.001
   parity_rel_eps: 0.000001
   parity_trade_delta_max: 0
-  parity_enforce: false
+  parity_enforce: true
 
 selection:
   selected_roles:
@@ -37,6 +37,10 @@ selection:
 deployment:
   apply_to_paper: true
   restart_services: true
+  apply_to_live: false
+  restart_live_service: true
+  live_yaml_path: config/strategy_overrides.live.yaml
+  live_service: openclaw-ai-quant-live-v8
 
 profiles:
   daily:

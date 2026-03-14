@@ -40,6 +40,11 @@ cargo build --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-f
 AI_QUANT_FACTORY_ENABLE=1 cargo run --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-factory -- run --config config/strategy_overrides.yaml --settings config/factory_defaults.yaml --profile daily --json
 ```
 
+`config/factory_defaults.yaml` now enforces parity fail-closed by default. Live
+promotion remains an explicit deployment setting: enable
+`deployment.apply_to_live: true` only on the production instance that is meant
+to restart `openclaw-ai-quant-live-v8`.
+
 The tracked service examples live under:
 
 ```bash

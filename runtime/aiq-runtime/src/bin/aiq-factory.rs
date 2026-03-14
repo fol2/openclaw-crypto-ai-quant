@@ -8,6 +8,7 @@ use bt_data::sqlite_loader::query_time_range_multi;
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs2::FileExt;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -24,6 +25,9 @@ const DEFAULT_CANDLES_DB_DIR: &str = "candles_dbs";
 const DEFAULT_FUNDING_DB: &str = "candles_dbs/funding_rates.db";
 const DEFAULT_FACTORY_VERSION: &str = "factory_cycle_rust_v1";
 const DEFAULT_SELECTION_POLICY: &str = "promotion_roles_v2";
+const DEFAULT_LIVE_YAML_PATH: &str = "config/strategy_overrides.live.yaml";
+const DEFAULT_LIVE_SERVICE: &str = "openclaw-ai-quant-live-v8";
+const DEFAULT_PRIMARY_PAPER_DB_PATH: &str = "trading_engine_v8_paper1.db";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -234,6 +238,10 @@ impl Default for SelectionSettings {
 struct DeploymentSettings {
     apply_to_paper: bool,
     restart_services: bool,
+    apply_to_live: bool,
+    restart_live_service: bool,
+    live_yaml_path: PathBuf,
+    live_service: String,
 }
 
 impl Default for DeploymentSettings {
@@ -241,6 +249,10 @@ impl Default for DeploymentSettings {
         Self {
             apply_to_paper: true,
             restart_services: true,
+            apply_to_live: false,
+            restart_live_service: true,
+            live_yaml_path: PathBuf::from(DEFAULT_LIVE_YAML_PATH),
+            live_service: DEFAULT_LIVE_SERVICE.to_string(),
         }
     }
 }
@@ -435,6 +447,8 @@ struct SelectionReport {
     selection_warnings: Vec<String>,
     step5_gate_status: String,
     step5_gate_block_reason: String,
+    paper_promotion_gate: Option<PaperPromotionGate>,
+    live_promotion: Option<LivePromotionEvent>,
     effective_config_id: String,
     effective_config_path: String,
     promotion_reference_epoch_s: f64,
@@ -469,10 +483,14 @@ struct PaperTargetSummary {
 #[derive(Debug, Clone, Serialize)]
 struct DeploymentEvent {
     role: String,
+    slot: usize,
     source_config_path: String,
+    config_id: String,
+    config_sha256: String,
     promoted_config_path: String,
     target_yaml_path: String,
     service: String,
+    soak_marker_path: Option<String>,
     restarted_service: bool,
     status: String,
 }
@@ -480,10 +498,71 @@ struct DeploymentEvent {
 #[derive(Debug, Clone)]
 struct PreparedDeployment {
     role: String,
+    slot: usize,
     service: String,
+    config_id: String,
+    config_sha256: String,
     source_config_path: PathBuf,
     promoted_config_path: PathBuf,
     target_yaml_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LivePromotionEvent {
+    role: String,
+    config_id: String,
+    source_config_path: String,
+    promoted_config_path: String,
+    live_yaml_path: String,
+    live_service: String,
+    deployment_dir: String,
+    service_was_active_before: bool,
+    restarted_service: bool,
+    restart_required: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PaperPromotionGate {
+    status: String,
+    role: String,
+    paper_db_path: String,
+    config_fingerprint: String,
+    first_trade_ts: Option<String>,
+    last_trade_ts: Option<String>,
+    runtime_hours: f64,
+    close_trades: u32,
+    profit_factor: f64,
+    max_drawdown_pct: f64,
+    slippage_pnl_at_reject_bps: f64,
+    kill_switch_events: u32,
+    thresholds: PaperPromotionThresholds,
+    blocked_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PaperPromotionThresholds {
+    min_runtime_hours: f64,
+    min_close_trades: u32,
+    min_profit_factor: f64,
+    max_drawdown_pct: f64,
+    require_positive_slippage_pnl: bool,
+    require_zero_kill_switch_events: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PaperSoakMarker {
+    version: String,
+    role: String,
+    slot: usize,
+    service: String,
+    paper_db_path: String,
+    config_id: String,
+    config_sha256: String,
+    deployed_at_ms: i64,
+    deployed_by_run_id: String,
+    source_config_path: String,
+    target_yaml_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -537,6 +616,12 @@ struct RunMetadataArgs {
     funding_db: String,
     start_ts_ms: i64,
     end_ts_ms: i64,
+    apply_to_paper: bool,
+    restart_paper_services: bool,
+    apply_to_live: bool,
+    restart_live_service: bool,
+    live_yaml_path: String,
+    live_service: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -549,6 +634,9 @@ struct FactoryRunSummary {
     selection_json: String,
     blocked: bool,
     blocked_reason: String,
+    promotion_stage: String,
+    paper_promotion_gate: Option<PaperPromotionGate>,
+    live_promotion: Option<LivePromotionEvent>,
     selected_roles: Vec<SelectionCandidate>,
 }
 
@@ -575,6 +663,9 @@ struct SelectionReportInput<'a> {
     blocked: bool,
     blocked_reason: String,
     deployments: Vec<DeploymentEvent>,
+    paper_promotion_gate: Option<PaperPromotionGate>,
+    live_promotion: Option<LivePromotionEvent>,
+    promotion_requested: bool,
     selection_warnings: Vec<String>,
 }
 
@@ -636,6 +727,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
     let config_path = resolve_under_project(&project_dir, &args.config);
     let settings = load_factory_defaults(&settings_path)?;
     validate_selection_settings(&settings.selection)?;
+    validate_factory_defaults(&settings)?;
     let profile_settings = settings
         .profiles
         .get(args.profile.as_str())
@@ -730,25 +822,72 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
 
     let selected = select_roles(&validated, &settings.selection);
     let gate_report = build_gate_report(&run_id, &validated, &selected, &settings.selection);
-    let (deployed, deployments, selection_warnings) = if gate_report.blocked {
-        (false, Vec::new(), Vec::new())
-    } else {
-        match deploy_selected_configs(
-            &paths.project_dir,
-            &run_dir,
-            &validated,
-            &selected,
-            &settings.selection,
-            &settings.deployment,
-        ) {
-            Ok(events) => (true, events, Vec::new()),
-            Err(err) => (
-                false,
-                Vec::new(),
-                vec![format!("paper_deploy_failed: {err}")],
-            ),
-        }
-    };
+    let (paper_deployed, deployments, paper_promotion_gate, live_promotion, selection_warnings) =
+        if gate_report.blocked {
+            (false, Vec::new(), None, None, Vec::new())
+        } else {
+            match deploy_selected_configs(
+                &paths.project_dir,
+                &run_id,
+                &run_dir,
+                &validated,
+                &selected,
+                &settings.selection,
+                &settings.deployment,
+            ) {
+                Ok(events) => {
+                    let mut warnings = Vec::new();
+                    let (paper_promotion_gate, live_promotion) =
+                        if settings.deployment.apply_to_live {
+                            match assess_primary_paper_promotion_gate(
+                                &paths.project_dir,
+                                &settings.selection,
+                                &validated,
+                                &selected,
+                            ) {
+                                Ok(gate) if gate.status == "pass" => {
+                                    match promote_primary_live(
+                                        &paths.project_dir,
+                                        &paths.artifacts_root,
+                                        &run_dir,
+                                        &validated,
+                                        &selected,
+                                        &events,
+                                        &settings.deployment,
+                                    ) {
+                                        Ok(event) => (Some(gate), Some(event)),
+                                        Err(err) => {
+                                            warnings.push(format!("live_promotion_failed: {err}"));
+                                            (Some(gate), None)
+                                        }
+                                    }
+                                }
+                                Ok(gate) => {
+                                    warnings.push(format!(
+                                        "live_promotion_blocked: {}",
+                                        gate.blocked_reasons.join("; ")
+                                    ));
+                                    (Some(gate), None)
+                                }
+                                Err(err) => {
+                                    warnings.push(format!("live_promotion_failed: {err}"));
+                                    (None, None)
+                                }
+                            }
+                        } else {
+                            (None, None)
+                        };
+                    (true, events, paper_promotion_gate, live_promotion, warnings)
+                }
+                Err(err) => (
+                    false,
+                    Vec::new(),
+                    None,
+                    None,
+                    vec![format!("paper_deploy_failed: {err}")],
+                ),
+            }
+        };
     let selection_report = build_selection_report(SelectionReportInput {
         run_id: &run_id,
         run_dir: &run_dir,
@@ -761,6 +900,9 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         blocked: gate_report.blocked,
         blocked_reason: gate_report.blocked_reason.clone(),
         deployments: deployments.clone(),
+        paper_promotion_gate: paper_promotion_gate.clone(),
+        live_promotion: live_promotion.clone(),
+        promotion_requested: settings.deployment.apply_to_live,
         selection_warnings: selection_warnings.clone(),
     })?;
     write_reports(&run_dir, &validated, &gate_report, &selection_report)?;
@@ -783,12 +925,17 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
         run_dir: run_dir.display().to_string(),
         report_json: run_dir.join("reports/report.json").display().to_string(),
         selection_json: run_dir.join("reports/selection.json").display().to_string(),
-        blocked: gate_report.blocked || !deployed,
+        blocked: gate_report.blocked
+            || !paper_deployed
+            || (settings.deployment.apply_to_live && live_promotion.is_none()),
         blocked_reason: if !selection_warnings.is_empty() {
             selection_warnings.join("; ")
         } else {
             gate_report.blocked_reason.clone()
         },
+        promotion_stage: selection_report.promotion_stage.clone(),
+        paper_promotion_gate,
+        live_promotion,
         selected_roles: selected,
     })
 }
@@ -1593,6 +1740,9 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         blocked,
         blocked_reason,
         deployments,
+        paper_promotion_gate,
+        live_promotion,
+        promotion_requested,
         selection_warnings,
     } = input;
     let selected_items = selected
@@ -1617,7 +1767,13 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         .or_else(|| best_overall_candidate(validated))
         .ok_or_else(|| anyhow!("missing selected primary candidate"))?;
     let active_targets = active_paper_targets(selection);
-    let deployment_failed = !selection_warnings.is_empty();
+    let deployment_failed = selection_warnings
+        .iter()
+        .any(|warning| warning.starts_with("paper_deploy_failed:"));
+    let promotion_failed = selection_warnings.iter().any(|warning| {
+        warning.starts_with("live_promotion_failed:")
+            || warning.starts_with("live_promotion_blocked:")
+    });
     let deploy_stage = if blocked {
         "blocked"
     } else if deployment_failed {
@@ -1637,12 +1793,18 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         deployments,
         promotion_stage: if blocked || deployment_failed {
             "blocked"
-        } else {
+        } else if !promotion_requested {
             "paper_applied"
+        } else if promotion_failed {
+            "failed"
+        } else if live_promotion.is_some() {
+            "live_applied"
+        } else {
+            "pending"
         }
         .to_string(),
         selection_policy: DEFAULT_SELECTION_POLICY,
-        selection_stage: if blocked || deployment_failed {
+        selection_stage: if blocked || deployment_failed || promotion_failed {
             "blocked"
         } else {
             "selected"
@@ -1656,6 +1818,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         }
         .to_string(),
         step5_gate_block_reason: blocked_reason,
+        paper_promotion_gate,
+        live_promotion,
         effective_config_id: effective_config_id.to_string(),
         effective_config_path: effective_config_path.display().to_string(),
         promotion_reference_epoch_s: Utc::now().timestamp_millis() as f64 / 1000.0,
@@ -1731,6 +1895,529 @@ fn validate_selection_settings(selection: &SelectionSettings) -> Result<()> {
     Ok(())
 }
 
+fn validate_factory_defaults(settings: &FactoryDefaults) -> Result<()> {
+    if settings.deployment.apply_to_live && !settings.deployment.apply_to_paper {
+        bail!("deployment.apply_to_live requires deployment.apply_to_paper=true");
+    }
+    if settings.deployment.apply_to_live {
+        let enabled_roles = settings
+            .selection
+            .selected_roles
+            .iter()
+            .map(|role| role.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        if !enabled_roles.is_empty() && !enabled_roles.contains("primary") {
+            bail!(
+                "deployment.apply_to_live requires `primary` to be present in selection.selected_roles"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn assess_primary_paper_promotion_gate(
+    project_dir: &Path,
+    selection: &SelectionSettings,
+    validated: &[ValidationItem],
+    selected: &[SelectionCandidate],
+) -> Result<PaperPromotionGate> {
+    let primary_role = selected
+        .iter()
+        .find(|role| role.role.eq_ignore_ascii_case("primary"))
+        .ok_or_else(|| anyhow!("live promotion requested but no primary role was selected"))?;
+    let primary_candidate = validated
+        .iter()
+        .find(|item| item.config_id == primary_role.config_id)
+        .ok_or_else(|| anyhow!("missing primary validation item {}", primary_role.config_id))?;
+    let target = selection
+        .paper_targets
+        .iter()
+        .find(|target| target.role.eq_ignore_ascii_case("primary"))
+        .ok_or_else(|| anyhow!("missing paper target for primary role"))?;
+    let paper_db_path = paper_db_path_for_slot(project_dir, target.slot)?;
+    let Some(marker) = load_paper_soak_marker(project_dir, target.role.as_str())? else {
+        return Ok(blocked_paper_promotion_gate(
+            &paper_db_path,
+            primary_candidate,
+            vec![format!(
+                "missing current paper soak marker for role `{}`; deploy to paper before live promotion",
+                target.role
+            )],
+        ));
+    };
+    let target_yaml_path = resolve_under_project(project_dir, &target.yaml_path);
+    if marker.slot != target.slot
+        || marker.service != target.service
+        || Path::new(&marker.target_yaml_path) != target_yaml_path.as_path()
+    {
+        return Ok(blocked_paper_promotion_gate(
+            &paper_db_path,
+            primary_candidate,
+            vec![format!(
+                "paper soak marker for role `{}` no longer matches slot/service/yaml target",
+                target.role
+            )],
+        ));
+    }
+    if marker.config_id != primary_candidate.config_id {
+        return Ok(blocked_paper_promotion_gate(
+            &paper_db_path,
+            primary_candidate,
+            vec![format!(
+                "paper soak marker for role `{}` points to config {} rather than selected {}",
+                target.role, marker.config_id, primary_candidate.config_id
+            )],
+        ));
+    }
+    assess_paper_promotion_gate(
+        &paper_db_path,
+        primary_candidate,
+        Some(marker.deployed_at_ms),
+    )
+}
+
+fn assess_paper_promotion_gate(
+    paper_db_path: &Path,
+    candidate: &ValidationItem,
+    deployed_after_ms: Option<i64>,
+) -> Result<PaperPromotionGate> {
+    let conn = Connection::open(paper_db_path)
+        .with_context(|| format!("open paper DB {}", paper_db_path.display()))?;
+    let config_fingerprint = candidate.config_id.clone();
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT t.id, t.timestamp, t.action, COALESCE(t.pnl, 0.0), COALESCE(t.fee_usd, 0.0), COALESCE(t.balance, 0.0), COALESCE(d.run_fingerprint, '')
+         FROM trades t
+         JOIN decision_events d ON d.trade_id = t.id
+         WHERE d.event_type = 'fill' AND d.status = 'executed' AND d.config_fingerprint = ?
+         ORDER BY t.id ASC",
+    )?;
+    let mut rows = stmt.query([config_fingerprint.as_str()])?;
+    let mut first_trade_ts: Option<String> = None;
+    let mut last_trade_ts: Option<String> = None;
+    let mut first_trade_ms: Option<i64> = None;
+    let mut last_trade_ms: Option<i64> = None;
+    let mut close_trades = 0u32;
+    let mut gross_profit = 0.0f64;
+    let mut gross_loss = 0.0f64;
+    let mut peak_balance: Option<f64> = None;
+    let mut max_drawdown_pct = 0.0f64;
+    let mut evidence_runs = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let timestamp: String = row.get(1)?;
+        let action: String = row.get(2)?;
+        let pnl: f64 = row.get(3)?;
+        let fee_usd: f64 = row.get(4)?;
+        let balance: f64 = row.get(5)?;
+        let run_fingerprint: String = row.get(6)?;
+        let ts_ms = parse_trade_timestamp_ms(&timestamp);
+        if let Some(anchor_ms) = deployed_after_ms {
+            let Some(trade_ms) = ts_ms else {
+                continue;
+            };
+            if trade_ms < anchor_ms {
+                continue;
+            }
+        }
+        if !run_fingerprint.is_empty() {
+            evidence_runs.insert(run_fingerprint);
+        }
+        if first_trade_ts.is_none() {
+            first_trade_ts = Some(timestamp.clone());
+            first_trade_ms = ts_ms;
+        }
+        last_trade_ts = Some(timestamp);
+        last_trade_ms = ts_ms;
+
+        if is_close_action(&action) {
+            close_trades += 1;
+            let net_pnl = pnl - fee_usd;
+            if net_pnl > 0.0 {
+                gross_profit += net_pnl;
+            } else {
+                gross_loss += net_pnl.abs();
+            }
+        }
+
+        match peak_balance {
+            Some(peak) if peak > 0.0 => {
+                let next_peak = peak.max(balance);
+                let drawdown_pct = ((next_peak - balance).max(0.0) / next_peak) * 100.0;
+                if drawdown_pct > max_drawdown_pct {
+                    max_drawdown_pct = drawdown_pct;
+                }
+                peak_balance = Some(next_peak);
+            }
+            _ => {
+                peak_balance = Some(balance);
+            }
+        }
+    }
+
+    let runtime_hours = match (first_trade_ms, last_trade_ms) {
+        (Some(first), Some(last)) if last >= first => (last - first) as f64 / 3_600_000.0,
+        _ => 0.0,
+    };
+    let profit_factor = if gross_loss > 0.0 {
+        gross_profit / gross_loss
+    } else if gross_profit > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let kill_switch_events = count_kill_switch_events(&conn, &evidence_runs)?;
+    let thresholds = PaperPromotionThresholds {
+        min_runtime_hours: 24.0,
+        min_close_trades: 20,
+        min_profit_factor: 1.2,
+        max_drawdown_pct: 10.0,
+        require_positive_slippage_pnl: true,
+        require_zero_kill_switch_events: true,
+    };
+    let mut blocked_reasons = Vec::new();
+    if close_trades == 0 {
+        blocked_reasons.push(format!(
+            "no paper fill evidence for config_fingerprint {} in {}",
+            config_fingerprint,
+            paper_db_path.display()
+        ));
+    }
+    if runtime_hours < thresholds.min_runtime_hours && close_trades < thresholds.min_close_trades {
+        blocked_reasons.push(format!(
+            "paper runtime below soak gate ({runtime_hours:.2}h, {close_trades} close trades)"
+        ));
+    }
+    if profit_factor < thresholds.min_profit_factor {
+        blocked_reasons.push(format!(
+            "paper profit factor {:.4} below {:.2}",
+            profit_factor, thresholds.min_profit_factor
+        ));
+    }
+    if max_drawdown_pct >= thresholds.max_drawdown_pct {
+        blocked_reasons.push(format!(
+            "paper max drawdown {:.4}% >= {:.2}%",
+            max_drawdown_pct, thresholds.max_drawdown_pct
+        ));
+    }
+    if candidate.slippage_pnl_at_reject_bps <= 0.0 {
+        blocked_reasons.push(format!(
+            "validation slippage stress pnl_at_{}bps <= 0",
+            candidate.slippage_reject_bps
+        ));
+    }
+    if kill_switch_events > 0 {
+        blocked_reasons.push(format!(
+            "paper kill-switch evidence present ({kill_switch_events} events)"
+        ));
+    }
+
+    Ok(PaperPromotionGate {
+        status: if blocked_reasons.is_empty() {
+            "pass".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        role: "primary".to_string(),
+        paper_db_path: paper_db_path.display().to_string(),
+        config_fingerprint,
+        first_trade_ts,
+        last_trade_ts,
+        runtime_hours,
+        close_trades,
+        profit_factor,
+        max_drawdown_pct,
+        slippage_pnl_at_reject_bps: candidate.slippage_pnl_at_reject_bps,
+        kill_switch_events,
+        thresholds,
+        blocked_reasons,
+    })
+}
+
+fn blocked_paper_promotion_gate(
+    paper_db_path: &Path,
+    candidate: &ValidationItem,
+    blocked_reasons: Vec<String>,
+) -> PaperPromotionGate {
+    PaperPromotionGate {
+        status: "blocked".to_string(),
+        role: "primary".to_string(),
+        paper_db_path: paper_db_path.display().to_string(),
+        config_fingerprint: candidate.config_id.clone(),
+        first_trade_ts: None,
+        last_trade_ts: None,
+        runtime_hours: 0.0,
+        close_trades: 0,
+        profit_factor: 0.0,
+        max_drawdown_pct: 0.0,
+        slippage_pnl_at_reject_bps: candidate.slippage_pnl_at_reject_bps,
+        kill_switch_events: 0,
+        thresholds: PaperPromotionThresholds {
+            min_runtime_hours: 24.0,
+            min_close_trades: 20,
+            min_profit_factor: 1.2,
+            max_drawdown_pct: 10.0,
+            require_positive_slippage_pnl: true,
+            require_zero_kill_switch_events: true,
+        },
+        blocked_reasons,
+    }
+}
+
+fn count_kill_switch_events(conn: &Connection, evidence_runs: &HashSet<String>) -> Result<u32> {
+    if evidence_runs.is_empty() {
+        return Ok(0);
+    }
+
+    let mut audit_stmt = conn.prepare(
+        "SELECT COALESCE(event, ''), COALESCE(run_fingerprint, '')
+         FROM audit_events",
+    )?;
+    let mut audit_rows = audit_stmt.query([])?;
+    let mut count = 0u32;
+    while let Some(row) = audit_rows.next()? {
+        let event: String = row.get(0)?;
+        let run_fingerprint: String = row.get(1)?;
+        if !evidence_runs.contains(&run_fingerprint) {
+            continue;
+        }
+        if event.starts_with("RISK_KILL_") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn paper_db_path_for_slot(project_dir: &Path, slot: usize) -> Result<PathBuf> {
+    match slot {
+        1 => Ok(project_dir.join(DEFAULT_PRIMARY_PAPER_DB_PATH)),
+        2 => Ok(project_dir.join("trading_engine_v8_paper2.db")),
+        3 => Ok(project_dir.join("trading_engine_v8_paper3.db")),
+        _ => bail!("unsupported paper target slot for live promotion gate: {slot}"),
+    }
+}
+
+fn write_paper_soak_marker(
+    project_dir: &Path,
+    run_id: &str,
+    plan: &PreparedDeployment,
+) -> Result<PathBuf> {
+    let marker_path = paper_soak_marker_path(project_dir, plan.role.as_str());
+    let marker = PaperSoakMarker {
+        version: "factory_paper_soak_v1".to_string(),
+        role: plan.role.clone(),
+        slot: plan.slot,
+        service: plan.service.clone(),
+        paper_db_path: paper_db_path_for_slot(project_dir, plan.slot)?
+            .display()
+            .to_string(),
+        config_id: plan.config_id.clone(),
+        config_sha256: plan.config_sha256.clone(),
+        deployed_at_ms: Utc::now().timestamp_millis(),
+        deployed_by_run_id: run_id.to_string(),
+        source_config_path: plan.source_config_path.display().to_string(),
+        target_yaml_path: plan.target_yaml_path.display().to_string(),
+    };
+    write_json(&marker_path, &marker)?;
+    Ok(marker_path)
+}
+
+fn load_paper_soak_marker(project_dir: &Path, role: &str) -> Result<Option<PaperSoakMarker>> {
+    let marker_path = paper_soak_marker_path(project_dir, role);
+    if !marker_path.is_file() {
+        return Ok(None);
+    }
+    let bytes =
+        fs::read(&marker_path).with_context(|| format!("read {}", marker_path.display()))?;
+    let marker = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {}", marker_path.display()))?;
+    Ok(Some(marker))
+}
+
+fn paper_soak_marker_path(project_dir: &Path, role: &str) -> PathBuf {
+    project_dir.join("artifacts").join("state").join(format!(
+        "factory_paper_soak_{}.json",
+        role.to_ascii_lowercase()
+    ))
+}
+
+fn current_target_config_id(path: &Path) -> Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let raw_document: serde_yaml::Value =
+        serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let cfg = load_config_document_checked(&raw_document, None, false, None)
+        .map_err(|err| anyhow!(err))
+        .with_context(|| format!("load config {}", path.display()))?;
+    Ok(Some(strategy_config_fingerprint_sha256(&cfg)))
+}
+
+fn parse_trade_timestamp_ms(raw: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn is_close_action(action: &str) -> bool {
+    matches!(
+        action,
+        "REDUCE" | "CLOSE" | "REDUCE_LONG" | "REDUCE_SHORT" | "CLOSE_LONG" | "CLOSE_SHORT"
+    )
+}
+
+fn promote_primary_live(
+    project_dir: &Path,
+    artifacts_root: &Path,
+    run_dir: &Path,
+    validated: &[ValidationItem],
+    selected: &[SelectionCandidate],
+    paper_deployments: &[DeploymentEvent],
+    deployment: &DeploymentSettings,
+) -> Result<LivePromotionEvent> {
+    let primary_role = selected
+        .iter()
+        .find(|role| role.role.eq_ignore_ascii_case("primary"))
+        .ok_or_else(|| anyhow!("live promotion requested but no primary role was selected"))?;
+    let primary_candidate = validated
+        .iter()
+        .find(|item| item.config_id == primary_role.config_id)
+        .ok_or_else(|| anyhow!("missing primary validation item {}", primary_role.config_id))?;
+    let primary_paper = paper_deployments
+        .iter()
+        .find(|event| event.role.eq_ignore_ascii_case("primary"))
+        .ok_or_else(|| anyhow!("missing primary paper deployment artefact"))?;
+
+    let source_config_path = PathBuf::from(&primary_candidate.config_path);
+    let promoted_config_path = PathBuf::from(&primary_paper.promoted_config_path);
+    let promoted_text = fs::read_to_string(&promoted_config_path).with_context(|| {
+        format!(
+            "read promoted live candidate {}",
+            promoted_config_path.display()
+        )
+    })?;
+    serde_yaml::from_str::<serde_yaml::Value>(&promoted_text).with_context(|| {
+        format!(
+            "parse promoted live candidate YAML {}",
+            promoted_config_path.display()
+        )
+    })?;
+
+    let live_yaml_path = resolve_under_project(project_dir, &deployment.live_yaml_path);
+    let current_live_text = if live_yaml_path.is_file() {
+        let text = fs::read_to_string(&live_yaml_path)
+            .with_context(|| format!("read current live YAML {}", live_yaml_path.display()))?;
+        serde_yaml::from_str::<serde_yaml::Value>(&text)
+            .with_context(|| format!("parse current live YAML {}", live_yaml_path.display()))?;
+        Some(text)
+    } else {
+        None
+    };
+    let current_interval = current_live_text
+        .as_deref()
+        .map(load_yaml_engine_interval)
+        .unwrap_or_default();
+    let promoted_interval = load_yaml_engine_interval(&promoted_text);
+    let restart_required = current_interval != promoted_interval
+        && !current_interval.is_empty()
+        && !promoted_interval.is_empty();
+    if restart_required && !deployment.restart_live_service {
+        bail!(
+            "live promotion changes engine.interval ({} -> {}) but restart_live_service=false",
+            current_interval,
+            promoted_interval
+        );
+    }
+    let live_service_was_active = if deployment.restart_live_service {
+        user_service_is_active(deployment.live_service.as_str())?
+    } else {
+        false
+    };
+
+    let deploy_root = artifacts_root.join("deployments").join("live");
+    fs::create_dir_all(&deploy_root)
+        .with_context(|| format!("create {}", deploy_root.display()))?;
+    let deploy_stamp = unique_utc_stamp(Utc::now());
+    let deploy_dir = deploy_root.join(format!("manual_switch_{}_primary", deploy_stamp));
+    fs::create_dir_all(&deploy_dir).with_context(|| format!("create {}", deploy_dir.display()))?;
+
+    let promoted_payload = format!("{}\n", promoted_text.trim_end());
+    fs::write(deploy_dir.join("promoted_config.yaml"), &promoted_payload).with_context(|| {
+        format!(
+            "write {}",
+            deploy_dir.join("promoted_config.yaml").display()
+        )
+    })?;
+    fs::write(
+        deploy_dir.join("prev_config.yaml"),
+        current_live_text.clone().unwrap_or_default(),
+    )
+    .with_context(|| format!("write {}", deploy_dir.join("prev_config.yaml").display()))?;
+
+    let live_snapshot = snapshot_target(&live_yaml_path)?;
+    let promotion_result: Result<LivePromotionEvent> = (|| {
+        atomic_write_text(&live_yaml_path, &promoted_payload)?;
+        let restarted_service = if deployment.restart_live_service {
+            restart_user_service(deployment.live_service.as_str())?
+        } else {
+            false
+        };
+        let event = serde_json::json!({
+            "version": "factory_live_promotion_v1",
+            "source": "aiq-factory",
+            "ts_utc": iso_utc_now(),
+            "run_dir": run_dir.display().to_string(),
+            "selection_policy": DEFAULT_SELECTION_POLICY,
+            "role": primary_role.role,
+            "config_id": primary_role.config_id,
+            "source_config_path": source_config_path.display().to_string(),
+            "promoted_config_path": promoted_config_path.display().to_string(),
+            "live_yaml_path": live_yaml_path.display().to_string(),
+            "live_service": deployment.live_service,
+            "service_was_active_before": live_service_was_active,
+            "restart_required": restart_required,
+            "restarted_service": restarted_service,
+        });
+        write_json(&deploy_dir.join("promotion_event.json"), &event)?;
+        Ok(LivePromotionEvent {
+            role: primary_role.role.clone(),
+            config_id: primary_role.config_id.clone(),
+            source_config_path: source_config_path.display().to_string(),
+            promoted_config_path: promoted_config_path.display().to_string(),
+            live_yaml_path: live_yaml_path.display().to_string(),
+            live_service: deployment.live_service.clone(),
+            deployment_dir: deploy_dir.display().to_string(),
+            service_was_active_before: live_service_was_active,
+            restarted_service,
+            restart_required,
+            status: "applied".to_string(),
+        })
+    })();
+
+    match promotion_result {
+        Ok(event) => Ok(event),
+        Err(err) => {
+            rollback_target_snapshots(&[live_snapshot])?;
+            if should_restart_live_service_after_rollback(
+                deployment.restart_live_service,
+                live_service_was_active,
+            ) {
+                restart_user_service(deployment.live_service.as_str())?;
+            }
+            let _ = fs::remove_dir_all(&deploy_dir);
+            bail!("live promotion rolled back after failure: {err}");
+        }
+    }
+}
+
+fn unique_utc_stamp(now: chrono::DateTime<Utc>) -> String {
+    format!(
+        "{}_{:03}",
+        now.format("%Y%m%dT%H%M%SZ"),
+        now.timestamp_subsec_millis()
+    )
+}
+
 fn write_reports(
     run_dir: &Path,
     validated: &[ValidationItem],
@@ -1760,6 +2447,7 @@ fn write_reports(
 
 fn deploy_selected_configs(
     project_dir: &Path,
+    run_id: &str,
     run_dir: &Path,
     validated: &[ValidationItem],
     selected: &[SelectionCandidate],
@@ -1790,7 +2478,10 @@ fn deploy_selected_configs(
         })?;
         plans.push(PreparedDeployment {
             role: target.role.clone(),
+            slot: target.slot,
             service: target.service.clone(),
+            config_id: source_item.config_id.clone(),
+            config_sha256: source_item.config_sha256.clone(),
             source_config_path: config_path,
             promoted_config_path,
             target_yaml_path: resolve_under_project(project_dir, &target.yaml_path),
@@ -1801,23 +2492,66 @@ fn deploy_selected_configs(
             .into_iter()
             .map(|plan| DeploymentEvent {
                 role: plan.role,
+                slot: plan.slot,
                 source_config_path: plan.source_config_path.display().to_string(),
+                config_id: plan.config_id,
+                config_sha256: plan.config_sha256,
                 promoted_config_path: plan.promoted_config_path.display().to_string(),
                 target_yaml_path: plan.target_yaml_path.display().to_string(),
                 service: plan.service,
+                soak_marker_path: None,
                 restarted_service: false,
                 status: "staged_only".to_string(),
             })
             .collect());
     }
 
-    let snapshots = plans
+    let mut steady_state_events = Vec::new();
+    let mut pending_plans = Vec::new();
+    for plan in plans {
+        let existing_marker = load_paper_soak_marker(project_dir, plan.role.as_str())?;
+        let current_target_config_id = current_target_config_id(plan.target_yaml_path.as_path())?;
+        let already_applied = existing_marker.as_ref().is_some_and(|marker| {
+            marker.config_id == plan.config_id
+                && marker.slot == plan.slot
+                && marker.service == plan.service
+                && Path::new(&marker.target_yaml_path) == plan.target_yaml_path.as_path()
+        }) && current_target_config_id.as_deref()
+            == Some(plan.config_id.as_str());
+        if already_applied {
+            steady_state_events.push(DeploymentEvent {
+                role: plan.role.clone(),
+                slot: plan.slot,
+                source_config_path: plan.source_config_path.display().to_string(),
+                config_id: plan.config_id.clone(),
+                config_sha256: plan.config_sha256.clone(),
+                promoted_config_path: plan.promoted_config_path.display().to_string(),
+                target_yaml_path: plan.target_yaml_path.display().to_string(),
+                service: plan.service.clone(),
+                soak_marker_path: existing_marker.map(|marker| {
+                    paper_soak_marker_path(project_dir, marker.role.as_str())
+                        .display()
+                        .to_string()
+                }),
+                restarted_service: false,
+                status: "already_applied".to_string(),
+            });
+        } else {
+            pending_plans.push(plan);
+        }
+    }
+
+    if pending_plans.is_empty() {
+        return Ok(steady_state_events);
+    }
+
+    let snapshots = pending_plans
         .iter()
         .map(|plan| snapshot_target(plan.target_yaml_path.as_path()))
         .collect::<Result<Vec<_>>>()?;
 
     let deployment_result: Result<Vec<DeploymentEvent>> = (|| {
-        for plan in &plans {
+        for plan in &pending_plans {
             if let Some(parent) = plan.target_yaml_path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("create {}", parent.display()))?;
@@ -1833,24 +2567,37 @@ fn deploy_selected_configs(
 
         let mut restarted = HashSet::new();
         if deployment.restart_services {
-            for plan in &plans {
+            for plan in &pending_plans {
                 restart_user_service(plan.service.as_str())?;
                 restarted.insert(plan.service.clone());
             }
         }
 
-        Ok(plans
-            .iter()
-            .map(|plan| DeploymentEvent {
+        let mut markers = HashMap::new();
+        for plan in &pending_plans {
+            let marker_path = write_paper_soak_marker(project_dir, run_id, plan)?;
+            markers.insert(plan.role.clone(), marker_path);
+        }
+
+        let mut events = steady_state_events.clone();
+        events.extend(pending_plans.iter().map(|plan| {
+            DeploymentEvent {
                 role: plan.role.clone(),
+                slot: plan.slot,
                 source_config_path: plan.source_config_path.display().to_string(),
+                config_id: plan.config_id.clone(),
+                config_sha256: plan.config_sha256.clone(),
                 promoted_config_path: plan.promoted_config_path.display().to_string(),
                 target_yaml_path: plan.target_yaml_path.display().to_string(),
                 service: plan.service.clone(),
+                soak_marker_path: markers
+                    .get(&plan.role)
+                    .map(|path| path.display().to_string()),
                 restarted_service: restarted.contains(&plan.service),
                 status: "applied".to_string(),
-            })
-            .collect())
+            }
+        }));
+        Ok(events)
     })();
 
     match deployment_result {
@@ -1858,7 +2605,12 @@ fn deploy_selected_configs(
         Err(err) => {
             rollback_target_snapshots(&snapshots)?;
             if deployment.restart_services {
-                restart_user_services(plans.iter().map(|plan| plan.service.as_str()).collect())?;
+                restart_user_services(
+                    pending_plans
+                        .iter()
+                        .map(|plan| plan.service.as_str())
+                        .collect(),
+                )?;
             }
             bail!("paper deployment rolled back after failure: {err}");
         }
@@ -1905,6 +2657,17 @@ fn build_run_metadata(input: RunMetadataInput<'_>) -> Result<RunMetadata> {
             funding_db: paths.funding_db_path.display().to_string(),
             start_ts_ms: db_window.start_ts_ms,
             end_ts_ms: db_window.end_ts_ms,
+            apply_to_paper: settings.deployment.apply_to_paper,
+            restart_paper_services: settings.deployment.restart_services,
+            apply_to_live: settings.deployment.apply_to_live,
+            restart_live_service: settings.deployment.restart_live_service,
+            live_yaml_path: resolve_under_project(
+                &paths.project_dir,
+                &settings.deployment.live_yaml_path,
+            )
+            .display()
+            .to_string(),
+            live_service: settings.deployment.live_service.clone(),
         },
         items: validated.to_vec(),
         selected_roles: selected.to_vec(),
@@ -1970,9 +2733,25 @@ fn build_gate_markdown(report: &GateReport) -> String {
 fn build_selection_markdown(report: &SelectionReport) -> String {
     let mut out = String::from("# Factory Selection\n\n");
     out.push_str(&format!(
-        "- Run: `{}`\n- Selection stage: `{}`\n- Gate status: `{}`\n\n",
-        report.run_id, report.selection_stage, report.step5_gate_status
+        "- Run: `{}`\n- Selection stage: `{}`\n- Gate status: `{}`\n- Promotion stage: `{}`\n\n",
+        report.run_id, report.selection_stage, report.step5_gate_status, report.promotion_stage
     ));
+    if let Some(gate) = &report.paper_promotion_gate {
+        out.push_str(&format!(
+            "- Paper promotion gate: `{}` ({:.1}h, {} close trades, PF {:.2}, DD {:.2}%)\n\n",
+            gate.status,
+            gate.runtime_hours,
+            gate.close_trades,
+            gate.profit_factor,
+            gate.max_drawdown_pct
+        ));
+    }
+    if let Some(live) = &report.live_promotion {
+        out.push_str(&format!(
+            "- Live promotion: `{}` via `{}`\n- Live YAML: `{}`\n- Deployment dir: `{}`\n\n",
+            live.status, live.live_service, live.live_yaml_path, live.deployment_dir
+        ));
+    }
     out.push_str("| Role | Config ID | Service |\n|---|---|---|\n");
     for item in &report.selected_candidates_by_role {
         out.push_str(&format!(
@@ -2010,11 +2789,7 @@ fn run_command(
 }
 
 fn restart_user_service(service: &str) -> Result<bool> {
-    let unit = if service.ends_with(".service") {
-        service.to_string()
-    } else {
-        format!("{service}.service")
-    };
+    let unit = service_unit_name(service);
     let output = Command::new("systemctl")
         .arg("--user")
         .arg("restart")
@@ -2029,6 +2804,52 @@ fn restart_user_service(service: &str) -> Result<bool> {
         );
     }
     Ok(true)
+}
+
+fn user_service_is_active(service: &str) -> Result<bool> {
+    let unit = service_unit_name(service);
+    let output = Command::new("systemctl")
+        .arg("--user")
+        .arg("is-active")
+        .arg(&unit)
+        .output()
+        .with_context(|| format!("query state for {unit}"))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let status = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        status.as_str(),
+        "inactive" | "failed" | "activating" | "deactivating"
+    ) {
+        return Ok(false);
+    }
+    if output.status.code() == Some(3) {
+        return Ok(false);
+    }
+    bail!(
+        "systemctl --user is-active {} failed: {}",
+        unit,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn should_restart_live_service_after_rollback(
+    restart_live_service: bool,
+    live_service_was_active: bool,
+) -> bool {
+    restart_live_service && live_service_was_active
+}
+
+fn service_unit_name(service: &str) -> String {
+    let trimmed = service.trim();
+    if trimmed.ends_with(".service") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.service")
+    }
 }
 
 fn restart_user_services(services: Vec<&str>) -> Result<()> {
@@ -2083,7 +2904,48 @@ fn rollback_target_snapshots(snapshots: &[TargetSnapshot]) -> Result<()> {
     Ok(())
 }
 
+fn atomic_write_text(path: &Path, text: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("invalid target path {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp = parent.join(format!(
+        ".{stem}.tmp.{}.{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+fn load_yaml_engine_interval(yaml_text: &str) -> String {
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml_text) {
+        Ok(value) => value,
+        Err(_) => return String::new(),
+    };
+    parsed
+        .get("global")
+        .and_then(|value| value.get("engine"))
+        .and_then(|value| value.get("interval"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn iso_utc_now() -> String {
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
     fs::write(
         path,
         serde_json::to_vec_pretty(value).context("serialise JSON artefact")?,
@@ -2128,6 +2990,84 @@ fn median(mut values: Vec<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_yaml(interval: &str) -> String {
+        format!(
+            "global:\n  engine:\n    interval: {interval}\n    entry_interval: 3m\n    exit_interval: 3m\n"
+        )
+    }
+
+    fn strategy_fingerprint_from_yaml(yaml: &str) -> String {
+        let raw_document: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let cfg = load_config_document_checked(&raw_document, None, false, None)
+            .map_err(|err| anyhow!(err))
+            .unwrap();
+        strategy_config_fingerprint_sha256(&cfg)
+    }
+
+    fn paper_promotion_db(project_dir: &Path) -> PathBuf {
+        project_dir.join(DEFAULT_PRIMARY_PAPER_DB_PATH)
+    }
+
+    fn create_paper_gate_schema(conn: &Connection) {
+        conn.execute_batch(
+            "
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT,
+                action TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                balance REAL
+            );
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                trade_id INTEGER,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                config_fingerprint TEXT,
+                run_fingerprint TEXT
+            );
+            CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY,
+                event TEXT,
+                level TEXT,
+                data_json TEXT,
+                run_fingerprint TEXT
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    fn insert_paper_fill(
+        conn: &Connection,
+        trade_id: i64,
+        timestamp: &str,
+        action: &str,
+        pnl: f64,
+        fee_usd: f64,
+        balance: f64,
+        config_fingerprint: &str,
+        run_fingerprint: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO trades (id, timestamp, action, pnl, fee_usd, balance) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![trade_id, timestamp, action, pnl, fee_usd, balance],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO decision_events (id, trade_id, event_type, status, config_fingerprint, run_fingerprint)
+             VALUES (?, ?, 'fill', 'executed', ?, ?)",
+            rusqlite::params![
+                format!("decision-{trade_id}"),
+                trade_id,
+                config_fingerprint,
+                run_fingerprint
+            ],
+        )
+        .unwrap();
+    }
 
     fn validation_item(mode: &str, config_id: &str, pnl: f64, pf: f64, dd: f64) -> ValidationItem {
         ValidationItem {
@@ -2278,5 +3218,431 @@ mod tests {
         let _lock = acquire_factory_lock(dir.path()).unwrap();
         let err = acquire_factory_lock(dir.path()).unwrap_err();
         assert!(err.to_string().contains("factory cycle already running"));
+    }
+
+    #[test]
+    fn validate_factory_defaults_requires_primary_when_live_promotion_is_on() {
+        let mut settings = FactoryDefaults::default();
+        settings.deployment.apply_to_live = true;
+        settings.selection.selected_roles = vec!["fallback".to_string()];
+        let err = validate_factory_defaults(&settings).unwrap_err();
+        assert!(err.to_string().contains("requires `primary` to be present"));
+    }
+
+    #[test]
+    fn promote_primary_live_updates_live_yaml_and_writes_deploy_artefacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let artifacts_root = project_dir.join("artifacts");
+        let run_dir = artifacts_root.join("2026-03-14").join("run_nightly_test");
+        fs::create_dir_all(run_dir.join("promoted_configs")).unwrap();
+
+        let live_yaml = project_dir
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        fs::create_dir_all(live_yaml.parent().unwrap()).unwrap();
+        fs::write(&live_yaml, config_yaml("30m")).unwrap();
+
+        let source_config = run_dir.join("configs").join("candidate_primary.yaml");
+        fs::create_dir_all(source_config.parent().unwrap()).unwrap();
+        fs::write(&source_config, config_yaml("30m")).unwrap();
+
+        let promoted_config = run_dir.join("promoted_configs").join("primary.yaml");
+        fs::write(&promoted_config, config_yaml("30m")).unwrap();
+
+        let validated = vec![ValidationItem {
+            config_path: source_config.display().to_string(),
+            ..validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)
+        }];
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: "cfg-primary".to_string(),
+        }];
+        let paper_deployments = vec![DeploymentEvent {
+            role: "primary".to_string(),
+            slot: 1,
+            source_config_path: source_config.display().to_string(),
+            config_id: "cfg-primary".to_string(),
+            config_sha256: "cfg-primary".to_string(),
+            promoted_config_path: promoted_config.display().to_string(),
+            target_yaml_path: project_dir
+                .join("config")
+                .join("strategy_overrides.paper1.yaml")
+                .display()
+                .to_string(),
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            soak_marker_path: None,
+            restarted_service: false,
+            status: "applied".to_string(),
+        }];
+        let deployment = DeploymentSettings {
+            apply_to_paper: true,
+            restart_services: false,
+            apply_to_live: true,
+            restart_live_service: false,
+            live_yaml_path: PathBuf::from("config/strategy_overrides.live.yaml"),
+            live_service: "openclaw-ai-quant-live-v8".to_string(),
+        };
+
+        let event = promote_primary_live(
+            project_dir,
+            &artifacts_root,
+            &run_dir,
+            &validated,
+            &selected,
+            &paper_deployments,
+            &deployment,
+        )
+        .unwrap();
+
+        assert_eq!(event.role, "primary");
+        assert_eq!(event.status, "applied");
+        assert!(!event.service_was_active_before);
+        assert!(!event.restarted_service);
+        assert_eq!(fs::read_to_string(&live_yaml).unwrap(), config_yaml("30m"));
+        assert!(Path::new(&event.deployment_dir)
+            .join("promoted_config.yaml")
+            .is_file());
+        assert!(Path::new(&event.deployment_dir)
+            .join("prev_config.yaml")
+            .is_file());
+        assert!(Path::new(&event.deployment_dir)
+            .join("promotion_event.json")
+            .is_file());
+    }
+
+    #[test]
+    fn rollback_only_restarts_live_service_when_it_was_previously_active() {
+        assert!(!should_restart_live_service_after_rollback(true, false));
+        assert!(!should_restart_live_service_after_rollback(false, true));
+        assert!(should_restart_live_service_after_rollback(true, true));
+    }
+
+    #[test]
+    fn paper_promotion_gate_blocks_without_runtime_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = paper_promotion_db(dir.path());
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+
+        let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        let gate = assess_paper_promotion_gate(&db_path, &candidate, None).unwrap();
+        assert_eq!(gate.status, "blocked");
+        assert!(gate
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("no paper fill evidence")));
+    }
+
+    #[test]
+    fn paper_promotion_gate_passes_with_soaked_primary_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = paper_promotion_db(dir.path());
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+
+        let mut candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        candidate.config_sha256 = "ephemeral-file-sha".to_string();
+        let config_id = candidate.config_id.clone();
+        insert_paper_fill(
+            &conn,
+            1,
+            "2026-03-01T00:00:00Z",
+            "CLOSE",
+            15.0,
+            0.5,
+            10_050.0,
+            &config_id,
+            "run-1",
+        );
+        insert_paper_fill(
+            &conn,
+            2,
+            "2026-03-02T01:30:00Z",
+            "CLOSE",
+            8.0,
+            0.5,
+            10_120.0,
+            &config_id,
+            "run-1",
+        );
+
+        let gate = assess_paper_promotion_gate(&db_path, &candidate, None).unwrap();
+        assert_eq!(gate.status, "pass");
+        assert!(gate.runtime_hours >= 24.0);
+        assert_eq!(gate.close_trades, 2);
+        assert_eq!(gate.kill_switch_events, 0);
+    }
+
+    #[test]
+    fn paper_promotion_gate_uses_current_soak_window_after_redeploy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = paper_promotion_db(dir.path());
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+
+        let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        let config_fingerprint = candidate.config_id.clone();
+        insert_paper_fill(
+            &conn,
+            1,
+            "2026-03-01T00:00:00Z",
+            "CLOSE",
+            15.0,
+            0.5,
+            10_050.0,
+            &config_fingerprint,
+            "run-old",
+        );
+        insert_paper_fill(
+            &conn,
+            2,
+            "2026-03-02T01:30:00Z",
+            "CLOSE",
+            8.0,
+            0.5,
+            10_120.0,
+            &config_fingerprint,
+            "run-old",
+        );
+
+        let redeploy_after_ms = parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap();
+        let gate =
+            assess_paper_promotion_gate(&db_path, &candidate, Some(redeploy_after_ms)).unwrap();
+        assert_eq!(gate.status, "blocked");
+        assert_eq!(gate.close_trades, 0);
+        assert!(gate
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("no paper fill evidence")));
+    }
+
+    #[test]
+    fn primary_soak_marker_identity_uses_stable_config_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let db_path = paper_promotion_db(project_dir);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+
+        let mut candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        candidate.config_sha256 = "new-file-sha".to_string();
+        insert_paper_fill(
+            &conn,
+            1,
+            "2026-03-03T00:00:00Z",
+            "CLOSE",
+            15.0,
+            0.5,
+            10_050.0,
+            &candidate.config_id,
+            "run-current",
+        );
+        insert_paper_fill(
+            &conn,
+            2,
+            "2026-03-04T01:30:00Z",
+            "CLOSE",
+            8.0,
+            0.5,
+            10_120.0,
+            &candidate.config_id,
+            "run-current",
+        );
+
+        let marker = PaperSoakMarker {
+            version: "factory_paper_soak_v1".to_string(),
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            paper_db_path: db_path.display().to_string(),
+            config_id: candidate.config_id.clone(),
+            config_sha256: "old-file-sha".to_string(),
+            deployed_at_ms: parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap(),
+            deployed_by_run_id: "run-123".to_string(),
+            source_config_path: "/tmp/source.yaml".to_string(),
+            target_yaml_path: project_dir
+                .join("config")
+                .join("strategy_overrides.paper1.yaml")
+                .display()
+                .to_string(),
+        };
+        write_json(&paper_soak_marker_path(project_dir, "primary"), &marker).unwrap();
+
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: candidate.config_id.clone(),
+        }];
+        let gate = assess_primary_paper_promotion_gate(
+            project_dir,
+            &SelectionSettings::default(),
+            &[candidate],
+            &selected,
+        )
+        .unwrap();
+        assert_eq!(gate.status, "pass");
+    }
+
+    #[test]
+    fn deploy_selected_configs_preserves_existing_soak_marker_for_same_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let run_dir = project_dir
+            .join("artifacts")
+            .join("2026-03-14")
+            .join("run_test");
+        fs::create_dir_all(run_dir.join("promoted_configs")).unwrap();
+
+        let yaml = config_yaml("30m");
+        let config_id = strategy_fingerprint_from_yaml(&yaml);
+        let source_config = run_dir.join("configs").join("candidate_primary.yaml");
+        fs::create_dir_all(source_config.parent().unwrap()).unwrap();
+        fs::write(&source_config, &yaml).unwrap();
+
+        let target_yaml = project_dir
+            .join("config")
+            .join("strategy_overrides.paper1.yaml");
+        fs::create_dir_all(target_yaml.parent().unwrap()).unwrap();
+        fs::write(&target_yaml, &yaml).unwrap();
+
+        let old_marker = PaperSoakMarker {
+            version: "factory_paper_soak_v1".to_string(),
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            paper_db_path: paper_promotion_db(project_dir).display().to_string(),
+            config_id: config_id.clone(),
+            config_sha256: "old-file-sha".to_string(),
+            deployed_at_ms: 111,
+            deployed_by_run_id: "old-run".to_string(),
+            source_config_path: "/tmp/source.yaml".to_string(),
+            target_yaml_path: target_yaml.display().to_string(),
+        };
+        write_json(&paper_soak_marker_path(project_dir, "primary"), &old_marker).unwrap();
+
+        let mut candidate = validation_item("efficient", &config_id, 100.0, 1.2, 0.3);
+        candidate.config_path = source_config.display().to_string();
+        candidate.config_id = config_id.clone();
+        candidate.config_sha256 = "new-file-sha".to_string();
+
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: config_id.clone(),
+        }];
+        let events = deploy_selected_configs(
+            project_dir,
+            "run-new",
+            &run_dir,
+            &[candidate],
+            &selected,
+            &SelectionSettings::default(),
+            &DeploymentSettings {
+                apply_to_paper: true,
+                restart_services: false,
+                apply_to_live: false,
+                restart_live_service: false,
+                live_yaml_path: PathBuf::from(DEFAULT_LIVE_YAML_PATH),
+                live_service: DEFAULT_LIVE_SERVICE.to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, "already_applied");
+        let marker = load_paper_soak_marker(project_dir, "primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.deployed_at_ms, 111);
+        assert_eq!(marker.deployed_by_run_id, "old-run");
+    }
+
+    #[test]
+    fn primary_soak_marker_must_match_full_target_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let db_path = paper_promotion_db(project_dir);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        create_paper_gate_schema(&conn);
+
+        let candidate = validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3);
+        insert_paper_fill(
+            &conn,
+            1,
+            "2026-03-03T00:00:00Z",
+            "CLOSE",
+            15.0,
+            0.5,
+            10_050.0,
+            &candidate.config_id,
+            "run-current",
+        );
+        insert_paper_fill(
+            &conn,
+            2,
+            "2026-03-04T01:30:00Z",
+            "CLOSE",
+            8.0,
+            0.5,
+            10_120.0,
+            &candidate.config_id,
+            "run-current",
+        );
+
+        let marker = PaperSoakMarker {
+            version: "factory_paper_soak_v1".to_string(),
+            role: "primary".to_string(),
+            slot: 2,
+            service: "openclaw-ai-quant-trader-v8-paper2".to_string(),
+            paper_db_path: db_path.display().to_string(),
+            config_id: candidate.config_id.clone(),
+            config_sha256: "old-file-sha".to_string(),
+            deployed_at_ms: parse_trade_timestamp_ms("2026-03-03T00:00:00Z").unwrap(),
+            deployed_by_run_id: "run-123".to_string(),
+            source_config_path: "/tmp/source.yaml".to_string(),
+            target_yaml_path: project_dir
+                .join("config")
+                .join("strategy_overrides.paper2.yaml")
+                .display()
+                .to_string(),
+        };
+        write_json(&paper_soak_marker_path(project_dir, "primary"), &marker).unwrap();
+
+        let selected = vec![SelectionCandidate {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "openclaw-ai-quant-trader-v8-paper1".to_string(),
+            source: "promotion_roles".to_string(),
+            selected: true,
+            config_id: candidate.config_id.clone(),
+        }];
+        let gate = assess_primary_paper_promotion_gate(
+            project_dir,
+            &SelectionSettings::default(),
+            &[candidate],
+            &selected,
+        )
+        .unwrap();
+        assert_eq!(gate.status, "blocked");
+        assert!(gate
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("no longer matches slot/service/yaml target")));
     }
 }

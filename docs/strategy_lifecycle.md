@@ -4,10 +4,9 @@ Defines the states a trading config passes through from generation to
 retirement, the transitions between them, and the measurable triggers that
 cause each transition.
 
-The lifecycle remains valid even though the historical factory automation path
-is dormant by default. Candidate generation, validation, paper rollout, and
-promotion may currently be driven by operator workflows, with the dormant
-factory contract reserved for future reactivation.
+The lifecycle is implemented by the Rust-owned factory cycle. Candidate
+generation, validation, paper rollout, and live promotion now share the same
+factory contract and artefact trail.
 
 ## States
 
@@ -191,4 +190,4 @@ Every state transition writes a record with:
 
 - [Success Metrics & Guardrails](success_metrics.md) — thresholds referenced by transitions
 - [Operations Runbook](runbook.md) — emergency stop, rollback, and diagnostics
-- [Architecture](ARCHITECTURE.md) — runtime, backtester, and dormant factory contract
+- [Architecture](ARCHITECTURE.md) — runtime, backtester, and Rust factory contract
