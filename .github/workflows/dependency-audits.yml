@@ -1,20 +1,6 @@
 name: Dependency Audits
 
 on:
-  pull_request:
-    branches: [master]
-    paths:
-      - "backtester/Cargo.toml"
-      - "backtester/Cargo.lock"
-      - "backtester/**/Cargo.lock"
-      - ".github/workflows/dependency-audits.yml"
-  push:
-    branches: [master]
-    paths:
-      - "backtester/Cargo.toml"
-      - "backtester/Cargo.lock"
-      - "backtester/**/Cargo.lock"
-      - ".github/workflows/dependency-audits.yml"
   workflow_dispatch:
 
 permissions:

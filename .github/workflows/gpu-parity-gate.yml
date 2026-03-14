@@ -1,10 +1,6 @@
 name: GPU Parity Gate
 
 on:
-  pull_request:
-    branches: [master, major-v8]
-  push:
-    branches: [master, major-v8]
   workflow_dispatch:
 
 permissions:

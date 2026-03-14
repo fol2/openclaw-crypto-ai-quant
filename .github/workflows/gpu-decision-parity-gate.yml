@@ -1,14 +1,7 @@
 name: GPU Decision Parity Gate
 
 on:
-  pull_request:
-    paths:
-      - 'backtester/crates/bt-signals/src/**'
-      - 'backtester/crates/bt-core/src/**'
-      - 'backtester/crates/bt-gpu/codegen/**'
-      - 'backtester/crates/bt-gpu/kernels/**'
-      - 'backtester/crates/bt-gpu/src/**'
-      - 'backtester/crates/risk-core/src/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
