@@ -1755,7 +1755,6 @@ pub fn cancel_order(
             )?;
             return Err(HubError::BadRequest(response_text));
         }
-        update_manual_cancel_request(&conn, &request_id, "CANCELLED", None, Some(&response))?;
         record_manual_cancel_audit(
             &mut conn,
             cancel_context.as_ref(),
@@ -1778,6 +1777,7 @@ pub fn cancel_order(
                 raw_json: response_text.clone(),
             },
         )?;
+        update_manual_cancel_request(&conn, &request_id, "CANCELLED", None, Some(&response))?;
         write_manual_runtime_log(
             &conn,
             "INFO",
@@ -1963,7 +1963,6 @@ pub fn cancel_order(
             )?;
             return Err(HubError::BadRequest(response_text));
         }
-        update_manual_cancel_request(&conn, &request_id, "CANCELLED", None, Some(&response))?;
         record_manual_cancel_audit(
             &mut conn,
             Some(&cancel_context),
@@ -1980,6 +1979,7 @@ pub fn cancel_order(
                 raw_json: response_text.clone(),
             },
         )?;
+        update_manual_cancel_request(&conn, &request_id, "CANCELLED", None, Some(&response))?;
         write_manual_runtime_log(
             &conn,
             "INFO",
