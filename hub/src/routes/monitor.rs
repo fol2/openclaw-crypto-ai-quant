@@ -17,6 +17,9 @@ use crate::heartbeat::Heartbeat;
 use crate::hyperliquid::HlPositionSnapshot;
 use crate::state::AppState;
 
+const HL_SNAPSHOT_STALE_SECS: u64 = 60;
+const DB_SYNC_STALE_MS: i64 = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -72,6 +75,205 @@ fn redacted_recent_audit_events(events: Vec<Value>) -> Vec<Value> {
             Value::Object(obj)
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct ExchangeObservation {
+    source: &'static str,
+    as_of_ts_ms: i64,
+    as_of: String,
+    age_ms: i64,
+    equity_usd: f64,
+    withdrawable_usd: f64,
+    margin_used_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+struct LiveDataStatus {
+    source: &'static str,
+    as_of_ts_ms: Option<i64>,
+    as_of: Option<String>,
+    age_ms: Option<i64>,
+    freshness: &'static str,
+    reconciliation_status: &'static str,
+    fallback_source: Option<&'static str>,
+    fallback_as_of_ts_ms: Option<i64>,
+    fallback_as_of: Option<String>,
+    fallback_age_ms: Option<i64>,
+    fallback_freshness: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveObservationBundle {
+    current: Option<ExchangeObservation>,
+    fallback: Option<ExchangeObservation>,
+    live_positions: HashMap<String, HlPositionSnapshot>,
+    live_snapshot_authoritative: bool,
+}
+
+fn format_ts_ms(ts_ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ts_ms).map(|dt| dt.to_rfc3339())
+}
+
+fn exchange_observation_from_hl(
+    snapshot: &crate::hyperliquid::HlAccountSnapshot,
+    fetched_at_ms: i64,
+    now_ms: i64,
+) -> ExchangeObservation {
+    let age_ms = now_ms.saturating_sub(fetched_at_ms).max(0);
+    ExchangeObservation {
+        source: "hyperliquid_cache",
+        as_of_ts_ms: fetched_at_ms,
+        as_of: format_ts_ms(fetched_at_ms).unwrap_or_else(|| fetched_at_ms.to_string()),
+        age_ms,
+        equity_usd: snapshot.account_value,
+        withdrawable_usd: snapshot.withdrawable,
+        margin_used_usd: snapshot.total_margin_used,
+    }
+}
+
+fn exchange_observation_from_db(
+    snapshot: &trading::RuntimeAccountSnapshot,
+    now_ms: i64,
+) -> ExchangeObservation {
+    ExchangeObservation {
+        source: "db_exchange_snapshot",
+        as_of_ts_ms: snapshot.ts_ms,
+        as_of: snapshot.timestamp.clone(),
+        age_ms: now_ms.saturating_sub(snapshot.ts_ms).max(0),
+        equity_usd: snapshot.account_value_usd,
+        withdrawable_usd: snapshot.withdrawable_usd,
+        margin_used_usd: snapshot.total_margin_used_usd,
+    }
+}
+
+fn current_reconciliation_status(source: &str) -> &'static str {
+    match source {
+        "hyperliquid_cache" => "exchange_observed_unreconciled",
+        "db_exchange_snapshot" => "snapshot_backed_unreconciled",
+        _ => "exchange_observed_unreconciled",
+    }
+}
+
+fn build_live_data_status(
+    mode: &str,
+    current: Option<&ExchangeObservation>,
+    fallback: Option<&ExchangeObservation>,
+) -> LiveDataStatus {
+    if mode != "live" {
+        return LiveDataStatus {
+            source: "paper_estimate",
+            as_of_ts_ms: None,
+            as_of: None,
+            age_ms: None,
+            freshness: "paper",
+            reconciliation_status: "paper_estimate",
+            fallback_source: None,
+            fallback_as_of_ts_ms: None,
+            fallback_as_of: None,
+            fallback_age_ms: None,
+            fallback_freshness: None,
+        };
+    }
+
+    if let Some(observation) = current {
+        return LiveDataStatus {
+            source: observation.source,
+            as_of_ts_ms: Some(observation.as_of_ts_ms),
+            as_of: Some(observation.as_of.clone()),
+            age_ms: Some(observation.age_ms),
+            freshness: "current",
+            reconciliation_status: current_reconciliation_status(observation.source),
+            fallback_source: None,
+            fallback_as_of_ts_ms: None,
+            fallback_as_of: None,
+            fallback_age_ms: None,
+            fallback_freshness: None,
+        };
+    }
+
+    LiveDataStatus {
+        source: "ledger_projection",
+        as_of_ts_ms: None,
+        as_of: None,
+        age_ms: None,
+        freshness: "derived",
+        reconciliation_status: if fallback.is_some() {
+            "degraded_last_known_good_only"
+        } else {
+            "no_current_exchange_observation"
+        },
+        fallback_source: fallback.map(|observation| observation.source),
+        fallback_as_of_ts_ms: fallback.map(|observation| observation.as_of_ts_ms),
+        fallback_as_of: fallback.map(|observation| observation.as_of.clone()),
+        fallback_age_ms: fallback.map(|observation| observation.age_ms),
+        fallback_freshness: fallback.map(|_| "stale"),
+    }
+}
+
+fn build_live_observation_bundle(
+    mode: &str,
+    now_ms: i64,
+    hl_snapshot: Option<(crate::hyperliquid::HlAccountSnapshot, i64)>,
+    db_live_snapshot: Option<trading::RuntimeAccountSnapshot>,
+    db_positions: Vec<trading::RuntimeExchangePositionSnapshot>,
+) -> LiveObservationBundle {
+    if mode != "live" {
+        return LiveObservationBundle {
+            current: None,
+            fallback: None,
+            live_positions: HashMap::new(),
+            live_snapshot_authoritative: false,
+        };
+    }
+
+    let mut fresh_hl_observation: Option<ExchangeObservation> = None;
+    let mut stale_hl_observation: Option<ExchangeObservation> = None;
+    let mut fresh_hl_snapshot = None;
+    if let Some((snapshot, fetched_at_ms)) = hl_snapshot {
+        let observation = exchange_observation_from_hl(&snapshot, fetched_at_ms, now_ms);
+        if observation.age_ms <= (HL_SNAPSHOT_STALE_SECS as i64 * 1_000) {
+            fresh_hl_snapshot = Some(snapshot);
+            fresh_hl_observation = Some(observation);
+        } else {
+            stale_hl_observation = Some(observation);
+        }
+    }
+
+    let (fresh_db_observation, stale_db_observation) =
+        if let Some(snapshot) = db_live_snapshot.as_ref() {
+            let observation = exchange_observation_from_db(snapshot, now_ms);
+            if observation.age_ms <= DB_SYNC_STALE_MS {
+                (Some(observation), None)
+            } else {
+                (None, Some(observation))
+            }
+        } else {
+            (None, None)
+        };
+
+    let current = fresh_hl_observation
+        .clone()
+        .or(fresh_db_observation.clone());
+    let fallback = if current.is_some() {
+        None
+    } else {
+        stale_hl_observation.or(stale_db_observation)
+    };
+    let live_positions = if let Some(ref hl_snapshot) = fresh_hl_snapshot {
+        live_position_overrides(mode, Some(hl_snapshot))
+    } else if fresh_db_observation.is_some() {
+        live_position_overrides_from_db(mode, &db_positions)
+    } else {
+        HashMap::new()
+    };
+
+    LiveObservationBundle {
+        current,
+        fallback,
+        live_positions,
+        live_snapshot_authoritative: fresh_hl_snapshot.is_some() || fresh_db_observation.is_some(),
+    }
 }
 
 // ── Query params ─────────────────────────────────────────────────────────
@@ -357,6 +559,7 @@ fn position_json(
     position: &trading::OpenPosition,
     live_override: Option<&HlPositionSnapshot>,
     unreal_pnl: Option<f64>,
+    holdings_status: &LiveDataStatus,
 ) -> Value {
     json!({
         "symbol": position.symbol,
@@ -370,6 +573,11 @@ fn position_json(
         "confidence": position.confidence,
         "entry_atr": position.entry_atr,
         "unreal_pnl_est": unreal_pnl,
+        "source": holdings_status.source,
+        "as_of_ts_ms": holdings_status.as_of_ts_ms,
+        "as_of": holdings_status.as_of,
+        "freshness": holdings_status.freshness,
+        "reconciliation_status": holdings_status.reconciliation_status,
     })
 }
 
@@ -473,23 +681,15 @@ async fn api_snapshot(
 
     let symbols = trading::list_recent_symbols(&conn, candle_conn.as_deref(), interval, ts, 200)?;
 
-    // Balance — prefer HL API snapshot for live mode, fall back to DB.
+    // Balance and holdings truth sources.
     let bal = trading::latest_balance(&conn)?;
     let db_realised_usd = bal.as_ref().map(|(b, _)| *b);
     let realised_asof = bal.as_ref().and_then(|(_, ts)| ts.clone());
-
-    // Staleness threshold: if HL snapshot is older than 60s, consider it stale.
-    const HL_STALE_SECS: u64 = 60;
-
-    let hl_snap = if mode == "live" {
+    let hl_snapshot = if mode == "live" {
         let guard = state.hl_snapshot.read().await;
-        guard.as_ref().and_then(|cached| {
-            if cached.fetched_at.elapsed().as_secs() <= HL_STALE_SECS {
-                Some(cached.snapshot.clone())
-            } else {
-                None
-            }
-        })
+        guard
+            .as_ref()
+            .map(|cached| (cached.snapshot.clone(), cached.fetched_at_ms))
     } else {
         None
     };
@@ -498,24 +698,21 @@ async fn api_snapshot(
     } else {
         None
     };
-    let db_live_positions = if mode == "live" {
+    let db_positions = if mode == "live" {
         trading::runtime_exchange_positions(&conn)?
     } else {
         Vec::new()
     };
-    const DB_SYNC_STALE_MS: i64 = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
-    let db_live_snapshot_fresh = db_live_snapshot
-        .as_ref()
-        .map(|snapshot| ts.saturating_sub(snapshot.ts_ms) <= DB_SYNC_STALE_MS)
-        .unwrap_or(false);
-    let live_positions = if let Some(ref hl) = hl_snap {
-        live_position_overrides(mode.as_str(), Some(hl))
-    } else if db_live_snapshot_fresh {
-        live_position_overrides_from_db(mode.as_str(), &db_live_positions)
-    } else {
-        HashMap::new()
-    };
-    let live_snapshot_authoritative = hl_snap.is_some() || db_live_snapshot_fresh;
+    let observation_bundle =
+        build_live_observation_bundle(&mode, ts, hl_snapshot, db_live_snapshot, db_positions);
+    let balance_status = build_live_data_status(
+        &mode,
+        observation_bundle.current.as_ref(),
+        observation_bundle.fallback.as_ref(),
+    );
+    let holdings_status = balance_status.clone();
+    let live_positions = observation_bundle.live_positions.clone();
+    let live_snapshot_authoritative = observation_bundle.live_snapshot_authoritative;
     let positions = merge_positions_with_live_snapshot(
         &ledger_positions,
         &live_positions,
@@ -597,7 +794,7 @@ async fn api_snapshot(
 
         let position_out = pos.map(|p| {
             let live_override = live_position_override_for(p, &live_positions);
-            position_json(p, live_override, unreal_pnl)
+            position_json(p, live_override, unreal_pnl, &holdings_status)
         });
 
         symbols_out.push(json!({
@@ -614,43 +811,26 @@ async fn api_snapshot(
         .iter()
         .map(|position| {
             let live_override = live_position_override_for(position, &live_positions);
-            position_json(position, live_override, None)
+            position_json(position, live_override, None, &holdings_status)
         })
         .collect::<Vec<_>>();
-
-    let (realised_usd, equity_est, unreal_pnl_out, margin_used_out, balance_source) =
-        if let Some(ref hl) = hl_snap {
-            // HL account_value is equity (includes unrealised PnL).
-            let unreal = hl.account_value - hl.withdrawable;
-            (
-                Some(hl.account_value),
-                Some(hl.account_value),
-                unreal,
-                hl.total_margin_used,
-                "hyperliquid",
-            )
-        } else if let Some(snapshot) = db_live_snapshot.filter(|_| db_live_snapshot_fresh) {
-            let unreal = snapshot.account_value_usd - snapshot.withdrawable_usd;
-            (
-                Some(snapshot.account_value_usd),
-                Some(snapshot.account_value_usd),
-                unreal,
-                snapshot.total_margin_used_usd,
-                "db_exchange_snapshot",
-            )
-        } else {
-            (
-                db_realised_usd,
-                db_realised_usd.map(|r| r + unreal_total - close_fee_total),
-                unreal_total,
-                margin_used_total,
-                if mode == "live" {
-                    "db_snapshot"
-                } else {
-                    "paper_estimate"
-                },
-            )
-        };
+    let current_observation = observation_bundle.current.as_ref();
+    let fallback_observation = observation_bundle.fallback.as_ref();
+    let exchange_equity_usd = current_observation.map(|observation| observation.equity_usd);
+    let exchange_withdrawable_usd =
+        current_observation.map(|observation| observation.withdrawable_usd);
+    let exchange_margin_used_usd =
+        current_observation.map(|observation| observation.margin_used_usd);
+    let fallback_equity_usd = fallback_observation.map(|observation| observation.equity_usd);
+    let fallback_withdrawable_usd =
+        fallback_observation.map(|observation| observation.withdrawable_usd);
+    let fallback_margin_used_usd =
+        fallback_observation.map(|observation| observation.margin_used_usd);
+    let realised_cash_usd = db_realised_usd;
+    let equity_est = exchange_equity_usd
+        .or_else(|| db_realised_usd.map(|realised| realised + unreal_total - close_fee_total));
+    let unreal_pnl_out = unreal_total;
+    let margin_used_out = exchange_margin_used_usd.unwrap_or(margin_used_total);
 
     // Recent data
     let recent_trades = trading::recent_trades(&conn, 60)?;
@@ -690,15 +870,54 @@ async fn api_snapshot(
             "live_service": state.config.live_service,
         },
         "balances": {
-            "balance_source": balance_source,
-            "realised_usd": realised_usd,
+            "balance_source": balance_status.source,
+            "source": balance_status.source,
+            "as_of_ts_ms": balance_status.as_of_ts_ms,
+            "as_of": balance_status.as_of,
+            "age_ms": balance_status.age_ms,
+            "freshness": balance_status.freshness,
+            "reconciliation_status": balance_status.reconciliation_status,
+            "fallback_source": balance_status.fallback_source,
+            "fallback_as_of_ts_ms": balance_status.fallback_as_of_ts_ms,
+            "fallback_as_of": balance_status.fallback_as_of,
+            "fallback_age_ms": balance_status.fallback_age_ms,
+            "fallback_freshness": balance_status.fallback_freshness,
+            "realised_usd": realised_cash_usd,
+            "realised_cash_usd": realised_cash_usd,
             "realised_asof": realised_asof,
+            "realised_cash_source": if mode == "live" { "trade_ledger_legacy" } else { "trade_ledger" },
+            "realised_cash_status": if mode == "live" {
+                "legacy_trade_balance_untrusted"
+            } else {
+                "trade_ledger_projection"
+            },
             "equity_est_usd": equity_est,
+            "exchange_equity_usd": exchange_equity_usd,
+            "exchange_withdrawable_usd": exchange_withdrawable_usd,
+            "exchange_margin_used_usd": exchange_margin_used_usd,
+            "last_known_exchange_equity_usd": fallback_equity_usd,
+            "last_known_exchange_withdrawable_usd": fallback_withdrawable_usd,
+            "last_known_exchange_margin_used_usd": fallback_margin_used_usd,
             "unreal_pnl_est_usd": unreal_pnl_out,
             "est_close_fees_usd": close_fee_total,
             "margin_used_est_usd": if mode == "live" { Some(margin_used_out) } else { None::<f64> },
             "db_realised_usd": db_realised_usd,
             "fee_rate": fee_rate,
+        },
+        "holdings": {
+            "source": holdings_status.source,
+            "as_of_ts_ms": holdings_status.as_of_ts_ms,
+            "as_of": holdings_status.as_of,
+            "age_ms": holdings_status.age_ms,
+            "freshness": holdings_status.freshness,
+            "reconciliation_status": holdings_status.reconciliation_status,
+            "fallback_source": holdings_status.fallback_source,
+            "fallback_as_of_ts_ms": holdings_status.fallback_as_of_ts_ms,
+            "fallback_as_of": holdings_status.fallback_as_of,
+            "fallback_age_ms": holdings_status.fallback_age_ms,
+            "fallback_freshness": holdings_status.fallback_freshness,
+            "position_count": open_positions_out.len(),
+            "live_snapshot_authoritative": live_snapshot_authoritative,
         },
         "daily": daily,
         "since_config": since_config.as_ref().map(|m| json!({
@@ -825,15 +1044,12 @@ async fn api_marks(
         .ok()
         .and_then(|s| s.mids.get(&sym).copied());
 
-    let hl_snap = if mode == "live" {
+    let observation_now_ms = now_ms();
+    let hl_snapshot = if mode == "live" {
         let guard = state.hl_snapshot.read().await;
-        guard.as_ref().and_then(|cached| {
-            if cached.fetched_at.elapsed().as_secs() <= 60 {
-                Some(cached.snapshot.clone())
-            } else {
-                None
-            }
-        })
+        guard
+            .as_ref()
+            .map(|cached| (cached.snapshot.clone(), cached.fetched_at_ms))
     } else {
         None
     };
@@ -842,27 +1058,30 @@ async fn api_marks(
     } else {
         None
     };
-    let db_live_positions = if mode == "live" {
+    let db_positions = if mode == "live" {
         trading::runtime_exchange_positions(&conn)?
     } else {
         Vec::new()
     };
-    const DB_SYNC_STALE_MS: i64 = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
-    let db_live_snapshot_fresh = db_live_snapshot
-        .as_ref()
-        .map(|snapshot| now_ms().saturating_sub(snapshot.ts_ms) <= DB_SYNC_STALE_MS)
-        .unwrap_or(false);
-    let live_positions = if let Some(ref hl) = hl_snap {
-        live_position_overrides(mode.as_str(), Some(hl))
-    } else if db_live_snapshot_fresh {
-        live_position_overrides_from_db(mode.as_str(), &db_live_positions)
-    } else {
-        HashMap::new()
-    };
-    let live_snapshot_authoritative = hl_snap.is_some() || db_live_snapshot_fresh;
+    let observation_bundle = build_live_observation_bundle(
+        &mode,
+        observation_now_ms,
+        hl_snapshot,
+        db_live_snapshot,
+        db_positions,
+    );
+    let holdings_status = build_live_data_status(
+        &mode,
+        observation_bundle.current.as_ref(),
+        observation_bundle.fallback.as_ref(),
+    );
+    let live_positions = observation_bundle.live_positions;
+    let live_snapshot_authoritative = observation_bundle.live_snapshot_authoritative;
     let pos = if live_snapshot_authoritative {
         match (ledger_pos, live_positions.get(&sym)) {
-            (Some(mut ledger), Some(live)) if live.pos_type.eq_ignore_ascii_case(&ledger.pos_type) => {
+            (Some(mut ledger), Some(live))
+                if live.pos_type.eq_ignore_ascii_case(&ledger.pos_type) =>
+            {
                 ledger.entry_price = live.entry_price;
                 ledger.size = live.size;
                 ledger.leverage = live.leverage.max(0.01);
@@ -893,15 +1112,28 @@ async fn api_marks(
                 (entry_price - m) * size
             }
         });
-        position_json(p, live_override, unreal_pnl)
+        position_json(p, live_override, unreal_pnl, &holdings_status)
     });
 
     Ok(Json(json!({
         "ok": true,
-        "now_ts_ms": now_ms(),
+        "now_ts_ms": observation_now_ms,
         "mode": mode,
         "symbol": sym,
         "mid": mid,
+        "holdings": {
+            "source": holdings_status.source,
+            "as_of_ts_ms": holdings_status.as_of_ts_ms,
+            "as_of": holdings_status.as_of,
+            "age_ms": holdings_status.age_ms,
+            "freshness": holdings_status.freshness,
+            "reconciliation_status": holdings_status.reconciliation_status,
+            "fallback_source": holdings_status.fallback_source,
+            "fallback_as_of_ts_ms": holdings_status.fallback_as_of_ts_ms,
+            "fallback_as_of": holdings_status.fallback_as_of,
+            "fallback_age_ms": holdings_status.fallback_age_ms,
+            "fallback_freshness": holdings_status.fallback_freshness,
+        },
         "position": position_json,
         "entries": entries,
     })))
@@ -1285,6 +1517,155 @@ mod tests {
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
+
+    fn sample_hl_snapshot() -> crate::hyperliquid::HlAccountSnapshot {
+        crate::hyperliquid::HlAccountSnapshot {
+            account_value: 1_250.0,
+            withdrawable: 900.0,
+            total_margin_used: 350.0,
+            positions: vec![crate::hyperliquid::HlPositionSnapshot {
+                symbol: "DOGE".to_string(),
+                pos_type: "LONG".to_string(),
+                size: 10_000.0,
+                entry_price: 0.1,
+                leverage: 5.0,
+                margin_used: 200.0,
+            }],
+        }
+    }
+
+    fn sample_db_snapshot(ts_ms: i64) -> trading::RuntimeAccountSnapshot {
+        trading::RuntimeAccountSnapshot {
+            ts_ms,
+            timestamp: "2026-03-14T12:00:00+00:00".to_string(),
+            account_value_usd: 800.0,
+            withdrawable_usd: 500.0,
+            total_margin_used_usd: 300.0,
+            source: Some("sync-fills".to_string()),
+        }
+    }
+
+    fn sample_db_positions() -> Vec<trading::RuntimeExchangePositionSnapshot> {
+        vec![trading::RuntimeExchangePositionSnapshot {
+            symbol: "DOGE".to_string(),
+            pos_type: "LONG".to_string(),
+            size: 9_500.0,
+            entry_price: 0.11,
+            leverage: 4.0,
+            margin_used: 240.0,
+            ts_ms: 1_710_000_000_000,
+            updated_at: "2026-03-14T12:00:00+00:00".to_string(),
+            source: Some("sync-fills".to_string()),
+        }]
+    }
+
+    #[test]
+    fn live_observation_bundle_prefers_fresh_hyperliquid_snapshot() {
+        let now_ms = 1_710_000_600_000_i64;
+        let bundle = build_live_observation_bundle(
+            "live",
+            now_ms,
+            Some((sample_hl_snapshot(), now_ms - 5_000)),
+            Some(sample_db_snapshot(now_ms - 30_000)),
+            sample_db_positions(),
+        );
+
+        assert_eq!(
+            bundle.current.as_ref().map(|obs| obs.source),
+            Some("hyperliquid_cache")
+        );
+        assert!(bundle.fallback.is_none());
+        assert!(bundle.live_snapshot_authoritative);
+        assert_eq!(
+            bundle.live_positions.get("DOGE").map(|pos| pos.entry_price),
+            Some(0.1)
+        );
+    }
+
+    #[test]
+    fn live_observation_bundle_keeps_stale_snapshot_as_last_known_good_only() {
+        let now_ms = 1_710_000_600_000_i64;
+        let stale_ts = now_ms - DB_SYNC_STALE_MS - 1_000;
+        let bundle = build_live_observation_bundle(
+            "live",
+            now_ms,
+            None,
+            Some(sample_db_snapshot(stale_ts)),
+            sample_db_positions(),
+        );
+
+        assert!(bundle.current.is_none());
+        assert_eq!(
+            bundle.fallback.as_ref().map(|obs| obs.source),
+            Some("db_exchange_snapshot")
+        );
+        assert!(!bundle.live_snapshot_authoritative);
+        assert!(bundle.live_positions.is_empty());
+    }
+
+    #[test]
+    fn live_data_status_marks_stale_fallback_as_informational_only() {
+        let now_ms = 1_710_000_600_000_i64;
+        let stale = exchange_observation_from_db(
+            &sample_db_snapshot(now_ms - DB_SYNC_STALE_MS - 1_000),
+            now_ms,
+        );
+
+        let status = build_live_data_status("live", None, Some(&stale));
+
+        assert_eq!(status.source, "ledger_projection");
+        assert_eq!(status.freshness, "derived");
+        assert_eq!(
+            status.reconciliation_status,
+            "degraded_last_known_good_only"
+        );
+        assert_eq!(status.fallback_source, Some("db_exchange_snapshot"));
+        assert_eq!(status.fallback_freshness, Some("stale"));
+    }
+
+    #[test]
+    fn position_json_includes_holdings_truth_metadata() {
+        let position = trading::OpenPosition {
+            symbol: "DOGE".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 42,
+            open_timestamp: Some("2026-03-14T12:00:00+00:00".to_string()),
+            entry_price: 0.1,
+            size: 10_000.0,
+            confidence: Some("HIGH".to_string()),
+            entry_atr: 0.0,
+            leverage: 5.0,
+            margin_used: 200.0,
+        };
+        let status = LiveDataStatus {
+            source: "hyperliquid_cache",
+            as_of_ts_ms: Some(1_710_000_600_000),
+            as_of: Some("2026-03-14T12:00:00+00:00".to_string()),
+            age_ms: Some(5_000),
+            freshness: "current",
+            reconciliation_status: "exchange_observed_unreconciled",
+            fallback_source: None,
+            fallback_as_of_ts_ms: None,
+            fallback_as_of: None,
+            fallback_age_ms: None,
+            fallback_freshness: None,
+        };
+
+        let payload = position_json(&position, None, Some(12.5), &status);
+
+        assert_eq!(
+            payload.get("source").and_then(Value::as_str),
+            Some("hyperliquid_cache")
+        );
+        assert_eq!(
+            payload.get("reconciliation_status").and_then(Value::as_str),
+            Some("exchange_observed_unreconciled")
+        );
+        assert_eq!(
+            payload.get("as_of_ts_ms").and_then(Value::as_i64),
+            Some(1_710_000_600_000)
+        );
+    }
 
     #[test]
     fn deployed_config_boundary_uses_heartbeat_config_id() {

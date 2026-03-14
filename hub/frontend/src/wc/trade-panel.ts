@@ -904,7 +904,7 @@ export class TradePanel extends LitElement {
             <div class="kv"><span class="k">Est. Margin</span><span class="v">$${this._fmt(this.openPrev.est_margin_usd)}</span></div>
             <div class="kv"><span class="k">Est. Fee</span><span class="v">$${this._fmt(this.openPrev.est_fee_usd, 4)}</span></div>
             ${this.openPrev.account_value_usd != null ? html`
-              <div class="kv"><span class="k">Account Value</span><span class="v">$${this._fmt(this.openPrev.account_value_usd)}</span></div>
+              <div class="kv"><span class="k">Exchange Equity</span><span class="v">$${this._fmt(this.openPrev.account_value_usd)}</span></div>
             ` : nothing}
           </div>
         ` : nothing}
