@@ -183,8 +183,9 @@ The following constraints must remain true across all work in this plan:
 3. Missing live config must not silently degrade to sample or example config.
 4. Shared config identity must move towards `config_id` as the authoritative
    deployment contract, not away from it.
-5. Every successful change is delivered as one atomic PR to `master` with a
-   reviewer subagent before merge.
+5. Every successful change is delivered as one atomic PR to `master`, with a
+   documentation subagent sweep before review and a reviewer subagent before
+   merge.
 
 ## Proposed Atomic PR Sequence
 

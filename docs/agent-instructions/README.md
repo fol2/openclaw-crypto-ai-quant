@@ -19,7 +19,7 @@ matches the current task instead of reading every file.
 
 | Topic | File |
 |---|---|
-| SDLC, PR flow, cleanup, and reviewer patience | `sdlc.md` |
+| SDLC, documentation sweep, PR flow, cleanup, and reviewer patience | `sdlc.md` |
 | Runtime ownership, service wrappers, and operator commands | `runtime-and-operations.md` |
 | Config merge order, parity lanes, behaviour traces, and debugging | `configuration-and-debugging.md` |
 | Backtester ownership, replay/sweep commands, and indicator parity | `backtester-and-parity.md` |
