@@ -2,10 +2,61 @@
  * REST API fetch wrapper with auth token support.
  */
 
+const AUTH_TOKEN_STORAGE_KEY = 'aiq_hub_auth_token';
+
 let authToken: string | null = null;
 
+if (typeof window !== 'undefined') {
+  authToken = readStoredAuthToken();
+}
+
+function readStoredAuthToken(): string | null {
+  try {
+    const value = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)?.trim() || '';
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+function persistAuthToken(token: string | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
 export function setAuthToken(token: string) {
-  authToken = token;
+  const trimmed = token.trim();
+  authToken = trimmed || null;
+  persistAuthToken(authToken);
+}
+
+export function clearAuthToken() {
+  authToken = null;
+  persistAuthToken(null);
+}
+
+export function getAuthToken() {
+  return authToken;
+}
+
+export function bootstrapAuthTokenFromLocation() {
+  if (typeof window === 'undefined') return authToken;
+  const url = new URL(window.location.href);
+  const queryToken = url.searchParams.get('token')?.trim() || '';
+  if (queryToken) {
+    setAuthToken(queryToken);
+    url.searchParams.delete('token');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  return authToken;
 }
 
 async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {

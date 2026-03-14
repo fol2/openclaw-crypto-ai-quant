@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import './app.css';
   import Sidebar from './components/Sidebar.svelte';
-  import { getFactoryCapability } from './lib/api';
+  import { bootstrapAuthTokenFromLocation, clearAuthToken, getAuthToken, getFactoryCapability, setAuthToken } from './lib/api';
   import Dashboard from './pages/Dashboard.svelte';
   import Config from './pages/Config.svelte';
   import Backtest from './pages/Backtest.svelte';
@@ -13,6 +13,8 @@
   import System from './pages/System.svelte';
 
   let factoryCapability = $state<any | null>(null);
+  let authReady = $state(false);
+  let authError = $state('');
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
   let sidebarOpen = $state(false);
   let sidebarCollapsed = $state(true);
@@ -27,12 +29,59 @@
     return () => window.removeEventListener('hashchange', handleHashChange);
   });
 
-  onMount(async () => {
+  async function loadFactoryCapability() {
     try {
       factoryCapability = await getFactoryCapability();
-    } catch {
+      authError = '';
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('401')) {
+        return false;
+      }
       factoryCapability = null;
+      authError = '';
+      return true;
     }
+  }
+
+  async function initialiseAuth(forcePrompt = false) {
+    authReady = false;
+    bootstrapAuthTokenFromLocation();
+
+    while (true) {
+      const loaded = await loadFactoryCapability();
+      if (loaded) {
+        authReady = true;
+        return;
+      }
+
+      if (typeof window === 'undefined') {
+        authError = 'This Hub requires an auth token.';
+        authReady = true;
+        return;
+      }
+
+      const currentToken = getAuthToken() || '';
+      const promptText = forcePrompt || currentToken
+        ? currentToken
+        : '';
+      const token = window.prompt('Enter the Hub access token:', promptText);
+      forcePrompt = false;
+
+      if (!token?.trim()) {
+        clearAuthToken();
+        authError = 'This Hub requires an auth token before the dashboard can load live data.';
+        authReady = true;
+        return;
+      }
+
+      setAuthToken(token.trim());
+    }
+  }
+
+  onMount(() => {
+    void initialiseAuth();
   });
 </script>
 
@@ -62,7 +111,18 @@
 />
 
 <main class="main-content">
-  {#if currentPage === 'dashboard'}
+  {#if !authReady}
+    <div class="auth-state">
+      <h1>Connecting</h1>
+      <p>Preparing the Hub session…</p>
+    </div>
+  {:else if authError}
+    <div class="auth-state">
+      <h1>Authentication Required</h1>
+      <p>{authError}</p>
+      <button class="auth-button" onclick={() => initialiseAuth(true)}>Enter Token</button>
+    </div>
+  {:else if currentPage === 'dashboard'}
     <Dashboard />
   {:else if currentPage === 'config'}
     <Config />
@@ -134,7 +194,19 @@
     height: 60vh;
     color: var(--text-muted);
   }
-  .not-found h1 {
+
+  .auth-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 60vh;
+    color: var(--text-muted);
+    gap: 12px;
+    text-align: center;
+  }
+  .not-found h1,
+  .auth-state h1 {
     font-size: 48px;
     font-weight: 700;
     color: var(--text-dim);
@@ -143,6 +215,15 @@
   .not-found code {
     font-family: 'IBM Plex Mono', monospace;
     color: var(--accent);
+  }
+
+  .auth-button {
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
   }
 
   @media (max-width: 768px) {

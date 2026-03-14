@@ -9,8 +9,14 @@ use std::path::PathBuf;
 pub struct HubConfig {
     pub bind: String,
     pub port: u16,
-    /// Bearer token for API auth.  Empty ⇒ auth disabled.
+    /// Bearer token for read-only and viewer APIs.
     pub token: String,
+    /// Bearer token required for mutation APIs.
+    pub admin_token: String,
+    /// Explicit development-mode opt-in for local unsecured read-only access.
+    pub dev_mode: bool,
+    /// Explicit browser origins allowed to call the Hub cross-origin.
+    pub cors_allowed_origins: Vec<String>,
 
     // ── Database paths per mode ────────────────────────────────────
     pub live_db: PathBuf,
@@ -117,6 +123,20 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     PathBuf::from(env_str(name, default))
+}
+
+fn env_csv(name: &str) -> Vec<String> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 /// Read `main_address` from secrets.json (path from `AI_QUANT_SECRETS_PATH`).
@@ -263,6 +283,9 @@ impl HubConfig {
             bind: env_str("AIQ_MONITOR_BIND", "127.0.0.1"),
             port: env_u16("AIQ_MONITOR_PORT", 61010),
             token: env_str("AIQ_MONITOR_TOKEN", ""),
+            admin_token: env_str("AIQ_MONITOR_ADMIN_TOKEN", ""),
+            dev_mode: env_bool("AIQ_MONITOR_DEV_MODE", false),
+            cors_allowed_origins: env_csv("AIQ_MONITOR_CORS_ALLOWED_ORIGINS"),
             live_db,
             live_log,
             paper1_db,

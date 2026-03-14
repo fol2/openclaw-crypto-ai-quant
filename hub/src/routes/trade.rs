@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    middleware,
     routing::{get, post},
     Json, Router,
 };
@@ -42,14 +43,18 @@ pub struct TradeCancelBody {
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let read_routes = Router::new()
         .route("/api/trade/enabled", get(trade_enabled))
+        .route("/api/trade/open-orders/{symbol}", get(trade_open_orders))
+        .route("/api/trade/{id}/result", get(trade_result));
+    let mutation_routes = Router::new()
         .route("/api/trade/preview", post(trade_preview))
         .route("/api/trade/execute", post(trade_execute))
         .route("/api/trade/close", post(trade_close))
         .route("/api/trade/cancel", post(trade_cancel))
-        .route("/api/trade/open-orders/{symbol}", get(trade_open_orders))
-        .route("/api/trade/{id}/result", get(trade_result))
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 fn require_trade_enabled(state: &AppState) -> Result<(), HubError> {

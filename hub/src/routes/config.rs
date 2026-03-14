@@ -1,5 +1,6 @@
 use axum::{
     extract::{Query, State},
+    middleware,
     routing::{get, post, put},
     Json, Router,
 };
@@ -59,19 +60,23 @@ pub struct BackupEntry {
 
 /// Build the config sub-router.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let read_routes = Router::new()
         .route("/api/config", get(get_config))
         .route("/api/config/raw", get(get_config_raw))
-        .route("/api/config", put(put_config))
-        .route("/api/config/reload", post(post_config_reload))
         .route("/api/config/history", get(get_config_history))
         .route("/api/config/diff", get(get_config_diff))
-        .route("/api/config/files", get(get_config_files))
+        .route("/api/config/files", get(get_config_files));
+    let mutation_routes = Router::new()
+        .route("/api/config", put(put_config))
+        .route("/api/config/reload", post(post_config_reload))
         .route("/api/config/actions/promote-live", post(post_promote_live))
         .route(
             "/api/config/actions/rollback-live",
             post(post_rollback_live),
         )
+        .route_layer(middleware::from_fn(crate::auth::require_admin_auth));
+
+    read_routes.merge(mutation_routes)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

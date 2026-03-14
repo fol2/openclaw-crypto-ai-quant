@@ -25,6 +25,7 @@ mod subprocess;
 mod test_support;
 mod ws;
 
+use axum::http::{header, HeaderValue, Method};
 use axum::middleware;
 use axum::Router;
 use chrono::Utc;
@@ -35,7 +36,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
-use auth::AuthToken;
+use auth::HubAuthConfig;
 use config::HubConfig;
 use state::AppState;
 
@@ -51,7 +52,11 @@ async fn main() {
     let cfg = HubConfig::from_env();
     let bind = cfg.bind.clone();
     let port = cfg.port;
-    let token = cfg.token.clone();
+    let auth_config = HubAuthConfig::from_hub_config(&cfg);
+    auth_config
+        .validate_startup()
+        .expect("invalid Hub auth configuration");
+    let cors = build_cors_layer(&cfg).expect("invalid Hub CORS configuration");
 
     let state = AppState::new(cfg);
 
@@ -65,7 +70,10 @@ async fn main() {
     spawn_manual_trade_reconcile_poller(Arc::clone(&state));
 
     // Build router.
-    let api = routes::api_router();
+    let api = routes::api_router().layer(middleware::from_fn(auth::require_read_auth));
+    let ws_routes = Router::new()
+        .route("/ws", axum::routing::get(ws::ws_handler))
+        .route_layer(middleware::from_fn(auth::require_read_auth));
 
     // Static file serving: serve frontend/dist/ at root.
     // During development, you can run `npm run dev` in frontend/ instead.
@@ -75,12 +83,11 @@ async fn main() {
 
     let app = Router::new()
         .merge(api)
-        .route("/ws", axum::routing::get(ws::ws_handler))
+        .merge(ws_routes)
         .route("/health", axum::routing::get(health))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
-        .layer(middleware::from_fn(auth::require_auth))
-        .layer(axum::Extension(AuthToken(token)))
-        .layer(CorsLayer::permissive())
+        .layer(axum::Extension(auth_config))
+        .layer(cors)
         .with_state(state);
 
     let addr: SocketAddr = format!("{bind}:{port}")
@@ -98,6 +105,91 @@ async fn main() {
 
 async fn health() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
+fn build_cors_layer(config: &HubConfig) -> Result<CorsLayer, String> {
+    let layer = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    if config.cors_allowed_origins.is_empty() {
+        return Ok(layer);
+    }
+
+    let allowed_origins = config
+        .cors_allowed_origins
+        .iter()
+        .map(|origin| {
+            HeaderValue::from_str(origin)
+                .map_err(|err| format!("invalid CORS origin {origin:?}: {err}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(layer.allow_origin(allowed_origins))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::util::ServiceExt;
+
+    async fn ok_handler() -> &'static str {
+        "ok"
+    }
+
+    #[tokio::test]
+    async fn cors_denies_cross_origin_requests_by_default() {
+        let mut config = HubConfig::from_env();
+        config.cors_allowed_origins = Vec::new();
+        let app = Router::new()
+            .route("/test", axum::routing::get(ok_handler))
+            .layer(build_cors_layer(&config).unwrap());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test")
+                    .header(header::ORIGIN, "https://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn cors_allows_configured_origins_only() {
+        let mut config = HubConfig::from_env();
+        config.cors_allowed_origins = vec!["https://console.example".to_string()];
+        let app = Router::new()
+            .route("/test", axum::routing::get(ok_handler))
+            .layer(build_cors_layer(&config).unwrap());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test")
+                    .header(header::ORIGIN, "https://console.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://console.example"
+        );
+    }
 }
 
 async fn shutdown_signal() {
