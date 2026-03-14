@@ -45,6 +45,11 @@ promotion remains an explicit deployment setting: enable
 `deployment.apply_to_live: true` only on the production instance that is meant
 to restart `openclaw-ai-quant-live-v8`.
 
+The financial-grade factory default now seeds sweep/replay balance from current
+live equity (including unrealised PnL) and compares each challenger against the
+currently deployed target config before any paper replacement is applied. Use
+`balance.mode: fixed` only for controlled research runs.
+
 The tracked service examples live under:
 
 ```bash
