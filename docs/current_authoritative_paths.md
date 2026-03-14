@@ -26,6 +26,7 @@
 |---|---|
 | Market-data ingestion | `ws_sidecar/` |
 | Dashboard and service inspection | `hub/` |
+| Factory cycle (sweep → validate → paper → live promotion) | `runtime/aiq-runtime` (`aiq-factory`) |
 | Release version governance | `VERSION` + Cargo manifests + `tools/release/*.sh` |
 
 ## Removed Ownership

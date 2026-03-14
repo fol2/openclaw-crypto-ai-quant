@@ -3,10 +3,8 @@
 Operational metrics and risk limits that define "working" for the active strategy
 lifecycle.
 
-The repository no longer treats automated factory execution as an active
-production surface. These thresholds still define the desired candidate →
-paper → live promotion path, whether that path is run manually or by a future
-reactivated factory contract.
+These thresholds define the Rust-owned candidate → paper → live promotion path
+used by the factory cycle and its operator runbooks.
 
 ## Risk Limits
 
