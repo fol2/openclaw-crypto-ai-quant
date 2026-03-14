@@ -1,5 +1,7 @@
 # Rust Runtime Final Cleanup Plan
 
+> Archived on 2026-03-14 during repository plan consolidation.
+
 ## Status
 
 Completed.
