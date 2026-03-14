@@ -21,6 +21,7 @@ use crate::config_audit::{
     append_event as append_config_audit_ledger_event, read_recent_events, weak_actor_from_headers,
     ConfigAuditEvent, ConfigAuditIdentity, ConfigAuditQuery,
 };
+use crate::diagnostic_audit::{append_read_event, DiagnosticReadEvent};
 use crate::error::HubError;
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_lane::PaperLane;
@@ -31,6 +32,11 @@ use crate::state::AppState;
 pub struct ConfigQuery {
     /// Config file variant: "main", "live", "paper1", "paper2", "paper3",
     /// "promoted_primary", "promoted_fallback". Default: "main".
+    pub file: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PrivilegedConfigQuery {
     pub file: Option<String>,
 }
 
@@ -274,6 +280,15 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/config/diff", get(get_config_diff))
         .route("/api/config/files", get(get_config_files));
     let mutation_routes = Router::new()
+        .route("/api/config/raw/privileged", get(get_config_raw_privileged))
+        .route(
+            "/api/config/audit/privileged",
+            get(get_config_audit_privileged),
+        )
+        .route(
+            "/api/config/diff/privileged",
+            get(get_config_diff_privileged),
+        )
         .route("/api/config", put(put_config))
         .route("/api/config/reload", post(post_config_reload))
         .route("/api/config/actions/apply-live", post(post_apply_live))
@@ -650,6 +665,73 @@ fn now_ts_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+fn append_diagnostic_read_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &str,
+    target: &str,
+) -> Result<(), HubError> {
+    let event = DiagnosticReadEvent {
+        version: "diagnostic_read_event_v1".to_string(),
+        ts_ms: now_ts_ms(),
+        ts_utc: iso_utc_now(),
+        route: route.to_string(),
+        target: target.to_string(),
+        actor: weak_actor_from_headers(headers, "admin_token"),
+    };
+    append_read_event(&state.config.artifacts_dir, &event)?;
+    Ok(())
+}
+
+fn summarise_runtime_apply_result(result: &Value) -> Value {
+    let parsed = result.get("parsed");
+    json!({
+        "ok": result.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
+        "exit_code": result.get("exit_code").cloned().unwrap_or(Value::Null),
+        "timeout": result.get("timeout").cloned().unwrap_or(Value::Bool(false)),
+        "elapsed_ms": result.get("elapsed_ms").cloned().unwrap_or(Value::Null),
+        "applied_action": parsed.and_then(|value| value.get("applied_action")).cloned().unwrap_or(Value::Null),
+        "final_service_state": parsed
+            .and_then(|value| value.get("final_service"))
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.get("service_state"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "final_config_id": parsed
+            .and_then(|value| value.get("final_service"))
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.get("manifest"))
+            .and_then(|value| value.get("config_id"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "error": result.get("error").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn redacted_config_audit_event(event: &ConfigAuditEvent) -> Value {
+    json!({
+        "version": event.version,
+        "ts_ms": event.ts_ms,
+        "ts_utc": event.ts_utc,
+        "lane": event.lane,
+        "file_variant": event.file_variant,
+        "action": event.action,
+        "actor": {
+            "auth_scope": event.actor.auth_scope,
+            "label": event.actor.label,
+        },
+        "reason": event.reason,
+        "validation": event.validation,
+        "before": event.before,
+        "after": event.after,
+        "result": {
+            "ok": event.result.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
+            "restart_required": event.result.get("restart_required").cloned().unwrap_or(Value::Null),
+        },
+        "artifact_path_redacted": event.artifact_path.is_some(),
+    })
+}
+
 fn normalise_reason(reason: Option<&str>) -> Option<String> {
     reason
         .map(str::trim)
@@ -980,6 +1062,29 @@ async fn get_config_raw(
     Query(q): Query<ConfigQuery>,
 ) -> Result<Response, HubError> {
     let resolved = resolve_current_config_state(&state, variant(&q))?;
+    let message = format!(
+        "# redacted\n# raw config access is privileged; use /api/config/raw/privileged?file={} with admin auth\n",
+        variant(&q)
+    );
+    let mut response = message.into_response();
+    apply_config_identity_headers(response.headers_mut(), &resolved)?;
+    Ok(response)
+}
+
+/// GET /api/config/raw/privileged — Read raw YAML through an explicit privileged route.
+async fn get_config_raw_privileged(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PrivilegedConfigQuery>,
+    headers: HeaderMap,
+) -> Result<Response, HubError> {
+    let file_variant = q.file.as_deref().unwrap_or("main");
+    let resolved = resolve_current_config_state(&state, file_variant)?;
+    append_diagnostic_read_audit(
+        &state,
+        &headers,
+        "config_raw_privileged",
+        &format!("file={file_variant}"),
+    )?;
     let mut response = resolved.raw_text.clone().into_response();
     apply_config_identity_headers(response.headers_mut(), &resolved)?;
     Ok(response)
@@ -1139,7 +1244,6 @@ async fn post_apply_live(
     Ok(Json(json!({
         "ok": transaction.ok,
         "action": "apply_live",
-        "apply_dir": transaction.action_dir,
         "backup": transaction.backup,
         "lock_id": candidate.lock_id,
         "config_id": candidate.config_id,
@@ -1147,10 +1251,11 @@ async fn post_apply_live(
         "previous_config_id": incumbent.config_id,
         "restart_required": if dry_run { preview_restart_required } else { transaction.restart_required },
         "service": state.config.live_service,
+        "artifact_path_redacted": true,
         "restart": {
             "mode": restart_mode.as_str(),
-            "result": transaction.runtime_result,
-            "recovery": transaction.restore_result,
+            "result": summarise_runtime_apply_result(&transaction.runtime_result),
+            "recovery": transaction.restore_result.as_ref().map(summarise_runtime_apply_result),
         },
         "dry_run": dry_run,
         "error": transaction.error,
@@ -1161,7 +1266,32 @@ async fn post_apply_live(
 async fn get_config_audit(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ConfigAuditQuery>,
+) -> Result<Json<Vec<Value>>, HubError> {
+    let events = read_recent_events(
+        &state.config.artifacts_dir,
+        q.file.as_deref(),
+        q.limit.unwrap_or(50),
+    )?;
+    Ok(Json(
+        events
+            .iter()
+            .map(redacted_config_audit_event)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// GET /api/config/audit/privileged — Read full config audit events.
+async fn get_config_audit_privileged(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConfigAuditQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<ConfigAuditEvent>>, HubError> {
+    append_diagnostic_read_audit(
+        &state,
+        &headers,
+        "config_audit_privileged",
+        &format!("file={}", q.file.as_deref().unwrap_or("all")),
+    )?;
     let events = read_recent_events(
         &state.config.artifacts_dir,
         q.file.as_deref(),
@@ -1217,10 +1347,31 @@ async fn get_config_history(
 
 /// GET /api/config/diff — Simple line-by-line diff between two versions.
 async fn get_config_diff(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<Value>, HubError> {
+    Ok(Json(serde_json::json!({
+        "a": q.a,
+        "b": q.b,
+        "file": q.file.as_deref().unwrap_or("main"),
+        "redacted": true,
+        "message": "raw config diffs are privileged; use /api/config/diff/privileged with admin auth",
+    })))
+}
+
+/// GET /api/config/diff/privileged — Full raw diff through an explicit privileged route.
+async fn get_config_diff_privileged(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DiffQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, HubError> {
     let file_variant = q.file.as_deref().unwrap_or("main");
+    append_diagnostic_read_audit(
+        &state,
+        &headers,
+        "config_diff_privileged",
+        &format!("file={file_variant}"),
+    )?;
     let config_path = resolve_config_path_for_state(&state, file_variant)?;
     let bk_dir = backups_dir(&state.config.config_dir)?;
 
@@ -1464,21 +1615,19 @@ async fn post_rollback_live(
     Ok(Json(json!({
         "ok": transaction.ok,
         "action": "rollback_live",
-        "rollback_dir": transaction.action_dir,
         "backup": transaction.backup,
-        "source_deploy_dir": src_dir.to_string_lossy().to_string(),
-        "restored_from": restored_from.to_string_lossy().to_string(),
         "steps": steps,
         "previous_lock_id": current.lock_id,
         "previous_config_id": incumbent.config_id,
         "restored_lock_id": restored.lock_id,
         "restored_config_id": restored.config_id,
         "restart_required": transaction.restart_required,
+        "artifact_path_redacted": true,
         "restart": {
             "mode": restart_mode.as_str(),
             "service": state.config.live_service,
-            "result": transaction.runtime_result,
-            "recovery": transaction.restore_result,
+            "result": summarise_runtime_apply_result(&transaction.runtime_result),
+            "recovery": transaction.restore_result.as_ref().map(summarise_runtime_apply_result),
         },
         "dry_run": dry_run,
         "error": transaction.error,
@@ -1671,6 +1820,40 @@ fi
             response.headers()["x-aiq-config-id-source"],
             HeaderValue::from_static("runtime")
         );
+    }
+
+    #[tokio::test]
+    async fn get_config_raw_privileged_returns_raw_yaml_and_audits_access() {
+        let dir = tempdir().unwrap();
+        write_main_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let state = admin_test_state(dir.path(), Path::new("/bin/true"));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-aiq-actor", HeaderValue::from_static("diag-user"));
+
+        let response = get_config_raw_privileged(
+            State(Arc::clone(&state)),
+            Query(PrivilegedConfigQuery {
+                file: Some("main".to_string()),
+            }),
+            headers,
+        )
+        .await
+        .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("interval: 30m"));
+        assert!(state
+            .config
+            .artifacts_dir
+            .join("diagnostic_audit")
+            .join("read_events.jsonl")
+            .exists());
     }
 
     #[tokio::test]
@@ -1920,6 +2103,7 @@ fi
         .unwrap();
 
         assert_eq!(response["ok"], Value::Bool(true));
+        assert_eq!(response["artifact_path_redacted"], Value::Bool(true));
         assert_eq!(
             response["config_id"],
             Value::String(candidate.config_id.clone())
@@ -1929,26 +2113,22 @@ fi
             normalise_yaml_payload(candidate_yaml)
         );
 
-        let apply_dir = PathBuf::from(response["apply_dir"].as_str().unwrap());
-        let event: Value =
-            serde_json::from_str(&fs::read_to_string(apply_dir.join("event.json")).unwrap())
-                .unwrap();
-        assert_eq!(
-            event["what"]["current_config_id"],
-            Value::String(
-                validate_candidate_config_write(
-                    &baseline_state,
-                    "live",
-                    &live_path,
-                    &current.raw_text
-                )
+        let events = read_recent_events(&state.config.artifacts_dir, Some("live"), 10).unwrap();
+        let latest = events
+            .iter()
+            .find(|event| event.action == "apply_live")
+            .unwrap();
+        let expected_current_config_id =
+            validate_candidate_config_write(&baseline_state, "live", &live_path, &current.raw_text)
                 .unwrap()
-                .config_id,
-            )
+                .config_id;
+        assert_eq!(
+            latest.before.config_id.as_deref(),
+            Some(expected_current_config_id.as_str())
         );
         assert_eq!(
-            event["what"]["candidate_config_id"],
-            Value::String(candidate.config_id)
+            latest.after.config_id.as_deref(),
+            Some(candidate.config_id.as_str())
         );
     }
 
@@ -2198,18 +2378,20 @@ fi
             fs::read_to_string(&live_path).unwrap(),
             normalise_yaml_payload(restored_yaml)
         );
+        assert_eq!(response["artifact_path_redacted"], Value::Bool(true));
 
-        let rollback_dir = PathBuf::from(response["rollback_dir"].as_str().unwrap());
-        let event: Value =
-            serde_json::from_str(&fs::read_to_string(rollback_dir.join("event.json")).unwrap())
-                .unwrap();
+        let events = read_recent_events(&state.config.artifacts_dir, Some("live"), 10).unwrap();
+        let latest = events
+            .iter()
+            .find(|event| event.action == "rollback_live")
+            .unwrap();
         assert_eq!(
-            event["what"]["current_config_id"],
-            Value::String(incumbent.config_id)
+            latest.before.config_id.as_deref(),
+            Some(incumbent.config_id.as_str())
         );
         assert_eq!(
-            event["what"]["candidate_config_id"],
-            Value::String(restored.config_id)
+            latest.after.config_id.as_deref(),
+            Some(restored.config_id.as_str())
         );
     }
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getSystemServices, serviceAction, getDbStats, getDiskUsage, getServiceLogs } from '../lib/api';
+  import { getSystemServices, serviceAction, getDbStats, getDiskUsage, getServiceLogsPrivileged } from '../lib/api';
 
   let services: any[] = $state([]);
   let dbStats: any[] = $state([]);
@@ -50,7 +50,7 @@
     if (!logService) return;
     loadingLogs = true;
     try {
-      const res = await getServiceLogs(logService, 100);
+      const res = await getServiceLogsPrivileged(logService, 100);
       logLines = res.log || '';
     } catch (e: any) {
       logLines = `Error: ${e.message}`;
@@ -166,7 +166,7 @@
         <div class="disk-row">
           <span class="disk-label">{d.label}</span>
           <span class="disk-size">{d.size}</span>
-          <span class="disk-path mono">{d.path}</span>
+          <span class="disk-path mono">redacted</span>
         </div>
       {/each}
     </div>

@@ -199,6 +199,25 @@ export async function getConfigRaw(file = 'main'): Promise<{
   };
 }
 
+export async function getConfigRawPrivileged(file = 'main'): Promise<{
+  raw: string;
+  lockId: string | null;
+  runtimeConfigId: string | null;
+}> {
+  const headers: Record<string, string> = {};
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  const resp = await fetch(`/api/config/raw/privileged?file=${encodeURIComponent(file)}`, { headers });
+  if (!resp.ok) throw new Error(`API ${resp.status}`);
+  const lockId = resp.headers.get('x-aiq-config-lock-id')
+    || resp.headers.get('etag')?.replace(/^W\//, '').replace(/^"|"$/g, '')
+    || null;
+  return {
+    raw: await resp.text(),
+    lockId,
+    runtimeConfigId: resp.headers.get('x-aiq-config-id'),
+  };
+}
+
 export async function putConfig(yaml: string, file = 'main', expectedConfigId?: string | null) {
   return apiFetch(`/api/config?file=${encodeURIComponent(file)}`, {
     method: 'PUT',
@@ -214,6 +233,11 @@ export async function getConfigHistory(file = 'main') {
 export async function getConfigDiff(a: string, b: string, file = 'main') {
   const qs = new URLSearchParams({ a, b, file });
   return apiFetch(`/api/config/diff?${qs}`);
+}
+
+export async function getConfigDiffPrivileged(a: string, b: string, file = 'main') {
+  const qs = new URLSearchParams({ a, b, file });
+  return apiFetch(`/api/config/diff/privileged?${qs}`);
 }
 
 export async function getConfigFiles() {
@@ -380,6 +404,10 @@ export async function getDiskUsage() {
 
 export async function getServiceLogs(service: string, lines = 50) {
   return apiFetch(`/api/system/logs?service=${encodeURIComponent(service)}&lines=${lines}`);
+}
+
+export async function getServiceLogsPrivileged(service: string, lines = 50) {
+  return apiFetch(`/api/system/logs/raw?service=${encodeURIComponent(service)}&lines=${lines}`);
 }
 
 // ── Trade API ────────────────────────────────────────────────────────

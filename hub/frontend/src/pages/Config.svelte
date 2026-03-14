@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { applyLiveConfig, getConfigDiff, getConfigFiles, getConfigHistory, getConfigRaw, putConfig } from '../lib/api';
+  import { applyLiveConfig, getConfigDiffPrivileged, getConfigFiles, getConfigHistory, getConfigRawPrivileged, putConfig } from '../lib/api';
 
   let files: any[] = $state([]);
   let selectedFile = $state('main');
@@ -31,13 +31,13 @@
     loading = true;
     error = '';
     try {
-      const res = await getConfigRaw(selectedFile);
+      const res = await getConfigRawPrivileged(selectedFile);
       yamlText = res.raw;
       originalText = res.raw;
       currentLockId = res.lockId;
       currentRuntimeConfigId = res.runtimeConfigId;
     } catch (e: any) {
-      error = e.message || 'Failed to load config';
+      error = e.message || 'Privileged config access is required to load raw YAML';
     } finally {
       loading = false;
     }
@@ -94,7 +94,7 @@
       currentLockId = res.lock_id || currentLockId;
       currentRuntimeConfigId = res.config_id || currentRuntimeConfigId;
 
-      const appliedAction = String(res?.restart?.result?.parsed?.applied_action || '').trim();
+      const appliedAction = String(res?.restart?.result?.applied_action || '').trim();
       const actionNote = appliedAction === 'restart'
         ? ` ${serviceName} restarted.`
         : appliedAction === 'start'
@@ -126,7 +126,7 @@
     if (!diffA) return;
     loadingDiff = true;
     try {
-      const res = await getConfigDiff(diffA, diffB, selectedFile);
+      const res = await getConfigDiffPrivileged(diffA, diffB, selectedFile);
       diffResult = res.diff || [];
     } catch (e: any) {
       diffResult = [`Error: ${e.message}`];

@@ -47,19 +47,25 @@ Progress recorded on 2026-03-14:
   the config editor, split non-live editing into save-only semantics, and moved
   live editing onto an explicit `Apply to Live` flow that previews restart
   impact through `apply-live` before confirmation.
-- PR 7 implementation completed on 2026-03-14
+- PR 7 completed and merged as `#1014`
   (`hub: make config audit and monitoring config-id-centric`).
   This introduced an append-only config audit ledger keyed by before/after
   `config_id`, added weak request actor metadata through auth scope plus an
   optional `X-AIQ-Actor` hint, extended mutation routes to emit structured
   config audit events, added a `GET /api/config/audit` read surface, and moved
   monitor `since_config` attribution from YAML file `mtime` to deployed
-  heartbeat `config_id` plus its first-seen runtime-log timestamp. At the time
-  of this documentation pass the PR is implementation-complete on branch
-  `codex/shared-config-pr7-configid-audit` and is awaiting the required review
-  / merge flow.
+  `config_id` boundaries.
+- PR 8 implementation completed on 2026-03-14
+  (`hub: add sensitive metadata redaction boundaries`).
+  This default-redacted raw config, config diff, config audit, system logs, and
+  path-bearing system/monitor metadata, introduced explicit privileged raw
+  routes for diagnostics, and appended privileged diagnostic reads to a
+  dedicated audit ledger. At the time of this documentation pass the PR is
+  implementation-complete on branch
+  `codex/shared-config-pr8-redaction-boundaries` and is awaiting the required
+  review / merge flow.
 
-Sequence status after merged PR 4 and the current PR 7 implementation pass:
+Sequence status after merged PR 7 and the current PR 8 implementation pass:
 
 - PR 1: complete
 - PR 2: complete
@@ -67,8 +73,8 @@ Sequence status after merged PR 4 and the current PR 7 implementation pass:
 - PR 5: complete
 - PR 6: complete
 - PR 4: complete
-- PR 7: implementation complete; review / merge pending
-- PR 8: pending
+- PR 7: complete
+- PR 8: implementation complete; review / merge pending
 - PR 9: pending
 
 ## Current Stage
@@ -78,21 +84,19 @@ Current execution stage as of 2026-03-14:
 - PR 5 is merged and closed.
 - PR 6 is merged and closed.
 - PR 4 is merged and closed.
-- PR 7 implementation is complete and the documentation pass is now describing
-  the post-change config-id-centric audit contract rather than a monitoring
-  mtime boundary.
-- Config mutations now append structured before/after `config_id` events to a
-  shared config audit ledger, weak request actor fields can be tagged through
-  `X-AIQ-Actor`, and monitor `since_config` now resolves from deployed
-  heartbeat `config_id` plus the first-seen runtime log timestamp for that
-  identity.
-- PR 8 (`Add redaction boundaries for sensitive operational metadata`) becomes
-  the next active implementation stage once PR 7 finishes review and merge.
+- PR 7 is merged and closed.
+- PR 8 implementation is complete and the documentation pass is now describing
+  the post-change redaction contract rather than an open metadata leak.
+- Sensitive operational metadata is now redacted on default config/system/
+  monitor reads, explicit raw routes are privileged and auditable, and
+  privileged diagnostics append read events to `artifacts/diagnostic_audit/`.
+- PR 9 (`Add financial-grade approval workflow and role separation`) becomes
+  the next active implementation stage once PR 8 finishes review and merge.
 
 Current blocker:
 
 - None at the documentation-pass stage. The next action is reviewer coverage
-  for PR 7, followed by merge and cleanup before opening PR 8.
+  for PR 8, followed by merge and cleanup before opening PR 9.
 
 ## Objective
 
@@ -228,16 +232,16 @@ The current branch now:
 
 ### 7. Sensitive operational metadata needs redaction boundaries
 
-Several surfaces currently expose raw YAML, diff payloads, secrets-path
-locations, or daemon command arguments that include secrets-path values. Even
-when secret contents are not exposed directly, the control plane should not
-default to leaking sensitive host-path and live-operation metadata.
+This gap is closed in the current PR 8 implementation branch.
 
-Required outcome:
+The current branch now:
 
-- sensitive path and command fields are redacted by default
-- raw live-config access is explicitly privileged and auditable
-- operator diagnostics expose only the minimum required data by default
+- redacts sensitive path, raw command, and raw payload metadata on default
+  config/system/monitor read paths
+- routes raw config, raw diff, full config audit, and raw system logs through
+  explicit privileged diagnostics endpoints
+- appends privileged diagnostics reads to
+  `artifacts/diagnostic_audit/read_events.jsonl`
 
 ### 8. Governance workflow is not yet financial-grade
 

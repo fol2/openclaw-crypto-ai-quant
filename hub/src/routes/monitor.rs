@@ -53,6 +53,27 @@ fn deployed_config_boundary(
     Ok(Some((config_id, from_ts)))
 }
 
+fn redacted_heartbeat(heartbeat: &crate::heartbeat::Heartbeat) -> Value {
+    let mut value = serde_json::to_value(heartbeat).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("line");
+        obj.insert("line_redacted".to_string(), Value::Bool(true));
+    }
+    value
+}
+
+fn redacted_recent_audit_events(events: Vec<Value>) -> Vec<Value> {
+    events
+        .into_iter()
+        .map(|event| {
+            let mut obj = event.as_object().cloned().unwrap_or_default();
+            let had_data = obj.remove("data_json").is_some();
+            obj.insert("data_redacted".to_string(), Value::Bool(had_data));
+            Value::Object(obj)
+        })
+        .collect()
+}
+
 // ── Query params ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -348,7 +369,7 @@ async fn api_snapshot(
 ) -> Result<Json<Value>, HubError> {
     let mode = normalize_mode(&q.mode);
     let ts = now_ms();
-    let (db_path, _log_path) = state.config.mode_paths(&mode);
+    let (_db_path, _log_path) = state.config.mode_paths(&mode);
 
     let pool = state
         .db_pool(&mode)
@@ -541,8 +562,8 @@ async fn api_snapshot(
     Ok(Json(json!({
         "now_ts_ms": ts,
         "mode": mode,
-        "db_path": db_path.to_string_lossy(),
-        "health": heartbeat,
+        "db_path_redacted": true,
+        "health": redacted_heartbeat(&heartbeat),
         "config": {
             "trader_interval": state.config.trader_interval,
             "candle_intervals": intervals,
@@ -592,7 +613,7 @@ async fn api_snapshot(
         "recent": {
             "trades": recent_trades,
             "signals": recent_signals,
-            "audit_events": audit_events,
+            "audit_events": redacted_recent_audit_events(audit_events),
             "oms_intents": oms_intents,
             "oms_fills": oms_fills,
             "oms_open_orders": oms_open_orders,
