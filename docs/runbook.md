@@ -334,6 +334,7 @@ enabling policy:
 ```bash
 cargo build --release --manifest-path hub/Cargo.toml --features factory
 cargo build --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-factory
+cargo build --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-maintenance
 AI_QUANT_FACTORY_ENABLE=1 cargo run --release --manifest-path runtime/aiq-runtime/Cargo.toml --bin aiq-factory -- run --config config/strategy_overrides.yaml --settings config/factory_defaults.yaml --profile daily --json
 ```
 
@@ -373,6 +374,21 @@ audit exactly which window produced each gate decision.
 factory can fail closed on symbol-level parity regressions, not just aggregate
 balance drift.
 
+Keep nightly factory artefacts bounded with:
+
+```bash
+cargo run -p aiq-runtime --bin aiq-maintenance -- prune-factory-artifacts --project-dir "$PWD" --settings config/factory_defaults.yaml --profile nightly
+```
+
+The nightly prune keeps only the newest `run_nightly_*` bundle plus any run
+still referenced by the current paper soak markers, the live governance state,
+or the live YAML `# Base:` header. It also removes stale
+`artifacts/_effective_configs/nightly_*.yaml` files that no longer belong to
+the latest or currently deployed run set. If a nightly cycle fails before the
+service-level post-run housekeeping fires, run the maintenance command
+manually. Add `--dry-run` to preview the retained run IDs and aggregate delete
+counts first; add `--verbose` when you need the full per-path deletion list.
+
 Paper selection is now deterministic per role. `primary` prefers `efficient`
 artefacts ranked by total PnL, then profit factor, then lower drawdown;
 `fallback` prefers `growth` artefacts ranked by profit factor, then total PnL,
@@ -404,7 +420,13 @@ systemd/openclaw-ai-quant-factory-v8-deep.timer.example
 
 The example timers are intentionally staggered: the nightly timer stays at
 `00:50 UTC`, while the deep weekly timer runs at `02:10 UTC` on Sundays so the
-two schedules cannot collide by calendar design.
+two schedules cannot collide by calendar design. The nightly service example
+also runs `aiq-maintenance prune-factory-artifacts --profile nightly` as a
+post-success housekeeping step so only the latest nightly artefact bundle and
+the currently deployed factory references stay on disk. Build the
+`aiq-maintenance` binary alongside `aiq-factory` before enabling that service
+example, otherwise systemd will skip the post-step because the example uses a
+non-fatal `ExecStartPost=-...` contract.
 
 ## Live DB Sync
 
