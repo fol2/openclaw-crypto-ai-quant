@@ -41,7 +41,6 @@ const ALLOWED_SERVICES: &[&str] = &[
     "openclaw-ai-quant-trader-v8-paper3",
     "openclaw-ai-quant-factory-v8",
     "openclaw-ai-quant-factory-v8-deep",
-    "openclaw-ai-quant-funding",
     "openclaw-ai-quant-funding-v8",
     "openclaw-ai-quant-ws-sidecar",
     "openclaw-ai-quant-prune-runtime-logs-v8",
@@ -402,6 +401,15 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("unknown service: openclaw-ai-quant-ws-sidecar-v8")
+        );
+    }
+
+    #[test]
+    fn removed_legacy_funding_service_is_not_an_allowed_service() {
+        let err = validate_service("openclaw-ai-quant-funding").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown service: openclaw-ai-quant-funding")
         );
     }
 }
