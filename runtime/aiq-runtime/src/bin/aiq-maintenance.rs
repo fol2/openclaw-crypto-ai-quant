@@ -5,6 +5,7 @@ use reqwest::StatusCode;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +16,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 const DEFAULT_FUNDING_DB: &str = "candles_dbs/funding_rates.db";
 const DEFAULT_RUNTIME_DB: &str = "trading_engine.db";
+const DEFAULT_FACTORY_SETTINGS: &str = "config/factory_defaults.yaml";
+const DEFAULT_FACTORY_ARTIFACTS_DIR: &str = "artifacts";
+const DEFAULT_FACTORY_LIVE_YAML_PATH: &str = "config/strategy_overrides.live.yaml";
+const DEFAULT_FACTORY_LIVE_STATE_PATH: &str = "artifacts/state/factory_live_primary.json";
 const DEFAULT_FETCH_TIMEOUT_S: u64 = 5;
 const DEFAULT_BUSY_TIMEOUT_S: u64 = 15;
 const DEFAULT_FUNDING_DAYS: i64 = 30;
@@ -51,6 +56,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     FetchFundingRates(FetchFundingRatesArgs),
+    PruneFactoryArtifacts(PruneFactoryArtifactsArgs),
     PruneRuntimeLogs(PruneRuntimeLogsArgs),
     Retired(RetiredArgs),
 }
@@ -61,6 +67,35 @@ struct FetchFundingRatesArgs {
     days: i64,
     #[arg(long, default_value = DEFAULT_FUNDING_DB)]
     db: PathBuf,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum FactoryArtifactsProfile {
+    Nightly,
+    Deep,
+}
+
+impl FactoryArtifactsProfile {
+    fn run_prefix(&self) -> &'static str {
+        match self {
+            Self::Nightly => "nightly",
+            Self::Deep => "deep",
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct PruneFactoryArtifactsArgs {
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    #[arg(long, default_value = DEFAULT_FACTORY_SETTINGS)]
+    settings: PathBuf,
+    #[arg(long, value_enum, default_value_t = FactoryArtifactsProfile::Nightly)]
+    profile: FactoryArtifactsProfile,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long, default_value_t = false)]
+    verbose: bool,
 }
 
 #[derive(Args, Debug)]
@@ -95,6 +130,52 @@ struct RetiredArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(default)]
+struct MaintenanceFactorySettings {
+    artifacts_dir: PathBuf,
+    deployment: MaintenanceDeploymentSettings,
+    live_governance: MaintenanceLiveGovernanceSettings,
+}
+
+impl MaintenanceFactorySettings {
+    fn live_yaml_path(&self) -> &Path {
+        self.deployment
+            .live_yaml_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new(DEFAULT_FACTORY_LIVE_YAML_PATH))
+    }
+
+    fn live_state_path(&self) -> &Path {
+        self.live_governance
+            .state_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new(DEFAULT_FACTORY_LIVE_STATE_PATH))
+    }
+}
+
+impl Default for MaintenanceFactorySettings {
+    fn default() -> Self {
+        Self {
+            artifacts_dir: PathBuf::from(DEFAULT_FACTORY_ARTIFACTS_DIR),
+            deployment: MaintenanceDeploymentSettings::default(),
+            live_governance: MaintenanceLiveGovernanceSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MaintenanceDeploymentSettings {
+    live_yaml_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MaintenanceLiveGovernanceSettings {
+    state_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
 struct FundingHistoryEntry {
     time: i64,
     #[serde(rename = "fundingRate")]
@@ -121,6 +202,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::FetchFundingRates(args) => fetch_funding_rates(args),
+        Command::PruneFactoryArtifacts(args) => prune_factory_artifacts(args),
         Command::PruneRuntimeLogs(args) => prune_runtime_logs(args),
         Command::Retired(args) => retired(args),
     }
@@ -189,6 +271,96 @@ fn fetch_funding_rates(args: FetchFundingRatesArgs) -> Result<()> {
     }
 
     println!("\n[funding] Done. Total inserted: {}", total_inserted);
+    Ok(())
+}
+
+fn prune_factory_artifacts(args: PruneFactoryArtifactsArgs) -> Result<()> {
+    let project_dir = resolve_project_dir(args.project_dir)?;
+    let settings_path = resolve_under_project(&project_dir, &args.settings);
+    let settings = load_maintenance_factory_settings(&settings_path)?;
+    let artifacts_root = resolve_under_project(&project_dir, &settings.artifacts_dir);
+    if !artifacts_root.is_dir() {
+        return Ok(());
+    }
+
+    let run_prefix = args.profile.run_prefix();
+    let run_dirs = collect_factory_run_dirs(&artifacts_root, run_prefix)?;
+    if run_dirs.is_empty() {
+        return Ok(());
+    }
+
+    let latest_run_id = run_dirs.last().map(|entry| entry.run_id.clone());
+    let mut retained_run_ids =
+        collect_retained_run_ids(&project_dir, &artifacts_root, run_prefix, &settings)?;
+    if let Some(run_id) = latest_run_id.as_ref() {
+        retained_run_ids.insert(run_id.clone());
+    }
+
+    let deleted_run_dirs: Vec<PathBuf> = run_dirs
+        .iter()
+        .filter(|entry| !retained_run_ids.contains(&entry.run_id))
+        .map(|entry| entry.path.clone())
+        .collect();
+
+    let deleted_effective_configs =
+        collect_effective_configs_to_delete(&artifacts_root, run_prefix, &retained_run_ids)?;
+    let removed_date_dirs = collect_empty_date_dirs(&artifacts_root, &deleted_run_dirs)?;
+
+    if args.dry_run {
+        println!(
+            "[prune_factory_artifacts] dry_run=true profile={} keep_runs={} delete_runs={} delete_effective_configs={} remove_date_dirs={}",
+            run_prefix,
+            retained_run_ids.len(),
+            deleted_run_dirs.len(),
+            deleted_effective_configs.len(),
+            removed_date_dirs.len()
+        );
+        for run_id in &retained_run_ids {
+            println!("[prune_factory_artifacts] keep_run_id={run_id}");
+        }
+        if args.verbose {
+            for path in &deleted_run_dirs {
+                println!(
+                    "[prune_factory_artifacts] would_delete_run_dir={}",
+                    path.display()
+                );
+            }
+            for path in &deleted_effective_configs {
+                println!(
+                    "[prune_factory_artifacts] would_delete_effective_config={}",
+                    path.display()
+                );
+            }
+            for path in &removed_date_dirs {
+                println!(
+                    "[prune_factory_artifacts] would_remove_date_dir={}",
+                    path.display()
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    for path in &deleted_run_dirs {
+        fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    for path in &deleted_effective_configs {
+        fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    for path in &removed_date_dirs {
+        if path.is_dir() {
+            fs::remove_dir(path).with_context(|| format!("remove {}", path.display()))?;
+        }
+    }
+
+    println!(
+        "[prune_factory_artifacts] profile={} kept_runs={} deleted_runs={} deleted_effective_configs={} removed_date_dirs={}",
+        run_prefix,
+        retained_run_ids.len(),
+        deleted_run_dirs.len(),
+        deleted_effective_configs.len(),
+        removed_date_dirs.len()
+    );
     Ok(())
 }
 
@@ -314,6 +486,271 @@ fn retired(args: RetiredArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct FactoryRunDir {
+    run_id: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FactoryStateRunRefs {
+    deployed_by_run_id: Option<String>,
+    last_transition_by_run_id: Option<String>,
+    source_config_path: Option<String>,
+    manifest_path: Option<String>,
+}
+
+fn resolve_project_dir(project_dir: Option<PathBuf>) -> Result<PathBuf> {
+    match project_dir {
+        Some(path) => Ok(normalise_path(&path)),
+        None => std::env::current_dir().context("failed to resolve current working directory"),
+    }
+}
+
+fn load_maintenance_factory_settings(path: &Path) -> Result<MaintenanceFactorySettings> {
+    if !path.is_file() {
+        return Ok(MaintenanceFactorySettings::default());
+    }
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read factory settings {}", path.display()))?;
+    serde_yaml::from_str(&text)
+        .with_context(|| format!("failed to parse factory settings {}", path.display()))
+}
+
+fn resolve_under_project(project_dir: &Path, raw: &Path) -> PathBuf {
+    if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        project_dir.join(raw)
+    }
+}
+
+fn collect_factory_run_dirs(artifacts_root: &Path, run_prefix: &str) -> Result<Vec<FactoryRunDir>> {
+    let mut run_dirs = Vec::new();
+    let wanted_prefix = format!("{run_prefix}_");
+
+    for entry in fs::read_dir(artifacts_root)
+        .with_context(|| format!("failed to read {}", artifacts_root.display()))?
+    {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !is_date_dir_name(name) {
+            continue;
+        }
+
+        for run_entry in
+            fs::read_dir(&path).with_context(|| format!("failed to read {}", path.display()))?
+        {
+            let run_path = run_entry?.path();
+            if !run_path.is_dir() {
+                continue;
+            }
+            let Some(run_name) = run_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(run_id) = run_name.strip_prefix("run_") else {
+                continue;
+            };
+            if !run_id.starts_with(&wanted_prefix) {
+                continue;
+            }
+            run_dirs.push(FactoryRunDir {
+                run_id: run_id.to_string(),
+                path: run_path,
+            });
+        }
+    }
+
+    run_dirs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    Ok(run_dirs)
+}
+
+fn collect_retained_run_ids(
+    project_dir: &Path,
+    artifacts_root: &Path,
+    run_prefix: &str,
+    settings: &MaintenanceFactorySettings,
+) -> Result<BTreeSet<String>> {
+    let mut retained = BTreeSet::new();
+    for state_dir in paper_state_dirs(project_dir, artifacts_root) {
+        if !state_dir.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&state_dir)
+            .with_context(|| format!("failed to read {}", state_dir.display()))?
+        {
+            let path = entry?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("factory_paper_soak_") || !name.ends_with(".json") {
+                continue;
+            }
+            extend_retained_run_ids_from_state(&mut retained, &path, run_prefix)?;
+        }
+    }
+
+    let live_state_path = resolve_under_project(project_dir, settings.live_state_path());
+    if live_state_path.is_file() {
+        extend_retained_run_ids_from_state(&mut retained, &live_state_path, run_prefix)?;
+    }
+
+    let live_yaml_path = resolve_under_project(project_dir, settings.live_yaml_path());
+    if let Some(run_id) = extract_run_id_from_live_yaml_base(&live_yaml_path, run_prefix)? {
+        retained.insert(run_id);
+    }
+
+    Ok(retained)
+}
+
+fn paper_state_dirs(project_dir: &Path, artifacts_root: &Path) -> BTreeSet<PathBuf> {
+    [
+        project_dir.join("artifacts").join("state"),
+        artifacts_root.join("state"),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn extend_retained_run_ids_from_state(
+    retained: &mut BTreeSet<String>,
+    path: &Path,
+    run_prefix: &str,
+) -> Result<()> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let state: FactoryStateRunRefs = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+
+    for maybe_run_id in [state.deployed_by_run_id, state.last_transition_by_run_id] {
+        if let Some(run_id) = maybe_run_id.filter(|value| is_matching_run_id(value, run_prefix)) {
+            retained.insert(run_id);
+        }
+    }
+
+    for maybe_path in [state.source_config_path, state.manifest_path] {
+        if let Some(run_id) = maybe_path
+            .as_deref()
+            .and_then(|value| extract_run_id_from_path(value, run_prefix))
+        {
+            retained.insert(run_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_run_id_from_live_yaml_base(path: &Path, run_prefix: &str) -> Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    for line in text.lines().take(20) {
+        let trimmed = line.trim();
+        let Some(raw) = trimmed.strip_prefix("# Base: ") else {
+            continue;
+        };
+        let run_id = raw.trim_end_matches(".yaml").trim();
+        if is_matching_run_id(run_id, run_prefix) {
+            return Ok(Some(run_id.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn extract_run_id_from_path(raw: &str, run_prefix: &str) -> Option<String> {
+    let wanted_prefix = format!("{run_prefix}_");
+    let path = Path::new(raw);
+    path.components().find_map(|component| {
+        let name = component.as_os_str().to_str()?;
+        let run_id = name.strip_prefix("run_")?;
+        run_id
+            .starts_with(&wanted_prefix)
+            .then(|| run_id.to_string())
+    })
+}
+
+fn collect_effective_configs_to_delete(
+    artifacts_root: &Path,
+    run_prefix: &str,
+    retained_run_ids: &BTreeSet<String>,
+) -> Result<Vec<PathBuf>> {
+    let effective_dir = artifacts_root.join("_effective_configs");
+    if !effective_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut to_delete = Vec::new();
+    for entry in fs::read_dir(&effective_dir)
+        .with_context(|| format!("failed to read {}", effective_dir.display()))?
+    {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !is_matching_run_id(stem, run_prefix) || retained_run_ids.contains(stem) {
+            continue;
+        }
+        to_delete.push(path);
+    }
+    to_delete.sort();
+    Ok(to_delete)
+}
+
+fn collect_empty_date_dirs(
+    artifacts_root: &Path,
+    deleted_run_dirs: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = BTreeSet::new();
+    let deleted: BTreeSet<PathBuf> = deleted_run_dirs.iter().cloned().collect();
+    for path in deleted_run_dirs {
+        if let Some(parent) = path.parent() {
+            candidates.insert(parent.to_path_buf());
+        }
+    }
+
+    let mut empty_dirs = Vec::new();
+    for path in candidates {
+        if path == artifacts_root {
+            continue;
+        }
+        let has_remaining_entries = fs::read_dir(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+            .filter_map(|entry| entry.ok().map(|value| value.path()))
+            .any(|entry_path| !deleted.contains(&entry_path));
+        if !has_remaining_entries {
+            empty_dirs.push(path);
+        }
+    }
+    Ok(empty_dirs)
+}
+
+fn is_matching_run_id(value: &str, run_prefix: &str) -> bool {
+    value.starts_with(&format!("{run_prefix}_"))
+}
+
+fn is_date_dir_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(idx, byte)| matches!(idx, 4 | 7) || byte.is_ascii_digit())
 }
 
 fn resolve_symbols() -> Vec<String> {
@@ -622,6 +1059,7 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::tempdir;
 
     #[test]
@@ -685,6 +1123,192 @@ mod tests {
     }
 
     #[test]
+    fn prune_factory_artifacts_keeps_latest_and_paper_deployed_runs() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path();
+        let artifacts_dir = project_dir.join("artifacts");
+
+        let deployed_run_id = "nightly_20260314T004910Z_444";
+        let stale_run_id = "nightly_20260313T001500Z_111";
+        let latest_run_id = "nightly_20260315T010000Z_222";
+        let deep_run_id = "deep_20260315T020000Z_333";
+
+        let deployed_run_dir = create_run_dir(&artifacts_dir, "2026-03-14", deployed_run_id);
+        let stale_run_dir = create_run_dir(&artifacts_dir, "2026-03-13", stale_run_id);
+        let latest_run_dir = create_run_dir(&artifacts_dir, "2026-03-15", latest_run_id);
+        let deep_run_dir = create_run_dir(&artifacts_dir, "2026-03-15", deep_run_id);
+
+        write_effective_config_stub(&artifacts_dir, deployed_run_id);
+        write_effective_config_stub(&artifacts_dir, stale_run_id);
+        write_effective_config_stub(&artifacts_dir, latest_run_id);
+        write_effective_config_stub(&artifacts_dir, deep_run_id);
+
+        write_json_file(
+            &artifacts_dir.join("state/factory_paper_soak_primary.json"),
+            &json!({
+                "deployed_by_run_id": deployed_run_id,
+                "source_config_path": deployed_run_dir
+                    .join("configs/candidate_primary.yaml")
+                    .display()
+                    .to_string()
+            }),
+        );
+
+        prune_factory_artifacts(PruneFactoryArtifactsArgs {
+            project_dir: Some(project_dir.to_path_buf()),
+            settings: PathBuf::from(DEFAULT_FACTORY_SETTINGS),
+            profile: FactoryArtifactsProfile::Nightly,
+            dry_run: false,
+            verbose: false,
+        })
+        .expect("prune factory artifacts succeeds");
+
+        assert!(deployed_run_dir.is_dir(), "deployed run should remain");
+        assert!(latest_run_dir.is_dir(), "latest run should remain");
+        assert!(!stale_run_dir.exists(), "stale run should be removed");
+        assert!(deep_run_dir.is_dir(), "other profiles should remain");
+
+        assert!(
+            artifacts_dir
+                .join(format!("_effective_configs/{deployed_run_id}.yaml"))
+                .is_file(),
+            "deployed effective config should remain"
+        );
+        assert!(
+            artifacts_dir
+                .join(format!("_effective_configs/{latest_run_id}.yaml"))
+                .is_file(),
+            "latest effective config should remain"
+        );
+        assert!(
+            !artifacts_dir
+                .join(format!("_effective_configs/{stale_run_id}.yaml"))
+                .exists(),
+            "stale effective config should be removed"
+        );
+        assert!(
+            artifacts_dir
+                .join(format!("_effective_configs/{deep_run_id}.yaml"))
+                .is_file(),
+            "other profile effective config should remain"
+        );
+        assert!(
+            !artifacts_dir.join("2026-03-13").exists(),
+            "empty nightly date directory should be removed"
+        );
+    }
+
+    #[test]
+    fn prune_factory_artifacts_keeps_live_yaml_base_run_when_state_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path();
+        let artifacts_dir = project_dir.join("artifacts");
+
+        let live_run_id = "nightly_20260227T010108Z";
+        let stale_run_id = "nightly_20260226T220000Z";
+        let latest_run_id = "nightly_20260315T010000Z_222";
+
+        let live_run_dir = create_run_dir(&artifacts_dir, "2026-02-27", live_run_id);
+        let stale_run_dir = create_run_dir(&artifacts_dir, "2026-02-26", stale_run_id);
+        let latest_run_dir = create_run_dir(&artifacts_dir, "2026-03-15", latest_run_id);
+
+        write_effective_config_stub(&artifacts_dir, live_run_id);
+        write_effective_config_stub(&artifacts_dir, stale_run_id);
+        write_effective_config_stub(&artifacts_dir, latest_run_id);
+
+        let live_yaml_path = project_dir.join(DEFAULT_FACTORY_LIVE_YAML_PATH);
+        ensure_parent_dir(&live_yaml_path).expect("create live yaml parent");
+        fs::write(
+            &live_yaml_path,
+            format!(
+                "# Generated by generate_config.py at 2026-02-27T03:13:25Z\n# Base: {live_run_id}.yaml\nglobal: {{}}\n"
+            ),
+        )
+        .expect("write live yaml");
+
+        prune_factory_artifacts(PruneFactoryArtifactsArgs {
+            project_dir: Some(project_dir.to_path_buf()),
+            settings: PathBuf::from(DEFAULT_FACTORY_SETTINGS),
+            profile: FactoryArtifactsProfile::Nightly,
+            dry_run: false,
+            verbose: false,
+        })
+        .expect("prune factory artifacts succeeds");
+
+        assert!(live_run_dir.is_dir(), "live base run should remain");
+        assert!(latest_run_dir.is_dir(), "latest run should remain");
+        assert!(!stale_run_dir.exists(), "stale run should be removed");
+        assert!(
+            artifacts_dir
+                .join(format!("_effective_configs/{live_run_id}.yaml"))
+                .is_file(),
+            "live base effective config should remain"
+        );
+        assert!(
+            !artifacts_dir
+                .join(format!("_effective_configs/{stale_run_id}.yaml"))
+                .exists(),
+            "stale effective config should be removed"
+        );
+    }
+
+    #[test]
+    fn prune_factory_artifacts_keeps_paper_deployed_run_with_custom_artifacts_dir() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path();
+        let custom_artifacts_dir = project_dir.join("custom_artifacts");
+
+        let deployed_run_id = "nightly_20260310T010000Z_111";
+        let stale_run_id = "nightly_20260309T010000Z_111";
+        let latest_run_id = "nightly_20260315T010000Z_222";
+
+        let deployed_run_dir = create_run_dir(&custom_artifacts_dir, "2026-03-10", deployed_run_id);
+        let stale_run_dir = create_run_dir(&custom_artifacts_dir, "2026-03-09", stale_run_id);
+        let latest_run_dir = create_run_dir(&custom_artifacts_dir, "2026-03-15", latest_run_id);
+
+        write_effective_config_stub(&custom_artifacts_dir, deployed_run_id);
+        write_effective_config_stub(&custom_artifacts_dir, stale_run_id);
+        write_effective_config_stub(&custom_artifacts_dir, latest_run_id);
+
+        write_json_file(
+            &project_dir.join("artifacts/state/factory_paper_soak_primary.json"),
+            &json!({
+                "deployed_by_run_id": deployed_run_id,
+                "source_config_path": deployed_run_dir
+                    .join("configs/candidate_primary.yaml")
+                    .display()
+                    .to_string()
+            }),
+        );
+
+        let settings_path = project_dir.join("config/factory_defaults.yaml");
+        ensure_parent_dir(&settings_path).expect("create settings parent");
+        fs::write(&settings_path, "artifacts_dir: custom_artifacts\n").expect("write settings");
+
+        prune_factory_artifacts(PruneFactoryArtifactsArgs {
+            project_dir: Some(project_dir.to_path_buf()),
+            settings: PathBuf::from(DEFAULT_FACTORY_SETTINGS),
+            profile: FactoryArtifactsProfile::Nightly,
+            dry_run: false,
+            verbose: false,
+        })
+        .expect("prune factory artifacts succeeds");
+
+        assert!(
+            deployed_run_dir.is_dir(),
+            "deployed run from fixed paper state path should remain"
+        );
+        assert!(latest_run_dir.is_dir(), "latest run should remain");
+        assert!(!stale_run_dir.exists(), "stale run should be removed");
+        assert!(
+            custom_artifacts_dir
+                .join(format!("_effective_configs/{deployed_run_id}.yaml"))
+                .is_file(),
+            "deployed effective config should remain"
+        );
+    }
+
+    #[test]
     fn retired_writes_payload_when_requested() {
         let dir = tempdir().expect("tempdir");
         let json_path = dir.path().join("retired.json");
@@ -699,5 +1323,29 @@ mod tests {
         let payload = fs::read_to_string(json_path).expect("retired payload");
         assert!(payload.contains("\"retired\": true"));
         assert!(payload.contains("\"status\": \"blocked\""));
+    }
+
+    fn create_run_dir(artifacts_dir: &Path, date: &str, run_id: &str) -> PathBuf {
+        let run_dir = artifacts_dir.join(date).join(format!("run_{run_id}"));
+        fs::create_dir_all(run_dir.join("promoted_configs")).expect("create run dir");
+        fs::write(run_dir.join("run_metadata.json"), "{}").expect("write run metadata");
+        run_dir
+    }
+
+    fn write_effective_config_stub(artifacts_dir: &Path, run_id: &str) {
+        let path = artifacts_dir
+            .join("_effective_configs")
+            .join(format!("{run_id}.yaml"));
+        ensure_parent_dir(&path).expect("create effective config parent");
+        fs::write(path, "global: {}\n").expect("write effective config");
+    }
+
+    fn write_json_file(path: &Path, value: &serde_json::Value) {
+        ensure_parent_dir(path).expect("create JSON parent");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(value).expect("serialise JSON"),
+        )
+        .expect("write JSON");
     }
 }

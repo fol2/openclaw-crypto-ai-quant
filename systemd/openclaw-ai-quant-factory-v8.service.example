@@ -9,6 +9,8 @@ TimeoutStartSec=0
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=%h/.config/openclaw/ai-quant-v8.env
 ExecStart=$PROJECT_DIR/target/release/aiq-factory run --config $PROJECT_DIR/config/strategy_overrides.yaml --settings $PROJECT_DIR/config/factory_defaults.yaml --profile daily --json
+# Requires target/release/aiq-maintenance to be built on the host as well.
+ExecStartPost=-$PROJECT_DIR/target/release/aiq-maintenance prune-factory-artifacts --project-dir $PROJECT_DIR --settings $PROJECT_DIR/config/factory_defaults.yaml --profile nightly
 
 [Install]
 WantedBy=default.target

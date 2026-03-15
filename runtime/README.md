@@ -26,6 +26,7 @@ cargo run -p aiq-runtime -- snapshot export-paper --db trading_engine.db --outpu
 cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper.json --target-db trading_engine.db --strict-replace --json
 
 cargo run -p aiq-runtime --bin aiq-maintenance -- fetch-funding-rates --days 30 --db candles_dbs/funding_rates.db
+cargo run -p aiq-runtime --bin aiq-maintenance -- prune-factory-artifacts --project-dir "$PWD" --settings config/factory_defaults.yaml --profile nightly
 cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db trading_engine.db
 ```
 
@@ -109,6 +110,7 @@ Use the shell wrappers when you want stable service-style entrypoints:
 Use the maintenance binary when you need the kept Rust-owned one-shot jobs:
 
 - `aiq-maintenance fetch-funding-rates`
+- `aiq-maintenance prune-factory-artifacts`
 - `aiq-maintenance prune-runtime-logs`
 
 ## Validation
