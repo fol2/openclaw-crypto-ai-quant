@@ -111,62 +111,6 @@
     if (v === null || v === undefined || !Number.isFinite(v)) return '\u2014';
     return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
   }
-  function fmtAge(s: number | null | undefined): string {
-    if (s === null || s === undefined) return '\u2014';
-    if (s < 60) return `${Math.round(s)}s`;
-    if (s < 3600) return `${Math.round(s / 60)}m`;
-    if (s < 86_400) return `${(s / 3600).toFixed(1)}h`;
-    return `${(s / 86_400).toFixed(1)}d`;
-  }
-  function liveTruthSourceLabel(source: string | null | undefined): string {
-    switch (String(source || '')) {
-      case 'hyperliquid_cache': return 'Hyperliquid cache';
-      case 'db_exchange_snapshot': return 'DB exchange snapshot';
-      case 'ledger_projection': return 'Ledger projection';
-      case 'paper_estimate': return 'Paper estimate';
-      default: return String(source || '\u2014');
-    }
-  }
-  function liveTruthStatusLabel(status: string | null | undefined): string {
-    switch (String(status || '')) {
-      case 'exchange_observed_unreconciled': return 'exchange observed, unreconciled';
-      case 'snapshot_backed_unreconciled': return 'snapshot backed, unreconciled';
-      case 'degraded_last_known_good_only': return 'derived from ledger only';
-      case 'no_current_exchange_observation': return 'no current exchange observation';
-      case 'paper_estimate': return 'paper estimate';
-      default: return String(status || '\u2014');
-    }
-  }
-  function liveTruthFreshnessLabel(freshness: string | null | undefined): string {
-    switch (String(freshness || '')) {
-      case 'current': return 'current';
-      case 'derived': return 'derived only';
-      case 'paper': return 'paper';
-      default: return String(freshness || '\u2014');
-    }
-  }
-  function liveTruthTone(payload: any): 'ok' | 'warn' | 'danger' | 'muted' {
-    const status = String(payload?.reconciliation_status || '');
-    if (status === 'no_current_exchange_observation') return 'danger';
-    if (status === 'degraded_last_known_good_only') return 'warn';
-    if (String(payload?.freshness || '') === 'current') return 'warn';
-    if (String(payload?.freshness || '') === 'paper') return 'muted';
-    return 'muted';
-  }
-  function truthAsOf(ts: string | null | undefined): string {
-    if (!ts) return '\u2014';
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return ts;
-    return d.toISOString().slice(11, 19) + 'Z';
-  }
-  function truthAgeMs(payload: any): number | null {
-    const ageMs = Number(payload?.age_ms);
-    return Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : null;
-  }
-  function truthFallbackAgeMs(payload: any): number | null {
-    const ageMs = Number(payload?.fallback_age_ms);
-    return Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : null;
-  }
   function pnlClass(v: number | null | undefined): string {
     if (v === null || v === undefined) return '';
     return v >= 0 ? 'green' : 'red';
@@ -175,7 +119,6 @@
   // ── Derived metrics from snapshot ─────────────────────────────────
   let health = $derived(snap?.health || {});
   let balances = $derived(snap?.balances || {});
-  let holdings = $derived(snap?.holdings || {});
   let daily = $derived(snap?.daily || {});
   let openPositions = $derived(snap?.open_positions || []);
 
@@ -447,12 +390,12 @@
       </span>
     {/if}
     <span class="metric-pill">
-      <span class="metric-label">{mode === LIVE_MODE ? 'CASH' : 'BAL'}</span>
-      <span class="metric-value">${fmtNum(balances.realised_cash_usd ?? balances.realised_usd)}</span>
+      <span class="metric-label">BAL</span>
+      <span class="metric-value">${fmtNum(balances.realised_usd)}</span>
     </span>
     <span class="metric-pill">
       <span class="metric-label">EQ</span>
-      <span class="metric-value">${fmtNum(balances.exchange_equity_usd ?? balances.equity_est_usd)}</span>
+      <span class="metric-value">${fmtNum(balances.equity_est_usd)}</span>
     </span>
     <span class="range-dropdown-wrap">
       <button class="metric-pill range-pill {pnlClass(activePnl)}" onclick={() => rangeMenuOpen = !rangeMenuOpen}>
@@ -482,67 +425,6 @@
       <span class="metric-value">{openPositions.length}</span>
     </span>
   </div>
-  {#if mode === LIVE_MODE}
-    <div class="truth-bar">
-      <div class="truth-pill" class:ok={liveTruthTone(balances) === 'ok'} class:warn={liveTruthTone(balances) === 'warn'} class:danger={liveTruthTone(balances) === 'danger'}>
-        <span class="truth-label">Balances</span>
-        <span class="truth-text">
-          {liveTruthSourceLabel(balances.source)}
-          <span class="truth-sep">\u00b7</span>
-          {liveTruthFreshnessLabel(balances.freshness)}
-          {#if balances.as_of}
-            <span class="truth-sep">\u00b7</span>
-            as of {truthAsOf(balances.as_of)}
-          {/if}
-          {#if truthAgeMs(balances) != null}
-            <span class="truth-sep">\u00b7</span>
-            age {fmtAge((truthAgeMs(balances) ?? 0) / 1000)}
-          {/if}
-          <span class="truth-sep">\u00b7</span>
-          {liveTruthStatusLabel(balances.reconciliation_status)}
-        </span>
-      </div>
-      <div class="truth-pill" class:ok={liveTruthTone(holdings) === 'ok'} class:warn={liveTruthTone(holdings) === 'warn'} class:danger={liveTruthTone(holdings) === 'danger'}>
-        <span class="truth-label">Holdings</span>
-        <span class="truth-text">
-          {liveTruthSourceLabel(holdings.source)}
-          <span class="truth-sep">\u00b7</span>
-          {liveTruthFreshnessLabel(holdings.freshness)}
-          {#if holdings.as_of}
-            <span class="truth-sep">\u00b7</span>
-            as of {truthAsOf(holdings.as_of)}
-          {/if}
-          {#if truthAgeMs(holdings) != null}
-            <span class="truth-sep">\u00b7</span>
-            age {fmtAge((truthAgeMs(holdings) ?? 0) / 1000)}
-          {/if}
-          <span class="truth-sep">\u00b7</span>
-          {liveTruthStatusLabel(holdings.reconciliation_status)}
-        </span>
-      </div>
-      {#if balances.fallback_source || holdings.fallback_source}
-        <div class="truth-pill muted">
-          <span class="truth-label">Last Known Good</span>
-          <span class="truth-text">
-            {liveTruthSourceLabel(balances.fallback_source || holdings.fallback_source)}
-            {#if balances.fallback_as_of || holdings.fallback_as_of}
-              <span class="truth-sep">\u00b7</span>
-              as of {truthAsOf(balances.fallback_as_of || holdings.fallback_as_of)}
-            {/if}
-            {#if truthFallbackAgeMs(balances) != null || truthFallbackAgeMs(holdings) != null}
-              <span class="truth-sep">\u00b7</span>
-              age {fmtAge(((truthFallbackAgeMs(balances) ?? truthFallbackAgeMs(holdings) ?? 0)) / 1000)}
-            {/if}
-            <span class="truth-sep">\u00b7</span>
-            informational only
-          </span>
-        </div>
-      {/if}
-    </div>
-    <div class="truth-note">
-      Realised cash remains a legacy trade-ledger field and is not yet reconciled exchange cash.
-    </div>
-  {/if}
 
   {#if showTrendBar}
   <div class="trend-bar">
@@ -785,57 +667,6 @@
   }
   .metric-pill.green .metric-value { color: var(--green); }
   .metric-pill.red .metric-value { color: var(--red); }
-  .truth-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: var(--sp-sm);
-  }
-  .truth-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--surface) 82%, transparent);
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    line-height: 1.4;
-    flex-wrap: wrap;
-  }
-  .truth-pill.ok {
-    border-color: rgba(81,207,102,0.28);
-  }
-  .truth-pill.warn {
-    border-color: rgba(252,196,25,0.3);
-    background: rgba(252,196,25,0.08);
-  }
-  .truth-pill.danger {
-    border-color: rgba(255,107,107,0.35);
-    background: rgba(255,107,107,0.08);
-  }
-  .truth-pill.muted {
-    opacity: 0.88;
-  }
-  .truth-label {
-    color: var(--text);
-    font-weight: 600;
-  }
-  .truth-text {
-    color: var(--text-muted);
-  }
-  .truth-sep {
-    margin: 0 3px;
-    color: var(--text-dim);
-  }
-  .truth-note {
-    margin-bottom: var(--sp-sm);
-    color: var(--text-muted);
-    font-size: 11px;
-    line-height: 1.4;
-    font-family: 'IBM Plex Mono', monospace;
-  }
 
   .range-dropdown-wrap {
     position: relative;

@@ -8,7 +8,7 @@ This directory is the repository source of truth for planning documents.
 
 Current active items:
 
-- `runtime/live-financial-reconciliation-plan.md`
+None currently listed.
 
 Current archived items include:
 
@@ -17,4 +17,4 @@ Current archived items include:
 
 Current backlog items:
 
-None currently listed.
+- `runtime/live-financial-reconciliation-plan.md`

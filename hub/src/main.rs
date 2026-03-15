@@ -481,7 +481,7 @@ fn spawn_hl_poller(state: Arc<AppState>) {
                     let mut guard = state.hl_snapshot.write().await;
                     *guard = Some(state::CachedHlSnapshot {
                         snapshot: snap,
-                        fetched_at_ms: Utc::now().timestamp_millis(),
+                        fetched_at: std::time::Instant::now(),
                     });
                 }
                 None => {
