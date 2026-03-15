@@ -101,7 +101,7 @@ struct PruneFactoryArtifactsArgs {
 #[derive(Args, Debug)]
 struct PruneRuntimeLogsArgs {
     #[arg(long)]
-    db: Option<PathBuf>,
+    db: Vec<PathBuf>,
     #[arg(long)]
     keep_days: Option<f64>,
     #[arg(long, default_value_t = false)]
@@ -365,11 +365,6 @@ fn prune_factory_artifacts(args: PruneFactoryArtifactsArgs) -> Result<()> {
 }
 
 fn prune_runtime_logs(args: PruneRuntimeLogsArgs) -> Result<()> {
-    let db_path = resolve_runtime_db(args.db);
-    if !db_path.exists() {
-        return Ok(());
-    }
-
     let keep_days = args
         .keep_days
         .unwrap_or_else(|| env_f64("AI_QUANT_RUNTIME_LOG_KEEP_DAYS").unwrap_or(DEFAULT_KEEP_DAYS))
@@ -377,9 +372,33 @@ fn prune_runtime_logs(args: PruneRuntimeLogsArgs) -> Result<()> {
     let runtime_cutoff_ts_ms = cutoff_ts_ms(keep_days)?;
     let tunnel_cutoff_ts_ms = cutoff_ts_ms(EXIT_TUNNEL_KEEP_DAYS)?;
 
+    for db_path in resolve_runtime_dbs(args.db) {
+        prune_runtime_logs_db(
+            &db_path,
+            runtime_cutoff_ts_ms,
+            tunnel_cutoff_ts_ms,
+            args.dry_run,
+            args.vacuum,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn prune_runtime_logs_db(
+    db_path: &Path,
+    runtime_cutoff_ts_ms: i64,
+    tunnel_cutoff_ts_ms: i64,
+    dry_run: bool,
+    vacuum: bool,
+) -> Result<()> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+
     let mut attempt = 0u32;
     loop {
-        let conn = Connection::open(&db_path)
+        let conn = Connection::open(db_path)
             .with_context(|| format!("failed to open runtime DB {}", db_path.display()))?;
 
         let result = (|| -> Result<()> {
@@ -394,7 +413,7 @@ fn prune_runtime_logs(args: PruneRuntimeLogsArgs) -> Result<()> {
                 return Ok(());
             }
 
-            if args.dry_run {
+            if dry_run {
                 println!(
                     "[prune_runtime_logs] would_delete={} cutoff_ts_ms={} db={}",
                     delete_count,
@@ -432,7 +451,7 @@ fn prune_runtime_logs(args: PruneRuntimeLogsArgs) -> Result<()> {
                 }
             }
 
-            if args.vacuum {
+            if vacuum {
                 conn.execute_batch("VACUUM")
                     .context("failed to vacuum runtime DB")?;
             }
@@ -932,18 +951,32 @@ fn insert_funding_rows(
     usize::try_from(inserted).context("funding insert count overflowed usize")
 }
 
-fn resolve_runtime_db(value: Option<PathBuf>) -> PathBuf {
-    if let Some(path) = value {
-        return normalise_path(&path);
+fn resolve_runtime_dbs(values: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut resolved = Vec::new();
+
+    let mut push_unique = |path: PathBuf| {
+        let path = normalise_path(&path);
+        if !resolved.contains(&path) {
+            resolved.push(path);
+        }
+    };
+
+    if !values.is_empty() {
+        for path in values {
+            push_unique(path);
+        }
+        return resolved;
     }
 
     if let Ok(path) = std::env::var("AI_QUANT_DB_PATH") {
         if !path.trim().is_empty() {
-            return normalise_path(Path::new(&path));
+            push_unique(PathBuf::from(path));
+            return resolved;
         }
     }
 
-    normalise_path(Path::new(DEFAULT_RUNTIME_DB))
+    push_unique(PathBuf::from(DEFAULT_RUNTIME_DB));
+    resolved
 }
 
 fn configure_connection(conn: &Connection) -> Result<()> {
@@ -1104,7 +1137,7 @@ mod tests {
         drop(conn);
 
         prune_runtime_logs(PruneRuntimeLogsArgs {
-            db: Some(db_path.clone()),
+            db: vec![db_path.clone()],
             keep_days: Some(14.0),
             dry_run: false,
             vacuum: false,
@@ -1120,6 +1153,61 @@ mod tests {
             .expect("exit_tunnel count");
         assert_eq!(runtime_count, 1);
         assert_eq!(tunnel_count, 1);
+    }
+
+    #[test]
+    fn prune_runtime_logs_handles_multiple_databases_in_one_run() {
+        let dir = tempdir().expect("tempdir");
+        let db_a = dir.path().join("paper1.db");
+        let db_b = dir.path().join("paper2.db");
+
+        for db_path in [&db_a, &db_b] {
+            let conn = Connection::open(db_path).expect("open db");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE runtime_logs (ts_ms INTEGER NOT NULL);
+                CREATE TABLE exit_tunnel (ts_ms INTEGER NOT NULL);
+                "#,
+            )
+            .expect("schema");
+
+            let now_ms = now_ms().expect("now");
+            let stale_runtime = now_ms - 20 * 86_400_000;
+            let fresh_runtime = now_ms - 1_000;
+            let stale_tunnel = now_ms - 40 * 86_400_000;
+            let fresh_tunnel = now_ms - 10 * 86_400_000;
+
+            conn.execute(
+                "INSERT INTO runtime_logs (ts_ms) VALUES (?1), (?2)",
+                params![stale_runtime, fresh_runtime],
+            )
+            .expect("seed runtime_logs");
+            conn.execute(
+                "INSERT INTO exit_tunnel (ts_ms) VALUES (?1), (?2)",
+                params![stale_tunnel, fresh_tunnel],
+            )
+            .expect("seed exit_tunnel");
+        }
+
+        prune_runtime_logs(PruneRuntimeLogsArgs {
+            db: vec![db_a.clone(), db_b.clone()],
+            keep_days: Some(14.0),
+            dry_run: false,
+            vacuum: false,
+        })
+        .expect("prune succeeds");
+
+        for db_path in [&db_a, &db_b] {
+            let conn = Connection::open(db_path).expect("reopen db");
+            let runtime_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM runtime_logs", [], |row| row.get(0))
+                .expect("runtime_logs count");
+            let tunnel_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM exit_tunnel", [], |row| row.get(0))
+                .expect("exit_tunnel count");
+            assert_eq!(runtime_count, 1);
+            assert_eq!(tunnel_count, 1);
+        }
     }
 
     #[test]

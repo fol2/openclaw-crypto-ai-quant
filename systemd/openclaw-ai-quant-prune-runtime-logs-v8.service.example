@@ -7,7 +7,11 @@ StartLimitIntervalSec=60
 Type=oneshot
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
-ExecStart=$PROJECT_DIR/target/release/aiq-maintenance prune-runtime-logs
+ExecStart=$PROJECT_DIR/target/release/aiq-maintenance prune-runtime-logs \
+  --db $PROJECT_DIR/trading_engine_v8_live.db \
+  --db $PROJECT_DIR/trading_engine_v8_paper1.db \
+  --db $PROJECT_DIR/trading_engine_v8_paper2.db \
+  --db $PROJECT_DIR/trading_engine_v8_paper3.db
 
 # Security hardening
 NoNewPrivileges=true
