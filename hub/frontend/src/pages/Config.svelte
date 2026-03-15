@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
     applyLiveConfig,
     approveConfigApproval,
@@ -11,26 +12,47 @@
     rejectConfigApproval,
     requestLiveApplyConfig,
   } from '../lib/api';
+  import { getConfigLabel } from '../lib/mode-labels';
 
-  let files: any[] = $state([]);
-  let selectedFile = $state('main');
+  type ConfigTab = 'editor' | 'history' | 'diff' | 'approvals';
+
+  type ConfigFileEntry = {
+    variant: string;
+    exists: boolean;
+    filename?: string;
+    modified?: string;
+    size?: number;
+  };
+
+  type ConfigHistoryEntry = {
+    filename: string;
+    modified?: string;
+    size: number;
+  };
+
+  const DEFAULT_CONFIG_FILE = 'main';
+  const CURRENT_DIFF_TARGET = 'current';
+
+  let files: ConfigFileEntry[] = $state([]);
+  let selectedFile = $state(DEFAULT_CONFIG_FILE);
   let yamlText = $state('');
   let originalText = $state('');
   let currentLockId = $state<string | null>(null);
   let currentRuntimeConfigId = $state<string | null>(null);
   let dirty = $derived(yamlText !== originalText);
   let liveFile = $derived(selectedFile === 'live');
+  let selectedFileMeta = $derived(files.find((file) => file.variant === selectedFile) ?? null);
   let saving = $state(false);
   let loading = $state(false);
   let error = $state('');
   let success = $state('');
-  let tab: 'editor' | 'history' | 'diff' | 'approvals' = $state('editor');
+  let tab: ConfigTab = $state('editor');
 
-  let history: any[] = $state([]);
+  let history: ConfigHistoryEntry[] = $state([]);
   let loadingHistory = $state(false);
 
   let diffA = $state('');
-  let diffB = $state('current');
+  let diffB = $state(CURRENT_DIFF_TARGET);
   let diffResult: string[] = $state([]);
   let loadingDiff = $state(false);
   let approvals: any[] = $state([]);
@@ -38,24 +60,92 @@
   let approvalError = $state('');
   let approvalNotice = $state('');
   let approvalBusyId = $state('');
+  let filesLoadToken = 0;
+  let configLoadToken = 0;
+  let historyLoadToken = 0;
+  let diffLoadToken = 0;
 
-  async function loadFiles() {
-    try { files = await getConfigFiles(); } catch {}
+  function normaliseConfigFiles(response: unknown): ConfigFileEntry[] {
+    if (Array.isArray(response)) return response as ConfigFileEntry[];
+    if (response && Array.isArray((response as { files?: unknown }).files)) {
+      return (response as { files: ConfigFileEntry[] }).files;
+    }
+    return [];
   }
 
-  async function loadConfig() {
+  function normaliseConfigHistory(response: unknown): ConfigHistoryEntry[] {
+    if (Array.isArray(response)) return response as ConfigHistoryEntry[];
+    if (response && Array.isArray((response as { history?: unknown }).history)) {
+      return (response as { history: ConfigHistoryEntry[] }).history;
+    }
+    return [];
+  }
+
+  function resetHistoryAndDiff() {
+    history = [];
+    diffA = '';
+    diffB = CURRENT_DIFF_TARGET;
+    diffResult = [];
+    loadingHistory = false;
+    loadingDiff = false;
+    diffLoadToken += 1;
+  }
+
+  function clearLoadedConfig() {
+    yamlText = '';
+    originalText = '';
+    currentLockId = null;
+    currentRuntimeConfigId = null;
+  }
+
+  function resolveSelectableFile(entries: ConfigFileEntry[], currentFile: string): string {
+    if (entries.some((entry) => entry.variant === currentFile && entry.exists)) {
+      return currentFile;
+    }
+    return entries.find((entry) => entry.exists)?.variant || DEFAULT_CONFIG_FILE;
+  }
+
+  async function loadFiles() {
+    const requestToken = ++filesLoadToken;
+    try {
+      const response = await getConfigFiles();
+      if (requestToken !== filesLoadToken) return;
+      files = normaliseConfigFiles(response);
+    } catch {
+      if (requestToken !== filesLoadToken) return;
+      files = [];
+    }
+
+    const nextFile = resolveSelectableFile(files, selectedFile);
+    if (nextFile !== selectedFile) {
+      selectedFile = nextFile;
+      clearLoadedConfig();
+      resetHistoryAndDiff();
+    }
+  }
+
+  async function loadConfig(file = selectedFile) {
+    const requestToken = ++configLoadToken;
     loading = true;
     error = '';
+    clearLoadedConfig();
     try {
-      const res = await getConfigRawPrivileged(selectedFile);
+      const res = await getConfigRawPrivileged(file);
+      if (requestToken !== configLoadToken || file !== selectedFile) return;
       yamlText = res.raw;
       originalText = res.raw;
       currentLockId = res.lockId;
       currentRuntimeConfigId = res.runtimeConfigId;
     } catch (e: any) {
-      error = e.message || 'Privileged config access is required to load raw YAML';
+      if (requestToken !== configLoadToken || file !== selectedFile) return;
+      const message = e?.message || '';
+      error = message.includes('401') || message.includes('403')
+        ? 'Raw YAML and raw diffs now require an admin token on the privileged config routes.'
+        : message || 'Privileged config access is required to load raw YAML';
     } finally {
-      loading = false;
+      if (requestToken === configLoadToken && file === selectedFile) {
+        loading = false;
+      }
     }
   }
 
@@ -127,9 +217,12 @@
     approvalError = '';
     try {
       const res = await getPendingConfigApprovals();
-      approvals = res?.requests || [];
+      approvals = Array.isArray(res?.requests) ? res.requests : [];
     } catch (e: any) {
-      approvalError = e?.message || 'Failed to load pending approvals';
+      const message = e?.message || '';
+      approvalError = message.includes('401') || message.includes('403')
+        ? 'Pending approvals require an editor or approver token.'
+        : message || 'Failed to load pending approvals';
       approvals = [];
     } finally {
       loadingApprovals = false;
@@ -175,22 +268,73 @@
     }
   }
 
-  async function loadHistory() {
+  async function loadHistory(file = selectedFile) {
+    const requestToken = ++historyLoadToken;
     loadingHistory = true;
-    try { history = await getConfigHistory(selectedFile); } catch {}
-    loadingHistory = false;
+    try {
+      const response = await getConfigHistory(file);
+      if (requestToken !== historyLoadToken || file !== selectedFile) return;
+      history = normaliseConfigHistory(response);
+      const filenames = new Set(history.map((entry) => entry.filename));
+      if (!filenames.has(diffA)) {
+        diffA = history[0]?.filename ?? '';
+      }
+      if (diffB !== CURRENT_DIFF_TARGET && !filenames.has(diffB)) {
+        diffB = CURRENT_DIFF_TARGET;
+      }
+      if (diffA && diffA === diffB) {
+        diffB = CURRENT_DIFF_TARGET;
+      }
+      diffResult = [];
+    } catch {
+      if (requestToken !== historyLoadToken || file !== selectedFile) return;
+      resetHistoryAndDiff();
+    } finally {
+      if (requestToken === historyLoadToken && file === selectedFile) {
+        loadingHistory = false;
+      }
+    }
   }
 
   async function loadDiff() {
-    if (!diffA) return;
+    if (!diffA || diffA === diffB) return;
+    const requestToken = ++diffLoadToken;
+    const file = selectedFile;
+    const versionA = diffA;
+    const versionB = diffB;
     loadingDiff = true;
+    diffResult = [];
     try {
-      const res = await getConfigDiffPrivileged(diffA, diffB, selectedFile);
-      diffResult = res.diff || [];
+      const res = await getConfigDiffPrivileged(versionA, versionB, file);
+      if (
+        requestToken !== diffLoadToken
+        || file !== selectedFile
+        || versionA !== diffA
+        || versionB !== diffB
+      ) {
+        return;
+      }
+      diffResult = Array.isArray(res?.diff) ? res.diff : [];
     } catch (e: any) {
+      if (
+        requestToken !== diffLoadToken
+        || file !== selectedFile
+        || versionA !== diffA
+        || versionB !== diffB
+      ) {
+        return;
+      }
       diffResult = [`Error: ${e.message}`];
+    } finally {
+      if (
+        requestToken === diffLoadToken
+        && file === selectedFile
+        && versionA === diffA
+        && versionB === diffB
+      ) {
+        loadingDiff = false;
+      }
     }
-    loadingDiff = false;
   }
 
   function colorDiffLine(line: string): string {
@@ -200,12 +344,49 @@
     return `<span class="diff-ctx">${escaped}</span>`;
   }
 
-  $effect(() => { loadFiles(); loadConfig(); loadApprovals(); });
+  async function openTab(nextTab: ConfigTab) {
+    tab = nextTab;
+    if (nextTab !== 'editor') {
+      error = '';
+    }
+    if (nextTab !== 'approvals') {
+      approvalError = '';
+      approvalNotice = '';
+    }
+    if (nextTab === 'editor') {
+      if (!dirty) {
+        await loadConfig();
+      }
+    } else if (nextTab === 'history' || nextTab === 'diff') {
+      resetHistoryAndDiff();
+      await loadHistory();
+    } else if (nextTab === 'approvals') {
+      await loadApprovals();
+    }
+  }
+
+  async function initialisePage() {
+    await loadFiles();
+    await openTab(tab);
+  }
+
+  onMount(() => {
+    void initialisePage();
+  });
 
   function onFileChange(e: Event) {
-    selectedFile = (e.target as HTMLSelectElement).value;
-    loadConfig();
-    if (tab === 'history') loadHistory();
+    const nextFile = (e.target as HTMLSelectElement).value;
+    if (nextFile === selectedFile) return;
+    selectedFile = nextFile;
+    error = '';
+    success = '';
+    clearLoadedConfig();
+    resetHistoryAndDiff();
+    if (tab === 'editor') {
+      void loadConfig(nextFile);
+    } else if (tab === 'history' || tab === 'diff') {
+      void loadHistory(nextFile);
+    }
   }
 </script>
 
@@ -215,17 +396,17 @@
     <select class="file-select" onchange={onFileChange} value={selectedFile}>
       {#each files as f}
         <option value={f.variant} disabled={!f.exists}>
-          {f.variant}{f.exists ? '' : ' (missing)'}
+          {getConfigLabel(f.variant)}{f.exists ? '' : ' (missing)'}
         </option>
       {/each}
     </select>
   </div>
 
   <div class="tabs">
-    <button class="tab" class:active={tab === 'editor'} onclick={() => tab = 'editor'}>Editor</button>
-    <button class="tab" class:active={tab === 'history'} onclick={() => { tab = 'history'; loadHistory(); }}>History</button>
-    <button class="tab" class:active={tab === 'diff'} onclick={() => { tab = 'diff'; loadHistory(); }}>Diff</button>
-    <button class="tab" class:active={tab === 'approvals'} onclick={() => { tab = 'approvals'; loadApprovals(); }}>Approvals</button>
+    <button class="tab" class:active={tab === 'editor'} onclick={() => void openTab('editor')}>Editor</button>
+    <button class="tab" class:active={tab === 'history'} onclick={() => void openTab('history')}>History</button>
+    <button class="tab" class:active={tab === 'diff'} onclick={() => void openTab('diff')}>Diff</button>
+    <button class="tab" class:active={tab === 'approvals'} onclick={() => void openTab('approvals')}>Approvals</button>
   </div>
 
   {#if error}
@@ -234,17 +415,17 @@
   {#if success}
     <div class="alert alert-success">{success}</div>
   {/if}
-  {#if approvalError}
+  {#if tab === 'approvals' && approvalError}
     <div class="alert alert-error">{approvalError}</div>
   {/if}
-  {#if approvalNotice}
+  {#if tab === 'approvals' && approvalNotice}
     <div class="alert alert-success">{approvalNotice}</div>
   {/if}
 
   {#if tab === 'editor'}
     <div class="editor-section">
       <div class="editor-toolbar">
-        <span class="file-label">{selectedFile}.yaml</span>
+        <span class="file-label">{selectedFileMeta?.filename || `${selectedFile}.yaml`}</span>
         {#if dirty}
           <span class="dirty-badge">unsaved</span>
         {/if}
@@ -262,7 +443,9 @@
         </div>
       </div>
       <div class="editor-note" class:editor-note-live={liveFile}>
-        {#if liveFile}
+        {#if error}
+          Open this tab with an admin token after the redaction split. Editor and approver tokens can still use their own routes, but raw YAML lives behind the privileged config endpoints.
+        {:else if liveFile}
           Applying live config uses the supervised live apply contract. A config identity change requires a service restart, and stale or stopped lanes may still be supervised.
         {:else}
           Saving writes YAML only. Running services are not hot-reloaded from this editor.
@@ -270,7 +453,7 @@
       </div>
       {#if loading}
         <div class="loading-state">Loading config...</div>
-      {:else}
+      {:else if !error}
         <textarea
           class="yaml-editor"
           bind:value={yamlText}
@@ -285,7 +468,7 @@
       {#if loadingHistory}
         <div class="loading-state">Loading history...</div>
       {:else if history.length === 0}
-        <div class="empty-state">No backups yet for {selectedFile}</div>
+        <div class="empty-state">No backups yet for {getConfigLabel(selectedFile)}</div>
       {:else}
         <div class="table-wrap">
           <table class="data-table">
@@ -331,7 +514,9 @@
           {loadingDiff ? 'Loading...' : 'Compare'}
         </button>
       </div>
-      {#if diffResult.length > 0}
+      {#if history.length === 0}
+        <div class="empty-state">Load a file with backups to compare against the current version.</div>
+      {:else if diffResult.length > 0}
         <pre class="diff-view">{#each diffResult as line}{@html colorDiffLine(line)}
 {/each}</pre>
       {/if}

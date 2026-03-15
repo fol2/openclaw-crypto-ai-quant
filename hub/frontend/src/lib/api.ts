@@ -176,6 +176,15 @@ export async function getTunnel(symbol: string, mode = 'paper', fromTs?: number,
 
 // ── Config API ──────────────────────────────────────────────────────
 
+function normaliseListResponse<T>(value: unknown, key: string): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (value && typeof value === 'object') {
+    const candidate = (value as Record<string, unknown>)[key];
+    if (Array.isArray(candidate)) return candidate as T[];
+  }
+  return [];
+}
+
 export async function getConfig(file = 'main') {
   return apiFetch(`/api/config?file=${encodeURIComponent(file)}`);
 }
@@ -227,7 +236,8 @@ export async function putConfig(yaml: string, file = 'main', expectedConfigId?: 
 }
 
 export async function getConfigHistory(file = 'main') {
-  return apiFetch(`/api/config/history?file=${encodeURIComponent(file)}`);
+  const response = await apiFetch(`/api/config/history?file=${encodeURIComponent(file)}`);
+  return normaliseListResponse(response, 'history');
 }
 
 export async function getConfigDiff(a: string, b: string, file = 'main') {
@@ -241,7 +251,8 @@ export async function getConfigDiffPrivileged(a: string, b: string, file = 'main
 }
 
 export async function getConfigFiles() {
-  return apiFetch('/api/config/files');
+  const response = await apiFetch('/api/config/files');
+  return normaliseListResponse(response, 'files');
 }
 
 export interface PromoteLiveRequest {
