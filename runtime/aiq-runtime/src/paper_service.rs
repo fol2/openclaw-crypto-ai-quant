@@ -592,7 +592,11 @@ fn start_daemon(
         }
 
         if let Some(status) = paper_daemon::load_status_file(status_path)? {
-            let lock_owner_pid = paper_daemon::probe_lock_owner(lock_path)?;
+            let lock_owner_pid = match paper_daemon::probe_lock_owner(lock_path) {
+                Ok(lock_owner_pid) => lock_owner_pid,
+                Err(err) if is_transient_lock_owner_probe_error(&err) => None,
+                Err(err) => return Err(err),
+            };
             if status.running && status.pid == child_pid && lock_owner_pid == Some(child_pid) {
                 if child
                     .try_wait()
@@ -698,6 +702,12 @@ fn resolve_runtime_program(daemon_command: &[String]) -> Result<PathBuf> {
             .context("failed to resolve the current aiq-runtime executable for supervision");
     }
     Ok(PathBuf::from(program))
+}
+
+#[cfg(unix)]
+fn is_transient_lock_owner_probe_error(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("lock is held but its pid file is empty or invalid")
 }
 
 #[cfg(unix)]
