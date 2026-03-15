@@ -7,11 +7,13 @@ cargo run -p aiq-runtime -- paper manifest --lane paper1 --project-dir "$PWD" --
 cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
 ```
 
-`paper daemon` and `paper service apply` now reconcile `decision_events`
-against the canonical Rust contract before first write or supervision. Existing
+Direct `paper daemon` launches now reconcile `decision_events` against the
+canonical Rust contract immediately before the first writable cycle, so idle
+watchlist/bootstrap waits remain read-only. `paper service apply` still
+preflights the same contract before supervised start/restart. Existing
 legacy/full tables are reused in place, while reduced/incompatible tables are
-either upgraded transactionally or rejected before daemon start. Operators
-should now treat a `decision_events schema preflight failed` error as a clean
+either upgraded transactionally or rejected before the first writable cycle or
+supervised start. Operators should treat a `decision_events schema preflight failed` error as a clean
 fail-closed deployment signal rather than a daemon crash-loop.
 
 ## Live

@@ -823,6 +823,35 @@ fn paper_service_apply_fails_closed_on_unmigratable_decision_events_schema() {
 }
 
 #[test]
+fn paper_daemon_fails_closed_on_unmigratable_decision_events_schema_before_first_step() {
+    let fixture = seed_empty_fixture();
+    seed_unmigratable_decision_events_schema(&fixture.paper_db);
+
+    let output = daemon_command(&fixture)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--idle-sleep-ms")
+        .arg("1")
+        .arg("--max-idle-polls")
+        .arg("1")
+        .output()
+        .expect("paper daemon unmigratable-schema smoke should spawn");
+
+    assert!(
+        !output.status.success(),
+        "paper daemon must fail closed on an unmigratable decision_events schema before the first writable cycle; output:\n{}",
+        combined_output(&output)
+    );
+    assert!(
+        combined_output(&output)
+            .to_ascii_lowercase()
+            .contains("decision_events schema preflight failed"),
+        "direct daemon preflight error should be explicit; output:\n{}",
+        combined_output(&output)
+    );
+}
+
+#[test]
 fn paper_service_apply_resumes_stopped_lane() {
     let fixture = prepare_idle_fixture();
     let child = daemon_command(&fixture)

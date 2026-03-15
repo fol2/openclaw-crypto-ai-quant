@@ -30,9 +30,11 @@ cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db tradin
 ```
 
 Paper supervision now treats `decision_events` as a canonical compatibility
-contract. `paper daemon` and `paper service apply` reconcile legacy/full paper
-DBs before launch and fail closed on unreconcilable schema drift instead of
-letting a daemon enter a restart loop after start-up.
+contract. Direct `paper daemon` launches reconcile legacy/full paper DBs
+immediately before the first writable cycle, so idle watchlist/bootstrap waits
+stay read-only. `paper service apply` still preflights that contract before
+supervised start/restart and fails closed on unreconcilable schema drift
+instead of letting a daemon enter a restart loop after start-up.
 
 `live sync-fills` fails closed when it encounters unsupported fill shapes, so
 hourly automation should treat a failed run as an operator review signal rather

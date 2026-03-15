@@ -479,12 +479,6 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let _signal_guard = install_signal_handlers(&stop_flag)?;
     let working_paper_db = paper_loop::prepare_working_paper_db(input.paper_db, input.dry_run)?;
-    decision_events::reconcile_db_schema(working_paper_db.path()).with_context(|| {
-        format!(
-            "paper daemon decision_events schema preflight failed for {}",
-            working_paper_db.path().display()
-        )
-    })?;
     let mut manifest_state = SymbolManifestState::new(
         input.explicit_symbols,
         input.symbols_file,
@@ -539,6 +533,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let mut last_active_symbols = Vec::new();
     let mut emitted_empty_idle_warning = false;
     let mut emitted_due_idle_warning = false;
+    let mut decision_events_schema_ready = input.dry_run;
 
     loop {
         if paper_loop::is_stop_requested(Some(stop_flag.as_ref())) {
@@ -745,6 +740,16 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             }
             paper_loop::sleep_with_stop_flag(input.idle_sleep_ms, Some(stop_flag.as_ref()));
             continue;
+        }
+
+        if !decision_events_schema_ready {
+            decision_events::reconcile_db_schema(working_paper_db.path()).with_context(|| {
+                format!(
+                    "paper daemon decision_events schema preflight failed for {}",
+                    working_paper_db.path().display()
+                )
+            })?;
+            decision_events_schema_ready = true;
         }
 
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
