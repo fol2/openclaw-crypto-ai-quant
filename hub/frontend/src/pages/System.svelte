@@ -1,31 +1,59 @@
 <script lang="ts">
-  import { getSystemServices, serviceAction, getDbStats, getDiskUsage, getServiceLogsPrivileged } from '../lib/api';
+  import {
+    getSystemPageServiceLogs,
+    getSystemServices,
+    serviceAction,
+    getDbStats,
+    getDiskUsage,
+    type SystemDbStat,
+    type SystemDiskUsage,
+    type SystemServiceSummary,
+  } from '../lib/api';
 
-  let services: any[] = $state([]);
-  let dbStats: any[] = $state([]);
-  let disk: any[] = $state([]);
+  let services: SystemServiceSummary[] = $state([]);
+  let dbStats: SystemDbStat[] = $state([]);
+  let disk: SystemDiskUsage[] = $state([]);
   let loading = $state(true);
+  let refreshError = $state('');
   let actionError = $state('');
   let actionSuccess = $state('');
 
   let logService = $state('');
   let logLines: string = $state('');
+  let logNotice: string = $state('');
+  let logsRedacted = $state(false);
   let loadingLogs = $state(false);
 
   let tab: 'services' | 'databases' | 'logs' | 'disk' = $state('services');
 
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error || '');
+  }
+
+  function isAuthError(error: unknown): boolean {
+    const message = errorMessage(error);
+    return message.startsWith('API 401:') || message.startsWith('API 403:');
+  }
+
   async function refresh() {
     loading = true;
-    try {
-      const [svcs, stats, d] = await Promise.all([
-        getSystemServices(),
-        getDbStats(),
-        getDiskUsage(),
-      ]);
-      services = svcs;
-      dbStats = stats;
-      disk = d;
-    } catch {}
+    refreshError = '';
+
+    const [svcs, stats, d] = await Promise.allSettled([
+      getSystemServices(),
+      getDbStats(),
+      getDiskUsage(),
+    ]);
+
+    if (svcs.status === 'fulfilled') services = svcs.value;
+    if (stats.status === 'fulfilled') dbStats = stats.value;
+    if (d.status === 'fulfilled') disk = d.value;
+
+    const failure = [svcs, stats, d].find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') {
+      refreshError = `Some System data could not be refreshed. ${errorMessage(failure.reason)}`;
+    }
+
     loading = false;
   }
 
@@ -41,19 +69,29 @@
       }
       setTimeout(() => { actionSuccess = ''; }, 5000);
       await refresh();
-    } catch (e: any) {
-      actionError = e.message;
+    } catch (error) {
+      actionError = isAuthError(error)
+        ? 'System actions require valid admin authentication.'
+        : errorMessage(error);
     }
   }
 
   async function loadLogs() {
     if (!logService) return;
     loadingLogs = true;
+    logLines = '';
+    logNotice = '';
+    logsRedacted = false;
     try {
-      const res = await getServiceLogsPrivileged(logService, 100);
+      const res = await getSystemPageServiceLogs(logService, 100);
       logLines = res.log || '';
-    } catch (e: any) {
-      logLines = `Error: ${e.message}`;
+      logNotice = res.message || '';
+      logsRedacted = Boolean(res.redacted);
+      if (!logLines && !logNotice) {
+        logNotice = 'No log lines returned for this service.';
+      }
+    } catch (error) {
+      logNotice = `Error: ${errorMessage(error)}`;
     }
     loadingLogs = false;
   }
@@ -69,6 +107,9 @@
   {/if}
   {#if actionSuccess}
     <div class="alert alert-success">{actionSuccess}</div>
+  {/if}
+  {#if refreshError}
+    <div class="alert alert-error">{refreshError}</div>
   {/if}
 
   <div class="tabs">
@@ -155,6 +196,9 @@
           {loadingLogs ? 'Loading...' : 'Load Logs'}
         </button>
       </div>
+      {#if logNotice}
+        <div class="logs-notice" class:redacted={logsRedacted}>{logNotice}</div>
+      {/if}
       {#if logLines}
         <pre class="log-output">{logLines}</pre>
       {/if}
@@ -304,6 +348,20 @@
   .btn:disabled { opacity: 0.35; cursor: default; }
   .btn:active:not(:disabled) { transform: scale(0.97); }
   .btn-primary { background: var(--accent); color: var(--bg); }
+
+  .logs-notice {
+    margin-bottom: 12px;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .logs-notice.redacted {
+    border-color: rgba(255,184,77,0.2);
+    color: #ffcf8b;
+  }
 
   .log-output {
     background: var(--bg); border: 1px solid var(--border);

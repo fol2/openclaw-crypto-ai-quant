@@ -423,7 +423,44 @@ export async function factoryTimerAction(action: string) {
 
 // ── System API ──────────────────────────────────────────────────────
 
-export async function getSystemServices() {
+export interface SystemServiceSummary {
+  name: string;
+  active: string;
+  sub: string;
+  pid: string;
+  load: string;
+  status: 'ok' | 'bad' | 'unknown' | 'dormant';
+  dormant: boolean;
+}
+
+export interface SystemDbStat {
+  label: string;
+  path_redacted: boolean;
+  exists: boolean;
+  size_bytes: number;
+  size_mb: string;
+  modified: string;
+}
+
+export interface SystemDiskUsage {
+  label: string;
+  path_redacted: boolean;
+  size: string;
+}
+
+export interface SystemLogsResponse {
+  service: string;
+  lines?: number;
+  log?: string;
+  redacted?: boolean;
+  message?: string;
+}
+
+function hasApiStatus(error: unknown, statuses: number[]) {
+  return error instanceof Error && statuses.some((status) => error.message.includes(`API ${status}`));
+}
+
+export async function getSystemServices(): Promise<SystemServiceSummary[]> {
   return apiFetch('/api/system/services');
 }
 
@@ -431,20 +468,35 @@ export async function serviceAction(name: string, action: string) {
   return apiFetch(`/api/system/services/${encodeURIComponent(name)}/${encodeURIComponent(action)}`, { method: 'POST' });
 }
 
-export async function getDbStats() {
+export async function getDbStats(): Promise<SystemDbStat[]> {
   return apiFetch('/api/system/db-stats');
 }
 
-export async function getDiskUsage() {
+export async function getDiskUsage(): Promise<SystemDiskUsage[]> {
   return apiFetch('/api/system/disk');
 }
 
-export async function getServiceLogs(service: string, lines = 50) {
+export async function getServiceLogs(service: string, lines = 50): Promise<SystemLogsResponse> {
   return apiFetch(`/api/system/logs?service=${encodeURIComponent(service)}&lines=${lines}`);
 }
 
-export async function getServiceLogsPrivileged(service: string, lines = 50) {
+export async function getServiceLogsPrivileged(service: string, lines = 50): Promise<SystemLogsResponse> {
   return apiFetch(`/api/system/logs/raw?service=${encodeURIComponent(service)}&lines=${lines}`);
+}
+
+export async function getSystemPageServiceLogs(service: string, lines = 50): Promise<SystemLogsResponse> {
+  if (!authToken) {
+    return getServiceLogs(service, lines);
+  }
+
+  try {
+    return await getServiceLogsPrivileged(service, lines);
+  } catch (error) {
+    if (hasApiStatus(error, [401, 403])) {
+      return getServiceLogs(service, lines);
+    }
+    throw error;
+  }
 }
 
 // ── Trade API ────────────────────────────────────────────────────────
