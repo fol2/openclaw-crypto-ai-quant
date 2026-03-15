@@ -647,30 +647,18 @@ export class CandleChart extends LitElement {
     const chartW  = W - RIGHT;
 
     // ── Price range ───────────────────────────────────────────────────────────
+    // Y-scale is driven by candle range + average entry price (solid line) only.
+    // Dotted overlays (TP, SL, individual entries, tunnel) are drawn if visible
+    // but do NOT stretch the scale — keeps candles readable.
     let minP = Infinity, maxP = -Infinity;
     for (const c of data) {
       if (c.l < minP) minP = c.l;
       if (c.h > maxP) maxP = c.h;
     }
-    for (const e of this.entries) {
-      if (e.price > 0) {
-        if (e.price < minP) minP = e.price;
-        if (e.price > maxP) maxP = e.price;
-      }
-    }
-    for (const jm of this.journeyMarks) {
-      if (jm.price > 0) {
-        if (jm.price < minP) minP = jm.price;
-        if (jm.price > maxP) maxP = jm.price;
-      }
-    }
-    for (const tp of this.tunnelPoints) {
-      // upper_full/lower_full are exit types (TP/SL), not price ordering —
-      // for SHORT, upper_full (TP) < entry < lower_full (SL).
-      const hi = Math.max(tp.upper_full, tp.lower_full);
-      const lo = Math.min(tp.upper_full, tp.lower_full);
-      if (hi > maxP) maxP = hi;
-      if (lo > 0 && lo < minP) minP = lo;
+    // Include average entry price (solid breakeven line) in scale
+    if (this.entryPrice > 0) {
+      if (this.entryPrice < minP) minP = this.entryPrice;
+      if (this.entryPrice > maxP) maxP = this.entryPrice;
     }
     const pad    = (maxP - minP) * 0.06 || maxP * 0.01 || 1;
     minP -= pad; maxP += pad;
