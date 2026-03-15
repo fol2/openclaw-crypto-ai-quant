@@ -34,8 +34,8 @@ use crate::state::AppState;
 /// Query parameter for config endpoints — selects which YAML file to operate on.
 #[derive(Deserialize)]
 pub struct ConfigQuery {
-    /// Config file variant: "main", "live", "paper1", "paper2", "paper3",
-    /// "promoted_primary", "promoted_fallback". Default: "main".
+    /// Config file variant: "main", "live", "livepaper", "paper1", "paper2",
+    /// "paper3", "promoted_primary", "promoted_fallback". Default: "main".
     pub file: Option<String>,
 }
 
@@ -1788,7 +1788,7 @@ async fn get_config_diff_privileged(
     })))
 }
 
-/// GET /api/config/files — List available config files with metadata.
+/// GET /api/config/files — Return a top-level array of config file metadata.
 async fn get_config_files(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Value>>, HubError> {
@@ -2251,6 +2251,29 @@ fi
         assert_eq!(
             response.headers()["x-aiq-config-id-source"],
             HeaderValue::from_static("runtime")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_config_files_returns_flat_array_contract() {
+        let dir = tempdir().unwrap();
+        write_main_config(
+            dir.path(),
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  ETH:\n    trade:\n      leverage: 2.0\n",
+        );
+        let state = test_state(dir.path());
+
+        let Json(files) = get_config_files(State(Arc::clone(&state))).await.unwrap();
+
+        assert_eq!(files.len(), 8);
+        assert!(files.iter().all(|entry| entry.get("variant").is_some()));
+        assert_eq!(
+            files
+                .iter()
+                .find(|entry| entry["variant"] == Value::String("main".to_string()))
+                .and_then(|entry| entry.get("exists"))
+                .and_then(Value::as_bool),
+            Some(true)
         );
     }
 

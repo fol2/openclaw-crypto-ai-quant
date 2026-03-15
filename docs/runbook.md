@@ -270,6 +270,12 @@ back to the redacted `/api/system/logs` surface when the operator only has a
 viewer/editor/approver token. This keeps service log inspection available
 without implying raw journal visibility.
 
+The Hub Config page now treats `GET /api/config/files` and
+`GET /api/config/history` as metadata-only read surfaces for the file picker
+and backup history views. Raw YAML bodies and raw diffs still require an admin
+token through the privileged routes above, so editor and approver tokens can
+continue to use approval flows without also receiving raw config visibility.
+
 These privileged diagnostics reads are audited to:
 
 ```bash
