@@ -7,7 +7,7 @@ use tokio::process::Command;
 
 use crate::ws::broadcast::BroadcastHub;
 
-use super::{run_subprocess, JobId, JobInfo, JobStatus, JobStore};
+use super::{JobId, JobInfo, JobStatus, JobStore};
 
 /// Arguments for spawning a backtest replay.
 pub struct ReplayArgs {
@@ -16,14 +16,6 @@ pub struct ReplayArgs {
     pub symbol: Option<String>,
     pub output_file: Option<String>,
     pub include_equity_curve: bool,
-}
-
-/// Arguments for spawning a parameter sweep.
-pub struct SweepArgs {
-    pub config_path: String,
-    pub sweep_spec_path: String,
-    pub initial_balance: f64,
-    pub output_dir: Option<String>,
 }
 
 /// Spawn a backtest replay as a subprocess.
@@ -198,7 +190,6 @@ pub async fn spawn_replay(
         }
     });
 }
-
 const MAX_BACKTEST_EQUITY_POINTS: usize = 240;
 
 fn parse_replay_result(output_file: Option<&Path>, stdout_output: &str) -> Result<Value, String> {
@@ -277,40 +268,4 @@ mod tests {
         assert_eq!(points.first().unwrap(), &json!([1_700_000_000_000_i64, 10_000.0]));
         assert_eq!(points.last().unwrap(), &json!([1_700_000_000_999_i64, 10_999.0]));
     }
-}
-
-/// Spawn a parameter sweep as a subprocess.
-pub async fn spawn_sweep(
-    job_id: JobId,
-    args: SweepArgs,
-    aiq_root: String,
-    store: Arc<JobStore>,
-    broadcast: BroadcastHub,
-) {
-    let mut cmd = Command::new("cargo");
-    cmd.arg("run")
-        .arg("--release")
-        .arg("--manifest-path")
-        .arg("backtester/Cargo.toml")
-        .arg("--")
-        .arg("sweep")
-        .arg("--config")
-        .arg(&args.config_path)
-        .arg("--sweep-spec")
-        .arg(&args.sweep_spec_path)
-        .arg("--initial-balance")
-        .arg(args.initial_balance.to_string());
-
-    if let Some(ref out_dir) = args.output_dir {
-        cmd.arg("--output-dir").arg(out_dir);
-    }
-
-    cmd.current_dir(&aiq_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let jid = job_id.clone();
-    tokio::spawn(async move {
-        run_subprocess(jid, "sweep", cmd, store, broadcast).await;
-    });
 }

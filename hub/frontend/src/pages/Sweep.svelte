@@ -1,8 +1,25 @@
 <script lang="ts">
   import { runSweep, getSweepJobs, getSweepStatus, getSweepResults, cancelSweep } from '../lib/api';
-  import { getConfigLabel, LIVE_MODE } from '../lib/mode-labels';
+  import { CANDIDATE_FAMILY_ORDER, getConfigLabel, LIVE_MODE } from '../lib/mode-labels';
 
-  const candidateConfigs = ['paper1'] as const;
+  type SweepJob = {
+    id: string;
+    status: string;
+    created_at?: string | null;
+    finished_at?: string | null;
+    error?: string | null;
+    stderr_tail?: string[];
+  };
+
+  type SweepResultRow = Record<string, any> & {
+    config_id?: string;
+    id?: string;
+    output_mode?: string;
+    candidate_mode?: boolean;
+  };
+
+  const candidateConfigs = CANDIDATE_FAMILY_ORDER;
+  const sweepSpecPlaceholder = 'backtester/sweeps/smoke.yaml';
 
   let config = $state('main');
   let sweepSpec = $state('');
@@ -10,27 +27,88 @@
   let launching = $state(false);
   let error = $state('');
 
-  let jobs: any[] = $state([]);
+  let jobs: SweepJob[] = $state([]);
   let activeJob: string | null = $state(null);
-  let activeStatus: any = $state(null);
-  let activeResults: any = $state(null);
+  let activeStatus: SweepJob | null = $state(null);
+  let activeResults: unknown = $state(null);
   let stderrLines: string[] = $state([]);
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  function isRecord(value: unknown): value is Record<string, any> {
+    return value != null && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function normaliseResults(value: unknown): SweepResultRow[] {
+    if (Array.isArray(value)) {
+      return value.filter(isRecord) as SweepResultRow[];
+    }
+    if (!isRecord(value)) {
+      return [];
+    }
+    if ('config_id' in value || 'total_pnl' in value || 'net_pnl' in value || 'overrides' in value) {
+      return [value as SweepResultRow];
+    }
+    const nested = value.results ?? value.rows ?? value.data;
+    return Array.isArray(nested) ? nested.filter(isRecord) as SweepResultRow[] : [];
+  }
+
+  function resultRows() {
+    return normaliseResults(activeResults);
+  }
+
+  function readMetric(row: SweepResultRow, key: string) {
+    if (row[key] != null) {
+      return row[key];
+    }
+    if (isRecord(row.report) && row.report[key] != null) {
+      return row.report[key];
+    }
+    return undefined;
+  }
+
+  function getResultConfigId(row: SweepResultRow): string {
+    return String(readMetric(row, 'config_id') ?? row.id ?? '—');
+  }
+
+  function getResultOutputMode(row: SweepResultRow): string {
+    return String(readMetric(row, 'output_mode') ?? (row.candidate_mode ? 'candidate' : 'full'));
+  }
+
+  function getTotalPnl(row: SweepResultRow) {
+    return readMetric(row, 'total_pnl') ?? readMetric(row, 'net_pnl');
+  }
+
+  function getWinRate(row: SweepResultRow) {
+    return readMetric(row, 'win_rate');
+  }
+
+  function getMaxDrawdown(row: SweepResultRow) {
+    return readMetric(row, 'max_drawdown_pct');
+  }
+
+  function getSharpe(row: SweepResultRow) {
+    return readMetric(row, 'sharpe_ratio');
+  }
+
+  function getTrades(row: SweepResultRow) {
+    return readMetric(row, 'total_trades');
+  }
+
   async function launch() {
-    if (!sweepSpec.trim()) { error = 'Sweep spec path required'; return; }
+    const trimmedSweepSpec = sweepSpec.trim();
+    if (!trimmedSweepSpec) { error = 'Sweep spec path required'; return; }
     launching = true;
     error = '';
+    clearActiveState();
     try {
       const res = await runSweep({
         config,
-        sweep_spec: sweepSpec.trim(),
+        sweep_spec: trimmedSweepSpec,
         initial_balance: balance,
       });
       activeJob = res.job_id;
-      activeResults = null;
-      stderrLines = [];
+      activeStatus = { id: res.job_id, status: res.status, stderr_tail: [] };
       startPolling();
       await refreshJobs();
     } catch (e: any) {
@@ -39,30 +117,56 @@
     launching = false;
   }
 
+  function clearActiveState() {
+    activeStatus = null;
+    activeResults = null;
+    stderrLines = [];
+  }
+
   async function refreshJobs() {
     try {
       jobs = await getSweepJobs();
+      if (activeJob) {
+        const summary = jobs.find((job) => job.id === activeJob);
+        if (summary && activeStatus?.status !== 'running') {
+          activeStatus = { ...summary, stderr_tail: activeStatus?.stderr_tail ?? [] };
+        }
+      }
+    } catch {}
+  }
+
+  async function pollActiveJob() {
+    if (!activeJob) return;
+    const jobId = activeJob;
+    try {
+      const s = await getSweepStatus(jobId);
+      if (activeJob !== jobId) return;
+      activeStatus = s;
+      stderrLines = s.stderr_tail || [];
+      if (s.status !== 'running') {
+        stopPolling();
+        if (s.status === 'done') {
+          try {
+            const results = await getSweepResults(jobId);
+            if (activeJob === jobId) {
+              activeResults = results;
+            }
+          } catch (e: any) {
+            if (activeJob === jobId) {
+              activeStatus = { ...s, error: e.message || 'Failed to load sweep results' };
+            }
+          }
+        }
+        await refreshJobs();
+      }
     } catch {}
   }
 
   function startPolling() {
     stopPolling();
-    pollTimer = setInterval(async () => {
-      if (!activeJob) return;
-      try {
-        const s = await getSweepStatus(activeJob);
-        activeStatus = s;
-        stderrLines = s.stderr_tail || [];
-        if (s.status !== 'running') {
-          stopPolling();
-          if (s.status === 'done') {
-            try {
-              activeResults = await getSweepResults(activeJob);
-            } catch {}
-          }
-          await refreshJobs();
-        }
-      } catch {}
+    void pollActiveJob();
+    pollTimer = setInterval(() => {
+      void pollActiveJob();
     }, 3000);
   }
 
@@ -72,20 +176,68 @@
 
   async function cancel() {
     if (!activeJob) return;
-    try { await cancelSweep(activeJob); stopPolling(); await refreshJobs(); } catch {}
+    const jobId = activeJob;
+    try {
+      await cancelSweep(jobId);
+      activeStatus = {
+        ...(activeStatus ?? { id: jobId }),
+        status: 'cancelled',
+        error: null,
+        finished_at: new Date().toISOString(),
+      };
+      stopPolling();
+      await refreshJobs();
+    } catch {}
   }
 
-  function selectJob(id: string) {
+  async function selectJob(id: string) {
     activeJob = id;
-    activeResults = null;
-    stderrLines = [];
-    const job = jobs.find((j: any) => j.id === id);
-    if (job?.status === 'running') {
-      startPolling();
-    } else if (job?.status === 'done') {
-      getSweepResults(id).then(r => { activeResults = r; }).catch(() => {});
-      getSweepStatus(id).then(s => { stderrLines = s.stderr_tail || []; }).catch(() => {});
+    clearActiveState();
+    stopPolling();
+    try {
+      const status = await getSweepStatus(id);
+      if (activeJob !== id) return;
+      activeStatus = status;
+      stderrLines = status.stderr_tail || [];
+
+      if (status.status === 'running') {
+        startPolling();
+        return;
+      }
+
+      if (status.status === 'done') {
+        try {
+          const results = await getSweepResults(id);
+          if (activeJob === id) {
+            activeResults = results;
+          }
+        } catch (e: any) {
+          if (activeJob === id) {
+            activeStatus = {
+              ...status,
+              error: e.message || 'Failed to load sweep results',
+            };
+          }
+        }
+      }
+    } catch (e: any) {
+      if (activeJob === id) {
+        activeStatus = {
+          id,
+          status: 'failed',
+          error: e.message || 'Failed to load sweep status',
+          stderr_tail: [],
+        };
+      }
     }
+  }
+
+  function formatJobTime(timestamp?: string | null) {
+    return timestamp ? new Date(timestamp).toLocaleTimeString() : '';
+  }
+
+  function hasActiveResultRows() {
+    return resultRows().length > 0;
   }
 
   function fmtNum(n: any, d = 2): string {
@@ -93,8 +245,13 @@
     return Number(n).toFixed(d);
   }
 
+  function fmtPctFraction(n: any, d = 1): string {
+    if (n == null || isNaN(n)) return '—';
+    return `${(Number(n) * 100).toFixed(d)}%`;
+  }
+
   $effect(() => {
-    refreshJobs();
+    void refreshJobs();
     return () => stopPolling();
   });
 </script>
@@ -103,6 +260,9 @@
   <h1>Parameter Sweep</h1>
 
   <div class="launcher">
+    <p class="launcher-copy">
+      Runs the Rust backtester sweep and reads the per-job JSONL artifact. Use a repo-relative spec such as <span class="mono">{sweepSpecPlaceholder}</span>.
+    </p>
     <div class="form-row">
       <label>Config <select bind:value={config}>
         <option value="main">{getConfigLabel('main')}</option>
@@ -116,7 +276,7 @@
         </optgroup>
       </select></label>
       <label>Balance <input type="number" bind:value={balance} min="100" step="100" /></label>
-      <label class="wide">Sweep Spec <input type="text" bind:value={sweepSpec} placeholder="config/sweep_spec.yaml" /></label>
+      <label class="wide">Sweep Spec <input type="text" bind:value={sweepSpec} placeholder={sweepSpecPlaceholder} /></label>
       <button class="btn btn-primary" onclick={launch} disabled={launching || !sweepSpec.trim()}>
         {launching ? 'Launching...' : 'Run Sweep'}
       </button>
@@ -133,11 +293,11 @@
         <div class="empty">No sweep jobs yet</div>
       {:else}
         {#each jobs as j (j.id)}
-          <button class="job-card" class:active={activeJob === j.id} onclick={() => selectJob(j.id)}>
+          <button class="job-card" class:active={activeJob === j.id} onclick={() => void selectJob(j.id)}>
             <div class="job-id">{j.id.slice(0, 8)}</div>
             <div class="job-meta">
               <span class="status-pill {j.status}">{j.status}</span>
-              <span class="job-time">{j.created_at ? new Date(j.created_at).toLocaleTimeString() : ''}</span>
+              <span class="job-time">{formatJobTime(j.created_at)}</span>
             </div>
           </button>
         {/each}
@@ -153,38 +313,56 @@
           </div>
           <pre class="stderr-log">{stderrLines.join('\n')}</pre>
         </div>
-      {:else if activeResults}
+      {:else if hasActiveResultRows()}
         <div class="result-section">
           <h2>Sweep Results</h2>
-          {#if Array.isArray(activeResults)}
-            <table class="results-table">
-              <thead>
+          {#if activeStatus}
+            <div class="status-summary">
+              <span class="status-pill {activeStatus.status}">{activeStatus.status}</span>
+              <span class="status-meta">{formatJobTime(activeStatus.finished_at ?? activeStatus.created_at)}</span>
+            </div>
+          {/if}
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Config ID</th>
+                <th>Output</th>
+                <th>Total PnL</th>
+                <th>Win Rate</th>
+                <th>Max DD</th>
+                <th>Sharpe</th>
+                <th>Trades</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each resultRows() as r, i}
                 <tr>
-                  <th>#</th>
-                  <th>Config ID</th>
-                  <th>Net PnL</th>
-                  <th>Win Rate</th>
-                  <th>Max DD</th>
-                  <th>Sharpe</th>
-                  <th>Trades</th>
+                  <td>{i + 1}</td>
+                  <td class="mono">{getResultConfigId(r)}</td>
+                  <td>{getResultOutputMode(r)}</td>
+                  <td>${fmtNum(getTotalPnl(r))}</td>
+                  <td>{fmtPctFraction(getWinRate(r))}</td>
+                  <td>{fmtPctFraction(getMaxDrawdown(r))}</td>
+                  <td>{fmtNum(getSharpe(r))}</td>
+                  <td>{fmtNum(getTrades(r), 0)}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {#each activeResults as r, i}
-                  <tr>
-                    <td>{i + 1}</td>
-                    <td class="mono">{r.config_id ?? r.id ?? '—'}</td>
-                    <td>${fmtNum(r.report?.net_pnl ?? r.net_pnl)}</td>
-                    <td>{fmtNum(((r.report?.win_rate ?? r.win_rate ?? 0) * 100), 1)}%</td>
-                    <td>{fmtNum(r.report?.max_drawdown_pct ?? r.max_drawdown_pct, 1)}%</td>
-                    <td>{fmtNum(r.report?.sharpe_ratio ?? r.sharpe_ratio)}</td>
-                    <td>{r.report?.total_trades ?? r.total_trades ?? '—'}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {:else}
-            <pre class="result-json">{JSON.stringify(activeResults, null, 2)}</pre>
+              {/each}
+            </tbody>
+          </table>
+          {#if stderrLines.length > 0}
+            <pre class="stderr-log">{stderrLines.join('\n')}</pre>
+          {/if}
+        </div>
+      {:else if activeStatus?.status === 'cancelled'}
+        <div class="result-section">
+          <div class="status-summary">
+            <span class="status-pill cancelled">cancelled</span>
+            <span class="status-meta">{formatJobTime(activeStatus.finished_at)}</span>
+          </div>
+          <div class="empty">This sweep was cancelled before results were produced.</div>
+          {#if stderrLines.length > 0}
+            <pre class="stderr-log">{stderrLines.join('\n')}</pre>
           {/if}
         </div>
       {:else if activeStatus?.error}
@@ -192,6 +370,22 @@
         {#if stderrLines.length > 0}
           <pre class="stderr-log">{stderrLines.join('\n')}</pre>
         {/if}
+      {:else if activeStatus?.status === 'done'}
+        <div class="result-section">
+          <div class="status-summary">
+            <span class="status-pill done">done</span>
+            <span class="status-meta">{formatJobTime(activeStatus.finished_at)}</span>
+          </div>
+          <div class="empty">This sweep completed without any result rows.</div>
+          {#if activeResults}
+            <pre class="result-json">{JSON.stringify(activeResults, null, 2)}</pre>
+          {/if}
+          {#if stderrLines.length > 0}
+            <pre class="stderr-log">{stderrLines.join('\n')}</pre>
+          {/if}
+        </div>
+      {:else if activeResults}
+        <pre class="result-json">{JSON.stringify(activeResults, null, 2)}</pre>
       {:else}
         <div class="empty">Select a job or run a new sweep</div>
       {/if}
@@ -222,6 +416,13 @@
   /* ─── Launcher ─── */
   .launcher {
     margin-bottom: var(--sp-lg);
+  }
+
+  .launcher-copy {
+    margin: 0 0 var(--sp-sm);
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   .form-row {
@@ -399,6 +600,18 @@
     margin-bottom: var(--sp-sm);
   }
 
+  .status-summary {
+    display: flex;
+    gap: var(--sp-sm);
+    align-items: center;
+    margin-bottom: var(--sp-sm);
+  }
+
+  .status-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
   .stderr-log {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -411,6 +624,7 @@
     overflow-y: auto;
     white-space: pre-wrap;
     color: var(--text-muted);
+    margin-top: var(--sp-sm);
   }
 
   /* ─── Results table ─── */
