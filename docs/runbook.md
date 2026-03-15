@@ -276,6 +276,11 @@ and backup history views. Raw YAML bodies and raw diffs still require an admin
 token through the privileged routes above, so editor and approver tokens can
 continue to use approval flows without also receiving raw config visibility.
 
+The Hub Statements page uses `GET /api/config/files` and
+`GET /api/config/history` as metadata-only surfaces for the config-change tab.
+It also normalises legacy `paper` selections onto the canonical candidate
+family (`paper1`-`paper3`) before querying journeys, trades, and config diffs.
+
 These privileged diagnostics reads are audited to:
 
 ```bash

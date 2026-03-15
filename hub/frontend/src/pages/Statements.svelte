@@ -3,10 +3,36 @@
   import { getJourneys, getTrades, getConfigHistory, getConfigDiffPrivileged, getConfigFiles } from '../lib/api';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
+  type ConfigFileEntry = {
+    variant: string;
+    filename?: string;
+    exists?: boolean;
+    modified?: string;
+    size?: number;
+  };
+
+  type ConfigHistoryEntry = {
+    filename: string;
+    modified?: string | null;
+    size?: number | null;
+  };
+
+  type CandidateMode = (typeof CANDIDATE_FAMILY_ORDER)[number];
+
+  function isCandidateMode(value: string): value is CandidateMode {
+    return (CANDIDATE_FAMILY_ORDER as readonly string[]).includes(value);
+  }
+
+  function normaliseMode(value: string | null | undefined): string {
+    if (value === LIVE_MODE) return LIVE_MODE;
+    if (value && isCandidateMode(value)) return value;
+    return CANDIDATE_FAMILY_ORDER[0];
+  }
+
   // ── UI state ─────────────────────────────────────────────────────
   let tab: 'transactions' | 'config' = $state('transactions');
   let txView: 'journeys' | 'trades' = $state('journeys');
-  let mode = $state(appState.mode === 'paper' ? 'paper1' : appState.mode);
+  let mode = $state(normaliseMode(appState.mode));
 
   // ── Journey state ────────────────────────────────────────────────
   let journeys: any[] = $state([]);
@@ -27,12 +53,12 @@
   let filterTo = $state('');
 
   // ── Config state ─────────────────────────────────────────────────
-  let configFiles: string[] = $state([]);
+  let configFiles: ConfigFileEntry[] = $state([]);
   let selectedConfigFile = $state('main');
-  let configHistory: any[] = $state([]);
+  let configHistory: ConfigHistoryEntry[] = $state([]);
   let configLoading = $state(false);
   let diffA = $state('');
-  let diffB = $state('');
+  let diffB = $state('current');
   let diffResult: string[] = $state([]);
   let diffLoading = $state(false);
 
@@ -76,17 +102,25 @@
 
   // ── Mode switching ───────────────────────────────────────────────
   function setMode(m: string) {
-    mode = m;
-    appState.mode = m;
+    const nextMode = normaliseMode(m);
+    mode = nextMode;
+    appState.mode = nextMode;
     resetAll();
     loadCurrentView();
+  }
+
+  function resetConfigDiff() {
+    diffA = '';
+    diffB = 'current';
+    diffResult = [];
   }
 
   function resetAll() {
     journeys = []; journeyOffset = 0; journeyHasMore = true;
     trades = []; tradeOffset = 0; tradeHasMore = true;
     tradeSummary = { total: 0, pnl: 0, fees: 0 };
-    configHistory = []; diffResult = []; diffA = ''; diffB = '';
+    configHistory = [];
+    resetConfigDiff();
   }
 
   // ── Data loading ─────────────────────────────────────────────────
@@ -137,26 +171,41 @@
   async function loadConfigFiles() {
     try {
       const res = await getConfigFiles();
-      configFiles = res.files || [];
+      configFiles = Array.isArray(res) ? res : [];
     } catch (e) { console.error('loadConfigFiles:', e); }
   }
 
   async function loadConfigHistory() {
     configLoading = true;
+    const file = selectedConfigFile;
     try {
-      const res = await getConfigHistory(selectedConfigFile);
-      configHistory = res.history || [];
-    } catch (e) { console.error('loadConfigHistory:', e); }
-    configLoading = false;
+      const res = await getConfigHistory(file);
+      if (file === selectedConfigFile) {
+        configHistory = Array.isArray(res) ? res : [];
+      }
+    } catch (e) {
+      console.error('loadConfigHistory:', e);
+      if (file === selectedConfigFile) {
+        configHistory = [];
+      }
+    }
+    finally { configLoading = false; }
   }
 
   async function loadDiff() {
-    if (!diffA || !diffB || diffA === diffB) return;
+    if (!diffA || !diffB || diffA === diffB) {
+      diffResult = [];
+      return;
+    }
     diffLoading = true;
+    diffResult = [];
     try {
       const res = await getConfigDiffPrivileged(diffA, diffB, selectedConfigFile);
       diffResult = res.diff || [];
-    } catch (e) { console.error('loadDiff:', e); }
+    } catch (e) {
+      console.error('loadDiff:', e);
+      diffResult = [e instanceof Error ? `Error: ${e.message}` : 'Error: Failed to load diff'];
+    }
     diffLoading = false;
   }
 
@@ -365,9 +414,17 @@
   <div class="config-section">
     <div class="filter-bar">
       <label class="filter-label" for="config-file-select">Config file:</label>
-      <select id="config-file-select" class="filter-select" bind:value={selectedConfigFile} onchange={() => loadConfigHistory()}>
+      <select
+        id="config-file-select"
+        class="filter-select"
+        bind:value={selectedConfigFile}
+        onchange={() => {
+          resetConfigDiff();
+          loadConfigHistory();
+        }}
+      >
         {#each configFiles as f}
-          <option value={f}>{f}</option>
+          <option value={f.variant}>{f.variant}{f.exists === false ? ' (missing)' : ''}</option>
         {/each}
         {#if configFiles.length === 0}
           <option value="main">main</option>
@@ -415,7 +472,7 @@
       </select>
       <span class="diff-arrow">vs</span>
       <select class="filter-select" bind:value={diffB}>
-        <option value="">Version B</option>
+        <option value="current">Current</option>
         {#each configHistory as h}
           <option value={h.filename}>{h.filename}</option>
         {/each}
