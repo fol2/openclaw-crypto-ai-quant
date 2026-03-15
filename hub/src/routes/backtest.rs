@@ -69,6 +69,7 @@ async fn run_backtest(
         initial_balance: balance,
         symbol: body.symbol,
         output_file: None,
+        include_equity_curve: true,
     };
 
     backtester::spawn_replay(
@@ -84,6 +85,67 @@ async fn run_backtest(
         "job_id": job_id,
         "status": "running",
     })))
+}
+
+fn normalise_backtest_result(result: &Value) -> Value {
+    let mut result = result.clone();
+    let Some(obj) = result.as_object_mut() else {
+        return result;
+    };
+
+    if let Some(total_pnl) = obj.get("total_pnl").cloned() {
+        obj.entry("net_pnl".to_string()).or_insert(total_pnl);
+    }
+
+    if let Some(max_drawdown_pct) = obj.get("max_drawdown_pct").and_then(Value::as_f64) {
+        obj.entry("max_drawdown_percent".to_string())
+            .or_insert_with(|| json!(max_drawdown_pct * 100.0));
+    }
+
+    if !obj.contains_key("duration_days") {
+        if let Some(duration_days) = extract_duration_days(obj.get("equity_curve")) {
+            obj.insert("duration_days".to_string(), json!(duration_days));
+        }
+    }
+
+    if let Some(per_symbol) = obj.get_mut("per_symbol").and_then(Value::as_object_mut) {
+        for stats in per_symbol.values_mut() {
+            let Some(stats_obj) = stats.as_object_mut() else {
+                continue;
+            };
+
+            if stats_obj.contains_key("pnl") {
+                continue;
+            }
+
+            if let Some(net_pnl) = stats_obj
+                .get("net_pnl_usd")
+                .cloned()
+                .or_else(|| stats_obj.get("realised_pnl_usd").cloned())
+            {
+                stats_obj.insert("pnl".to_string(), net_pnl);
+            }
+        }
+    }
+
+    result
+}
+
+fn extract_duration_days(equity_curve: Option<&Value>) -> Option<f64> {
+    let points = equity_curve?.as_array()?;
+    let first = points.first().and_then(extract_equity_point_ts)?;
+    let last = points.last().and_then(extract_equity_point_ts)?;
+    let duration_ms = last.saturating_sub(first).max(0) as f64;
+    Some(duration_ms / 86_400_000.0)
+}
+
+fn extract_equity_point_ts(point: &Value) -> Option<i64> {
+    point
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(Value::as_i64)
+        .or_else(|| point.get("timestamp_ms").and_then(Value::as_i64))
+        .or_else(|| point.get("timestamp").and_then(Value::as_i64))
 }
 
 /// GET /api/backtest/jobs — list all backtest jobs.
@@ -143,7 +205,7 @@ async fn job_result(
         return Err(HubError::BadRequest("job still running".into()));
     }
     match &job.result_json {
-        Some(result) => Ok(Json(result.clone())),
+        Some(result) => Ok(Json(normalise_backtest_result(result))),
         None => Err(HubError::NotFound("no result available".into())),
     }
 }
@@ -178,4 +240,37 @@ async fn cancel_job(
     }
 
     Ok(Json(json!({ "ok": true, "cancelled": id })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalise_backtest_result;
+    use serde_json::json;
+
+    #[test]
+    fn normalise_backtest_result_adds_page_aliases() {
+        let result = json!({
+            "total_pnl": 123.45,
+            "max_drawdown_pct": 0.125,
+            "equity_curve": [
+                [1_700_000_000_000_i64, 10_000.0],
+                [1_700_086_400_000_i64, 10_123.45]
+            ],
+            "per_symbol": {
+                "BTC": {
+                    "trades": 3,
+                    "net_pnl_usd": 45.67
+                }
+            }
+        });
+
+        let normalised = normalise_backtest_result(&result);
+
+        assert_eq!(normalised["total_pnl"], json!(123.45));
+        assert_eq!(normalised["net_pnl"], json!(123.45));
+        assert_eq!(normalised["max_drawdown_pct"], json!(0.125));
+        assert_eq!(normalised["max_drawdown_percent"], json!(12.5));
+        assert_eq!(normalised["duration_days"], json!(1.0));
+        assert_eq!(normalised["per_symbol"]["BTC"]["pnl"], json!(45.67));
+    }
 }

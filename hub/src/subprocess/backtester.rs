@@ -12,6 +12,7 @@ pub struct ReplayArgs {
     pub initial_balance: f64,
     pub symbol: Option<String>,
     pub output_file: Option<String>,
+    pub include_equity_curve: bool,
 }
 
 /// Arguments for spawning a parameter sweep.
@@ -52,6 +53,10 @@ pub async fn spawn_replay(
 
     if let Some(ref out) = args.output_file {
         cmd.arg("--output").arg(out);
+    }
+
+    if args.include_equity_curve {
+        cmd.arg("--equity-curve");
     }
 
     cmd.current_dir(&aiq_root)
