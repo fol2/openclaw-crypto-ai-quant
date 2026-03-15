@@ -4,8 +4,8 @@ use reqwest::blocking::Client;
 use reqwest::Url;
 use rmpv::{encode::write_value, Utf8String, Value};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
-use sha3::{Digest, Keccak256, Sha3_256};
+use serde_json::json;
+use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,15 +43,6 @@ pub struct HyperliquidPosition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HyperliquidFill {
     pub raw: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HyperliquidClearinghouseStateObservation {
-    pub observed_at_ts_ms: i64,
-    pub account_snapshot: HyperliquidAccountSnapshot,
-    pub positions: Vec<HyperliquidPosition>,
-    pub payload_json: String,
-    pub payload_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,22 +175,31 @@ impl HyperliquidClient {
     pub fn account_snapshot(&self) -> Result<HyperliquidAccountSnapshot> {
         let response: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        parse_account_snapshot(&response)
+        let account_value_usd = response
+            .margin_summary
+            .account_value
+            .parse_f64("accountValue")?;
+        let total_margin_used_usd = response
+            .margin_summary
+            .total_margin_used
+            .parse_f64("totalMarginUsed")?;
+        let withdrawable_usd = response
+            .withdrawable
+            .as_ref()
+            .map(|value| value.parse_f64("withdrawable"))
+            .transpose()?
+            .unwrap_or(account_value_usd - total_margin_used_usd);
+        Ok(HyperliquidAccountSnapshot {
+            account_value_usd,
+            withdrawable_usd,
+            total_margin_used_usd,
+        })
     }
 
     pub fn positions(&self) -> Result<Vec<HyperliquidPosition>> {
         let response: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        parse_positions(&response)
-    }
-
-    pub fn clearinghouse_state_observation(
-        &self,
-    ) -> Result<HyperliquidClearinghouseStateObservation> {
-        let (payload_json, payload) =
-            self.info_json_body("clearinghouseState", json!({ "user": self.main_address }))?;
-        let observed_at_ts_ms = current_timestamp_ms() as i64;
-        parse_clearinghouse_state_observation(&payload_json, payload, observed_at_ts_ms)
+        parse_positions(response)
     }
 
     pub fn all_mids(&self) -> Result<HashMap<String, f64>> {
@@ -475,21 +475,6 @@ impl HyperliquidClient {
         request_type: &str,
         extra: serde_json::Value,
     ) -> Result<T> {
-        let payload = self.info_json(request_type, extra)?;
-        serde_json::from_value(payload)
-            .with_context(|| format!("failed to parse Hyperliquid {request_type} response"))
-    }
-
-    fn info_json(&self, request_type: &str, extra: serde_json::Value) -> Result<serde_json::Value> {
-        let (_, payload) = self.info_json_body(request_type, extra)?;
-        Ok(payload)
-    }
-
-    fn info_json_body(
-        &self,
-        request_type: &str,
-        extra: serde_json::Value,
-    ) -> Result<(String, serde_json::Value)> {
         let mut body = serde_json::Map::new();
         body.insert(
             "type".to_string(),
@@ -508,7 +493,7 @@ impl HyperliquidClient {
             .json(&serde_json::Value::Object(body))
             .send()
             .context("Hyperliquid info request failed")?;
-        parse_json_value_response(response, "Hyperliquid info")
+        parse_json_response(response, "Hyperliquid info")
     }
 
     fn post_action(&self, action: Value) -> Result<serde_json::Value> {
@@ -812,75 +797,19 @@ fn parse_json_response<T: serde::de::DeserializeOwned>(
     response: reqwest::blocking::Response,
     label: &str,
 ) -> Result<T> {
-    let body = parse_json_response_text(response, label)?;
-    serde_json::from_str(&body).with_context(|| format!("failed to parse {label} response"))
-}
-
-fn parse_json_value_response(
-    response: reqwest::blocking::Response,
-    label: &str,
-) -> Result<(String, serde_json::Value)> {
-    let body = parse_json_response_text(response, label)?;
-    let payload =
-        serde_json::from_str(&body).with_context(|| format!("failed to parse {label} response"))?;
-    Ok((body, payload))
-}
-
-fn parse_json_response_text(response: reqwest::blocking::Response, label: &str) -> Result<String> {
     let status = response.status();
-    let body = response.text().unwrap_or_default();
     if !status.is_success() {
+        let body = response.text().unwrap_or_default();
         anyhow::bail!("{label} returned HTTP {} {}", status, body.trim());
     }
-    Ok(body)
+    response
+        .json()
+        .with_context(|| format!("failed to parse {label} response"))
 }
 
-fn parse_account_snapshot(
-    response: &ClearinghouseStateResponse,
-) -> Result<HyperliquidAccountSnapshot> {
-    let account_value_usd = response
-        .margin_summary
-        .account_value
-        .parse_f64("accountValue")?;
-    let total_margin_used_usd = response
-        .margin_summary
-        .total_margin_used
-        .parse_f64("totalMarginUsed")?;
-    let withdrawable_usd = response
-        .withdrawable
-        .as_ref()
-        .map(|value| value.parse_f64("withdrawable"))
-        .transpose()?
-        .unwrap_or(account_value_usd - total_margin_used_usd);
-    Ok(HyperliquidAccountSnapshot {
-        account_value_usd,
-        withdrawable_usd,
-        total_margin_used_usd,
-    })
-}
-
-fn parse_clearinghouse_state_observation(
-    payload_json: &str,
-    payload: JsonValue,
-    observed_at_ts_ms: i64,
-) -> Result<HyperliquidClearinghouseStateObservation> {
-    let response: ClearinghouseStateResponse = serde_json::from_value(payload.clone())
-        .context("failed to decode Hyperliquid clearinghouseState response")?;
-    let canonical_payload = serde_json::to_string(&payload)
-        .context("failed to serialise Hyperliquid clearinghouseState payload")?;
-    let payload_digest = hex::encode(Sha3_256::digest(canonical_payload.as_bytes()));
-    Ok(HyperliquidClearinghouseStateObservation {
-        observed_at_ts_ms,
-        account_snapshot: parse_account_snapshot(&response)?,
-        positions: parse_positions(&response)?,
-        payload_json: payload_json.to_string(),
-        payload_digest,
-    })
-}
-
-fn parse_positions(response: &ClearinghouseStateResponse) -> Result<Vec<HyperliquidPosition>> {
+fn parse_positions(response: ClearinghouseStateResponse) -> Result<Vec<HyperliquidPosition>> {
     let mut positions = Vec::new();
-    for asset in &response.asset_positions {
+    for asset in response.asset_positions {
         let symbol = asset.position.coin.trim().to_ascii_uppercase();
         if symbol.is_empty() {
             continue;
@@ -1147,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn clearinghouse_observation_parses_account_snapshot_positions_and_digest() {
+    fn clearinghouse_positions_accept_numeric_info_fields() {
         let payload = json!({
             "marginSummary": {
                 "accountValue": "223.843819",
@@ -1176,26 +1105,15 @@ mod tests {
             ]
         });
 
-        let payload_json = payload.to_string();
-        let observation =
-            parse_clearinghouse_state_observation(&payload_json, payload, 1_773_000_000_111_i64)
-                .unwrap();
-
-        assert_eq!(observation.observed_at_ts_ms, 1_773_000_000_111_i64);
-        assert!((observation.account_snapshot.account_value_usd - 223.843819).abs() < 1e-9);
-        assert!((observation.account_snapshot.withdrawable_usd - 48.477939).abs() < 1e-9);
-        assert_eq!(observation.positions.len(), 2);
-        assert_eq!(observation.positions[0].symbol, "HYPE");
-        assert_eq!(observation.positions[0].pos_type, "SHORT");
-        assert!((observation.positions[0].size - 8.31).abs() < 1e-9);
-        assert!((observation.positions[0].leverage - 4.0).abs() < 1e-9);
-        assert!((observation.positions[1].entry_price - 0.094602).abs() < 1e-9);
-        assert!((observation.positions[1].margin_used - 41.451039).abs() < 1e-9);
-        assert_eq!(observation.payload_json, payload_json);
-        assert_eq!(
-            observation.payload_digest,
-            hex::encode(Sha3_256::digest(payload_json.as_bytes()))
-        );
+        let response: ClearinghouseStateResponse = serde_json::from_value(payload).unwrap();
+        let positions = parse_positions(response).unwrap();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].symbol, "HYPE");
+        assert_eq!(positions[0].pos_type, "SHORT");
+        assert!((positions[0].size - 8.31).abs() < 1e-9);
+        assert!((positions[0].leverage - 4.0).abs() < 1e-9);
+        assert!((positions[1].entry_price - 0.094602).abs() < 1e-9);
+        assert!((positions[1].margin_used - 41.451039).abs() < 1e-9);
     }
 
     #[test]

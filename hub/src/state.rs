@@ -15,7 +15,7 @@ use crate::ws::broadcast::BroadcastHub;
 /// Cached HL snapshot with fetch timestamp.
 pub struct CachedHlSnapshot {
     pub snapshot: HlAccountSnapshot,
-    pub fetched_at_ms: i64,
+    pub fetched_at: Instant,
 }
 
 /// Shared application state, passed to all route handlers via `axum::extract::State`.

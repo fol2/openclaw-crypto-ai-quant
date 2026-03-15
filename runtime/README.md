@@ -39,43 +39,8 @@ hourly automation should treat a failed run as an operator review signal rather
 than a silent partial success.
 
 It also refreshes DB-backed exchange account and position snapshots so the Hub
-can expose exchange-observed equity and holdings when an in-memory
-Hyperliquid cache is unavailable.
-
-Hub live read paths now split exchange-observed equity from realised cash:
-
-- exchange observations surface `source`, `as_of`, `age_ms`, `freshness`, and
-  `reconciliation_status`
-- stale snapshots are last-known-good evidence only and must not present
-  themselves as current truth
-- realised cash remains a separate legacy trade-ledger field and is not yet an
-  audit-grade exchange cash figure
-
-Each `live sync-fills` run now leaves an append-only `exchange_sync_runs`
-header row before reconciliation starts and finalises that row with status,
-window, counts, and warning/error metadata when the run finishes. Mutable rows
-written by the sync path now carry `sync_run_id`, and cursor advancement also
-records `last_run_id`, so operators can trace which run produced the current
-snapshot/fill/trade state without reading logs.
-
-Account observations now also land as append-only
-`exchange_account_snapshot_events` evidence rows. The sync path uses one
-`clearinghouseState` fetch per observation, stores the raw payload JSON plus a
-stable payload digest, and reuses that exact observation timestamp for both the
-append-only evidence row and the mutable `runtime_account_snapshots` /
-`runtime_exchange_positions` rows derived from it. Current account snapshot
-rows now carry `account_snapshot_event_id` as well as `sync_run_id`, so the
-latest mutable snapshot can be traced back to its exact exchange evidence row.
-The evidence row is written before accepted mutable projections are refreshed,
-so unsupported or failed runs still retain the raw account payload for audit.
-
-Use the JSON output or query `exchange_sync_runs` directly when you need the
-last successful run, the last non-success run (including
-`unsupported_remote_fills`), or the exact run that advanced the cursor. Query
-`exchange_account_snapshot_events` when you need the captured account payload,
-digest, or evidence row referenced by the latest snapshot. Dry runs still use a
-temporary working DB, so their run headers and account evidence rows are not
-durable in the live DB.
+can fall back to current live balance and holdings when an in-memory
+Hyperliquid cache is unavailable or stale.
 
 ## Ownership
 

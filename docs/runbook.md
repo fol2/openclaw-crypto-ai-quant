@@ -444,85 +444,14 @@ uses the Rust `live sync-fills` cursor contract to auto-check and auto-sync the
 ledger every hour.
 
 Successful runs also write exchange account and position snapshots into the
-live DB, so Hub read paths can expose exchange-observed equity and holdings
-with explicit source, freshness, and reconciliation metadata even when no
-fresh in-memory Hyperliquid snapshot is available.
-
-Those DB-backed exchange snapshots are last-known-good evidence only when they
-are stale. They must not be treated as current reconciled realised cash.
+live DB, so Hub read paths can fall back to current live balance and holdings
+even when no fresh in-memory Hyperliquid snapshot is available.
 
 Service-level tuning knobs:
 
 - `AI_QUANT_LIVE_FILL_SYNC_LOOKBACK_HOURS`: fallback scan window when no cursor exists yet.
 - `AI_QUANT_LIVE_FILL_SYNC_OVERLAP_MINUTES`: overlap replay window for safe hourly re-checks.
 - `AI_QUANT_LIVE_FILL_SYNC_CURSOR_KEY`: cursor namespace stored in `runtime_sync_cursors`.
-
-When you need the last successful or last non-success sync run without
-trawling logs, query the live DB directly:
-
-```bash
-sqlite3 "$PWD/trading_engine_v8_live.db" "
-SELECT id, status, started_at, finished_at, unsupported_remote_fills, error_text
-FROM exchange_sync_runs
-ORDER BY id DESC
-LIMIT 10;
-"
-
-sqlite3 "$PWD/trading_engine_v8_live.db" "
-SELECT started_at, finished_at, id
-FROM exchange_sync_runs
-WHERE status = 'success'
-ORDER BY id DESC
-LIMIT 1;
-"
-
-sqlite3 "$PWD/trading_engine_v8_live.db" "
-SELECT started_at, finished_at, id, status, error_text
-FROM exchange_sync_runs
-WHERE status != 'success'
-ORDER BY id DESC
-LIMIT 1;
-"
-
-sqlite3 "$PWD/trading_engine_v8_live.db" "
-SELECT sync_key, last_start_ts_ms, last_end_ts_ms, last_run_id, updated_at
-FROM runtime_sync_cursors;
-"
-```
-
-`runtime_account_snapshots`, `runtime_exchange_positions`, `oms_intents`,
-`oms_fills`, and `trades` now carry `sync_run_id` so you can trace the latest
-mutable row back to the append-only run header. `runtime_sync_cursors.last_run_id`
-records which successful run advanced the cursor.
-
-`runtime_account_snapshots.account_snapshot_event_id` now points to the
-append-only `exchange_account_snapshot_events` row captured from the same
-`clearinghouseState` observation. Use that link when you need the raw payload
-JSON, stable digest, wallet identity, or shared observation timestamp behind
-the latest mutable account snapshot:
-
-```bash
-sqlite3 "$PWD/trading_engine_v8_live.db" "
-SELECT
-  s.ts_ms,
-  s.timestamp,
-  s.sync_run_id,
-  s.account_snapshot_event_id,
-  e.payload_digest,
-  e.request_type,
-  e.wallet_address
-FROM runtime_account_snapshots AS s
-JOIN exchange_account_snapshot_events AS e
-  ON e.id = s.account_snapshot_event_id
-ORDER BY s.ts_ms DESC, s.id DESC
-LIMIT 1;
-"
-```
-
-The append-only evidence row is written before the run decides whether to
-refresh the mutable current snapshot tables, so failed or degraded runs still
-leave behind the captured account payload even when `runtime_account_snapshots`
-is not updated.
 
 ## Diagnostics
 

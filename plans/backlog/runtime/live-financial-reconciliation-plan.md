@@ -2,20 +2,12 @@
 
 ## Status
 
-Active.
+Backlog.
 
-Activated on 2026-03-14.
+Previously activated on 2026-03-14 and partially executed through PR 3.
 
-Current execution status:
-
-- PR 1 is merged to `master` and cleaned up.
-- PR 2 is merged to `master` and cleaned up.
-- PR 3 implementation is complete on branch
-  `codex/live-fin-recon-pr3-account-evidence`: one `clearinghouseState` fetch
-  now produces append-only account evidence with raw payload JSON plus stable
-  digest, and current snapshot rows reference that evidence while sharing its
-  observation timestamp.
-- Remaining PRs are pending.
+Returned to backlog on 2026-03-15 after the merged PR 1/2/3 change set was
+functionally rolled back from `master`.
 
 Prepared on 2026-03-14 after a production incident review and three
 independent expert critiques covering trading operations, accounting truth, and
@@ -263,16 +255,12 @@ Scope:
 
 - add append-only `exchange_account_snapshot_events`
 - capture a single coherent exchange observation time for each snapshot record
-  from one `clearinghouseState` fetch
-- store both raw payload JSON and a stable payload digest plus source metadata
-- extend current `runtime_account_snapshots` rows so they point back to the
-  append-only account evidence row and carry the same observation time
+- store raw payload or a raw payload digest plus source metadata
 
 Acceptance:
 
 - account observations are no longer overwrite-only state
 - every snapshot row is attributable to one run and one observation time
-- the current account snapshot view references the append-only evidence row
 
 ### PR 4. Capture exchange position observations as append-only evidence
 
