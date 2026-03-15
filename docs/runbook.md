@@ -265,6 +265,11 @@ diagnostics:
 /api/system/logs/raw
 ```
 
+The Hub System page now tries the privileged raw log route first, then falls
+back to the redacted `/api/system/logs` surface when the operator only has a
+viewer/editor/approver token. This keeps service log inspection available
+without implying raw journal visibility.
+
 These privileged diagnostics reads are audited to:
 
 ```bash
