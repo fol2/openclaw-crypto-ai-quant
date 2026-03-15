@@ -1619,7 +1619,7 @@
         {/if}
         {#if marks?.entries?.length}
           <div class="kv-section">
-            <h4>Entries</h4>
+            <h4>Entries{#if marks?.position}{@const pt = marks.position.pos_type || marks.position.type}{' '}<span class="badge" class:badge-long={pt === 'LONG'} class:badge-short={pt !== 'LONG'}>{pt} {fmtNum(marks.position.leverage, 0)}&times;</span>{/if}</h4>
             {#each marks.entries as e}
               <div class="kv">
                 <span class="k">
