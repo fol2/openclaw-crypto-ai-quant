@@ -27,7 +27,7 @@ cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper.json --tar
 
 cargo run -p aiq-runtime --bin aiq-maintenance -- fetch-funding-rates --days 30 --db candles_dbs/funding_rates.db
 cargo run -p aiq-runtime --bin aiq-maintenance -- prune-factory-artifacts --project-dir "$PWD" --settings config/factory_defaults.yaml --profile nightly
-cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db trading_engine.db
+cargo run -p aiq-runtime --bin aiq-maintenance -- prune-runtime-logs --db trading_engine_v8_live.db --db trading_engine_v8_paper1.db --db trading_engine_v8_paper2.db --db trading_engine_v8_paper3.db
 ```
 
 Paper supervision now treats `decision_events` as a canonical compatibility
