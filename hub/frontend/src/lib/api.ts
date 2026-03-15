@@ -380,15 +380,68 @@ export async function cancelSweep(id: string) {
 
 // ── Factory API ─────────────────────────────────────────────────────
 
-export async function getFactoryCapability() {
+export interface FactoryCapability {
+  compiled: boolean;
+  policy_enabled: boolean;
+  executor_wired: boolean;
+  execution_enabled: boolean;
+  mode: string;
+  reason: string;
+  enable_env: string;
+  settings_path: string;
+  service_units: string[];
+}
+
+export interface FactoryRunSummary {
+  date: string;
+  run_id: string;
+  directory_name?: string;
+  has_report: boolean;
+  profile: string;
+  candidate_count?: number | null;
+  selected_count?: number | null;
+  selection_stage?: string | null;
+  deploy_stage?: string | null;
+  generated_at_ms?: number | null;
+}
+
+export interface FactoryRunDetail {
+  date: string;
+  run_id: string;
+  directory_name?: string | null;
+  metadata: Record<string, any>;
+  subdirs: string[];
+  report_available?: boolean;
+  candidate_count?: number | null;
+  selection_summary?: Record<string, any> | null;
+}
+
+export interface FactoryTimerStatus {
+  unit?: string;
+  name?: string;
+  active?: string;
+  load?: string;
+  enabled?: boolean;
+  available?: boolean;
+  unit_file_state?: string;
+  mode?: string;
+  next_trigger?: string;
+}
+
+export interface FactoryTimerResponse {
+  capability?: FactoryCapability;
+  timers: FactoryTimerStatus[];
+}
+
+export async function getFactoryCapability(): Promise<FactoryCapability> {
   return apiFetch('/api/factory/capability');
 }
 
-export async function getFactoryRuns() {
+export async function getFactoryRuns(): Promise<FactoryRunSummary[]> {
   return apiFetch('/api/factory/runs');
 }
 
-export async function getFactoryRun(date: string, runId: string) {
+export async function getFactoryRun(date: string, runId: string): Promise<FactoryRunDetail> {
   return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}`);
 }
 
@@ -424,7 +477,7 @@ export async function putFactorySettings(settings: Record<string, any>) {
   return apiFetch('/api/factory/settings', { method: 'PUT', body: JSON.stringify(settings) });
 }
 
-export async function getFactoryTimer() {
+export async function getFactoryTimer(): Promise<FactoryTimerResponse> {
   return apiFetch('/api/factory/timer');
 }
 
