@@ -233,6 +233,17 @@ plus the first runtime-log timestamp that carried that same `config_id`, rather
 than from YAML file `mtime`. Snapshot responses therefore expose config-centric
 attribution boundaries instead of filesystem metadata.
 
+Paper-mode monitor health now treats the daemon status files as the freshness
+fallback when the legacy `runtime_logs` heartbeat is stale or missing. The Hub
+reads `ai_quant_paper_v8_<lane>.status.json` to refresh paper health
+`ts_ms`/cadence metadata and to surface the current paper `config_id` without
+requiring a fresh `engine ok` row in the trading DB.
+
+Live service state remains a separate contract from heartbeat freshness. An
+intentionally stopped live lane should still surface as service `OFF` through
+`/api/system/services`, and the paper status-file fallback does not change that
+live service-state behaviour.
+
 ### Default Redaction and Privileged Diagnostics
 
 Default config/system/monitor read paths now redact sensitive operational

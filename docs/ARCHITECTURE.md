@@ -91,8 +91,14 @@ two opt-in parity lanes:
 
 - trading SQLite DBs for paper/live runtime state
 - candle SQLite DBs and optional partition directories
-- runtime status files used by service inspection
+- runtime status files used by service inspection and paper monitor freshness fallback
 - snapshot JSON files used for continuation and replay seeding
+
+Paper monitor health continues to prefer the legacy `runtime_logs` heartbeat
+when available, but now falls back to the paper daemon status files when that
+heartbeat is stale or missing. Live `OFF` remains a service-state concept owned
+by the Hub/systemd inspection path rather than by the paper status-file
+fallback.
 
 ## Removed Surfaces
 

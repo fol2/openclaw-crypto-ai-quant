@@ -7,6 +7,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,119 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[derive(Debug, Deserialize)]
+struct PaperDaemonStatusFreshness {
+    ok: bool,
+    running: bool,
+    updated_at_ms: i64,
+    #[serde(default)]
+    started_at_ms: Option<i64>,
+    #[serde(default)]
+    stop_requested: bool,
+    #[serde(default)]
+    config_id: Option<String>,
+    #[serde(default)]
+    executed_steps: Option<u64>,
+    #[serde(default)]
+    idle_polls: Option<u64>,
+    #[serde(default)]
+    last_active_symbols: Vec<String>,
+}
+
+impl PaperDaemonStatusFreshness {
+    fn is_running(&self) -> bool {
+        self.ok && self.running && !self.stop_requested
+    }
+
+    fn estimated_loop_s(&self) -> Option<f64> {
+        let started_at_ms = self.started_at_ms?;
+        let elapsed_ms = self.updated_at_ms.saturating_sub(started_at_ms);
+        if elapsed_ms <= 0 {
+            return None;
+        }
+
+        let cycles = self.executed_steps.unwrap_or(0) + self.idle_polls.unwrap_or(0);
+        if cycles == 0 {
+            return None;
+        }
+
+        Some(((elapsed_ms as f64 / cycles as f64) / 1000.0).clamp(1.0, 900.0))
+    }
+}
+
+fn default_paper_status_path(aiq_root: &Path, mode: &str) -> Option<PathBuf> {
+    let file_name = match mode {
+        "paper1" => "ai_quant_paper_v8_paper1.status.json",
+        "paper2" => "ai_quant_paper_v8_paper2.status.json",
+        "paper3" => "ai_quant_paper_v8_paper3.status.json",
+        _ => return None,
+    };
+    Some(aiq_root.join(file_name))
+}
+
+fn load_paper_status_freshness(status_path: &Path) -> Option<PaperDaemonStatusFreshness> {
+    let payload = std::fs::read(status_path).ok()?;
+    serde_json::from_slice(&payload).ok()
+}
+
+fn heartbeat_fresh_window_ms(heartbeat: &Heartbeat) -> i64 {
+    heartbeat
+        .loop_s
+        .map(|seconds| (seconds * 1000.0) as i64)
+        .map(|loop_ms| (loop_ms.saturating_mul(6)).max(60_000))
+        .unwrap_or(60_000)
+}
+
+fn heartbeat_is_stale(heartbeat: &Heartbeat, now_ts_ms: i64) -> bool {
+    let Some(ts_ms) = heartbeat.ts_ms else {
+        return true;
+    };
+    now_ts_ms.saturating_sub(ts_ms) > heartbeat_fresh_window_ms(heartbeat)
+}
+
+fn effective_heartbeat_for_mode(
+    aiq_root: &Path,
+    mode: &str,
+    conn: &rusqlite::Connection,
+    now_ts_ms: i64,
+) -> Result<Heartbeat, HubError> {
+    let heartbeat =
+        runtime::fetch_heartbeat_from_db(conn)?.unwrap_or_else(|| crate::heartbeat::Heartbeat {
+            ok: false,
+            error: Some("heartbeat_missing".to_string()),
+            ..Default::default()
+        });
+
+    let Some(status_path) = default_paper_status_path(aiq_root, mode) else {
+        return Ok(heartbeat);
+    };
+    let Some(status) = load_paper_status_freshness(&status_path) else {
+        return Ok(heartbeat);
+    };
+    if !status.is_running() {
+        return Ok(heartbeat);
+    }
+    if !heartbeat_is_stale(&heartbeat, now_ts_ms) {
+        return Ok(heartbeat);
+    }
+
+    let mut merged = heartbeat;
+    merged.ok = true;
+    merged.error = None;
+    merged.source = Some("paper_status".to_string());
+    merged.ts_ms = Some(status.updated_at_ms);
+    if let Some(loop_s) = status.estimated_loop_s() {
+        merged.loop_s = Some(loop_s);
+    }
+    if let Some(config_id) = status.config_id {
+        merged.config_id = Some(config_id);
+    }
+    if !status.last_active_symbols.is_empty() {
+        merged.symbols = Some(status.last_active_symbols.len() as i64);
+    }
+    Ok(merged)
 }
 
 fn deployed_config_boundary(
@@ -496,12 +610,7 @@ async fn api_snapshot(
     let conn = pool.get()?;
 
     // Heartbeat
-    let heartbeat =
-        runtime::fetch_heartbeat_from_db(&conn)?.unwrap_or_else(|| crate::heartbeat::Heartbeat {
-            ok: false,
-            error: Some("heartbeat_missing".to_string()),
-            ..Default::default()
-        });
+    let heartbeat = effective_heartbeat_for_mode(&state.config.aiq_root, &mode, &conn, ts)?;
 
     // Open positions
     let ledger_positions = trading::compute_open_positions(&conn)?;
@@ -1142,7 +1251,7 @@ async fn api_metrics(
         .ok_or_else(|| HubError::Db("db not available".to_string()))?;
     let conn = pool.get()?;
 
-    let heartbeat = runtime::fetch_heartbeat_from_db(&conn)?.unwrap_or_default();
+    let heartbeat = effective_heartbeat_for_mode(&state.config.aiq_root, &mode, &conn, ts)?;
 
     let mut gauges: HashMap<String, Value> = HashMap::new();
     gauges.insert("engine_up".into(), json!(if heartbeat.ok { 1 } else { 0 }));
@@ -1234,10 +1343,8 @@ async fn api_prometheus(
         }
     };
 
-    let heartbeat = runtime::fetch_heartbeat_from_db(&conn)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let heartbeat =
+        effective_heartbeat_for_mode(&state.config.aiq_root, &mode, &conn, ts).unwrap_or_default();
 
     let mut lines: Vec<String> = Vec::new();
 
@@ -1494,6 +1601,150 @@ mod tests {
         assert_eq!(merged[0].open_trade_id, 11904);
         assert!((merged[0].size - 1692.0).abs() < 1e-9);
         assert!((merged[0].entry_price - 0.094602).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_heartbeat_for_paper_mode_falls_back_to_status_file() {
+        let dir = tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE runtime_logs (
+                ts_ms INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_700_000_000_000_i64,
+                "🫀 engine ok. loops=3 errors=0 symbols=50 open_pos=4 loop=1.76s config_id=oldcfg1234"
+            ],
+        )
+        .unwrap();
+
+        let status_path = dir.path().join("ai_quant_paper_v8_paper1.status.json");
+        std::fs::write(
+            &status_path,
+            serde_json::to_vec_pretty(&json!({
+                "ok": true,
+                "running": true,
+                "updated_at_ms": 1_700_010_000_000_i64,
+                "started_at_ms": 1_700_000_000_000_i64,
+                "stop_requested": false,
+                "config_id": "newcfg5678",
+                "executed_steps": 10,
+                "idle_polls": 90,
+                "last_active_symbols": ["BTC", "ETH", "SOL"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let heartbeat =
+            effective_heartbeat_for_mode(dir.path(), "paper1", &conn, 1_700_010_000_500_i64)
+                .unwrap();
+
+        assert!(heartbeat.ok);
+        assert_eq!(heartbeat.source.as_deref(), Some("paper_status"));
+        assert_eq!(heartbeat.ts_ms, Some(1_700_010_000_000_i64));
+        assert_eq!(heartbeat.config_id.as_deref(), Some("newcfg5678"));
+        assert_eq!(heartbeat.symbols, Some(3));
+        assert!(heartbeat.loop_s.is_some_and(|loop_s| loop_s >= 90.0));
+    }
+
+    #[test]
+    fn effective_heartbeat_for_live_mode_does_not_use_paper_status_fallback() {
+        let dir = tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE runtime_logs (
+                ts_ms INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_700_000_000_000_i64,
+                "🫀 engine ok. loops=8 errors=0 symbols=50 open_pos=4 loop=0.83s config_id=deadbeef1234"
+            ],
+        )
+        .unwrap();
+
+        std::fs::write(
+            dir.path().join("ai_quant_v8_live.status.json"),
+            serde_json::to_vec_pretty(&json!({
+                "ok": true,
+                "running": true,
+                "updated_at_ms": 1_700_010_000_000_i64,
+                "config_id": "ignored_live_cfg"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let heartbeat =
+            effective_heartbeat_for_mode(dir.path(), "live", &conn, 1_700_010_000_500_i64)
+                .unwrap();
+
+        assert_eq!(heartbeat.source.as_deref(), Some("sqlite"));
+        assert_eq!(heartbeat.ts_ms, Some(1_700_000_000_000_i64));
+        assert_eq!(heartbeat.config_id.as_deref(), Some("deadbeef1234"));
+    }
+
+    #[test]
+    fn effective_heartbeat_for_paper_mode_keeps_fresh_db_heartbeat() {
+        let dir = tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE runtime_logs (
+                ts_ms INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_logs (ts_ms, message) VALUES (?1, ?2)",
+            rusqlite::params![
+                1_700_010_000_000_i64,
+                "🫀 engine ok. loops=8 errors=0 symbols=50 open_pos=4 loop=30.0s config_id=feedface1234"
+            ],
+        )
+        .unwrap();
+
+        let status_path = dir.path().join("ai_quant_paper_v8_paper1.status.json");
+        std::fs::write(
+            &status_path,
+            serde_json::to_vec_pretty(&json!({
+                "ok": true,
+                "running": true,
+                "updated_at_ms": 1_700_010_030_000_i64,
+                "started_at_ms": 1_700_000_000_000_i64,
+                "stop_requested": false,
+                "config_id": "newcfg5678",
+                "executed_steps": 10,
+                "idle_polls": 90,
+                "last_active_symbols": ["BTC", "ETH", "SOL"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let heartbeat =
+            effective_heartbeat_for_mode(dir.path(), "paper1", &conn, 1_700_010_030_500_i64)
+                .unwrap();
+
+        assert!(heartbeat.ok);
+        assert_eq!(heartbeat.source.as_deref(), Some("sqlite"));
+        assert_eq!(heartbeat.ts_ms, Some(1_700_010_000_000_i64));
+        assert_eq!(heartbeat.config_id.as_deref(), Some("feedface1234"));
+        assert_eq!(heartbeat.symbols, Some(50));
+        assert_eq!(heartbeat.loop_s, Some(30.0));
     }
 
     #[test]
