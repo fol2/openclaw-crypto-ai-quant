@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::HubError;
@@ -63,12 +64,13 @@ async fn run_backtest(
     );
 
     let balance = body.initial_balance.unwrap_or(10000.0);
+    let output_file = prepare_backtest_output_path(&state.config.artifacts_dir, &job_id)?;
 
     let args = backtester::ReplayArgs {
         config_path,
         initial_balance: balance,
         symbol: body.symbol,
-        output_file: None,
+        output_file: Some(output_file.display().to_string()),
         include_equity_curve: true,
     };
 
@@ -85,6 +87,17 @@ async fn run_backtest(
         "job_id": job_id,
         "status": "running",
     })))
+}
+
+fn prepare_backtest_output_path(artifacts_dir: &PathBuf, job_id: &str) -> Result<PathBuf, HubError> {
+    let dir = artifacts_dir.join("backtests");
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        HubError::Internal(format!(
+            "failed to create backtest artifact directory {}: {e}",
+            dir.display()
+        ))
+    })?;
+    Ok(dir.join(format!("{job_id}.json")))
 }
 
 fn normalise_backtest_result(result: &Value) -> Value {
@@ -244,8 +257,9 @@ async fn cancel_job(
 
 #[cfg(test)]
 mod tests {
-    use super::normalise_backtest_result;
+    use super::{normalise_backtest_result, prepare_backtest_output_path};
     use serde_json::json;
+    use tempfile::tempdir;
 
     #[test]
     fn normalise_backtest_result_adds_page_aliases() {
@@ -272,5 +286,14 @@ mod tests {
         assert_eq!(normalised["max_drawdown_percent"], json!(12.5));
         assert_eq!(normalised["duration_days"], json!(1.0));
         assert_eq!(normalised["per_symbol"]["BTC"]["pnl"], json!(45.67));
+    }
+
+    #[test]
+    fn prepare_backtest_output_path_creates_backtests_directory() {
+        let dir = tempdir().unwrap();
+        let path = prepare_backtest_output_path(&dir.path().to_path_buf(), "job-123").unwrap();
+
+        assert_eq!(path, dir.path().join("backtests").join("job-123.json"));
+        assert!(dir.path().join("backtests").is_dir());
     }
 }
