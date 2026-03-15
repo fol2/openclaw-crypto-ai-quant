@@ -2,6 +2,7 @@ use crate::error::HubError;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::Value;
+use std::cmp::Ordering;
 
 type TradeJourneyRow = (
     i64,
@@ -837,6 +838,30 @@ fn merged_journey_source(current: &str, leg_source: &str) -> String {
     "mixed".to_string()
 }
 
+fn parse_trade_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalised = if trimmed.contains('T') {
+        trimmed.to_string()
+    } else {
+        trimmed.replace(' ', "T")
+    };
+    chrono::DateTime::parse_from_rfc3339(&normalised)
+        .ok()
+        .map(|ts| ts.with_timezone(&chrono::Utc))
+}
+
+fn trade_row_time_cmp(a_ts: &str, a_id: i64, b_ts: &str, b_id: i64) -> Ordering {
+    match (parse_trade_timestamp(a_ts), parse_trade_timestamp(b_ts)) {
+        (Some(a), Some(b)) => a.cmp(&b).then(a_id.cmp(&b_id)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a_id.cmp(&b_id),
+    }
+}
+
 /// Reconstruct trade journeys (OPEN→…→CLOSE lifecycles) from the trades table.
 /// Returns most-recent journeys first (open ones at the top, then closed by close_ts DESC).
 ///
@@ -863,7 +888,7 @@ pub fn trade_journeys(
 
     let mut stmt = conn.prepare(sql)?;
 
-    let rows: Vec<TradeJourneyRow> = if let Some(sym) = symbol_filter {
+    let mut rows: Vec<TradeJourneyRow> = if let Some(sym) = symbol_filter {
         stmt.query_map(params![sym], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -900,6 +925,7 @@ pub fn trade_journeys(
         })?
         .collect::<Result<Vec<_>, _>>()?
     };
+    rows.sort_by(|a, b| trade_row_time_cmp(&a.1, a.0, &b.1, b.0));
 
     // Walk chronologically, building journeys keyed by symbol.
     // current_size tracks live position size for weighted avg entry calc;
@@ -1372,6 +1398,87 @@ mod tests {
         assert_eq!(journeys[0].close_ts.as_deref(), Some("2026-03-01T00:05:00Z"));
         assert_eq!(journeys[0].exit_price, Some(10.5));
         assert_eq!(journeys[0].legs[1].action, "REDUCE");
+    }
+
+    #[test]
+    fn trade_journeys_use_event_time_when_trade_ids_arrive_out_of_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+
+        let rows = [
+            (
+                "2026-03-10T18:00:00Z",
+                "HYPE",
+                "SHORT",
+                "OPEN",
+                33.0,
+                3.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-11T12:00:00Z",
+                "HYPE",
+                "SHORT",
+                "ADD",
+                35.0,
+                2.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-10T08:00:00Z",
+                "HYPE",
+                "SHORT",
+                "OPEN",
+                34.0,
+                1.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-10T15:00:00Z",
+                "HYPE",
+                "SHORT",
+                "CLOSE",
+                33.5,
+                1.0,
+                "manual_trade",
+                "MANUAL",
+                0.5,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+        ];
+
+        for row in rows {
+            conn.execute(
+                "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+                    row.10
+                ],
+            )
+            .unwrap();
+        }
+
+        let journeys = trade_journeys(&conn, 10, 0, Some("HYPE")).unwrap();
+        assert_eq!(journeys.len(), 2);
+        assert!(journeys[0].is_open);
+        assert_eq!(journeys[0].open_ts, "2026-03-10T18:00:00Z");
+        assert!((journeys[0].entry_price - 33.8).abs() < 1e-9);
+        assert!((journeys[0].peak_size - 5.0).abs() < 1e-9);
+        assert_eq!(journeys[1].close_ts.as_deref(), Some("2026-03-10T15:00:00Z"));
     }
 
     #[test]
