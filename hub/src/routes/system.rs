@@ -44,7 +44,6 @@ const ALLOWED_SERVICES: &[&str] = &[
     "openclaw-ai-quant-funding",
     "openclaw-ai-quant-funding-v8",
     "openclaw-ai-quant-ws-sidecar",
-    "openclaw-ai-quant-ws-sidecar-v8",
     "openclaw-ai-quant-prune-runtime-logs-v8",
     "openclaw-gateway",
 ];
@@ -395,5 +394,14 @@ mod tests {
         assert!(disk_response
             .iter()
             .all(|row| row.get("path").is_none() && row.get("path_redacted").is_some()));
+    }
+
+    #[test]
+    fn removed_v8_sidecar_is_not_an_allowed_service() {
+        let err = validate_service("openclaw-ai-quant-ws-sidecar-v8").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown service: openclaw-ai-quant-ws-sidecar-v8")
+        );
     }
 }
