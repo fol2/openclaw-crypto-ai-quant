@@ -548,6 +548,19 @@ fn journey_matches_synthetic_position(
         && approx_equal(journey_remaining_size(journey), position.size, 0.01)
 }
 
+fn detail_fallback_journey(
+    journeys: Vec<trading::TradeJourney>,
+    position: Option<&trading::OpenPosition>,
+) -> Option<trading::TradeJourney> {
+    if let Some(position) = position.filter(|position| position.open_trade_id <= 0) {
+        journeys
+            .into_iter()
+            .find(|journey| journey_matches_synthetic_position(journey, position))
+    } else {
+        journeys.into_iter().next()
+    }
+}
+
 fn merge_positions_with_live_snapshot(
     ledger_positions: &[trading::OpenPosition],
     live_positions: &HashMap<String, HlPositionSnapshot>,
@@ -1127,15 +1140,8 @@ async fn api_marks(
         })
     };
     if entries.is_empty() {
-        let latest_journey = trading::trade_journeys(&conn, 1, 0, Some(&sym))?
-            .into_iter()
-            .next();
-        let fallback_journey = latest_journey.filter(|journey| {
-            pos.as_ref()
-                .filter(|position| position.open_trade_id <= 0)
-                .map(|position| journey_matches_synthetic_position(journey, position))
-                .unwrap_or(true)
-        });
+        let fallback_journey =
+            detail_fallback_journey(trading::trade_journeys(&conn, u32::MAX, 0, Some(&sym))?, pos.as_ref());
         if let Some(journey) = fallback_journey {
             entries = trading::trade_entries_from_journey(journey);
         }
@@ -2038,5 +2044,80 @@ mod tests {
         };
 
         assert!(!journey_matches_synthetic_position(&journey, &position));
+    }
+
+    #[test]
+    fn detail_fallback_journey_prefers_matching_open_journey_for_synthetic_position() {
+        let position = trading::OpenPosition {
+            symbol: "DOGE".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 0,
+            open_timestamp: None,
+            entry_price: 0.094602,
+            size: 1692.0,
+            confidence: None,
+            entry_atr: 0.0,
+            leverage: 4.0,
+            margin_used: 40.0,
+        };
+        let closed = trading::TradeJourney {
+            id: 1,
+            symbol: "DOGE".to_string(),
+            pos_type: "LONG".to_string(),
+            source: "strategy".to_string(),
+            manual_leg_count: 0,
+            open_ts: "2026-03-05T09:16:40.804000+00:00".to_string(),
+            close_ts: Some("2026-03-10T17:12:48.225000+00:00".to_string()),
+            entry_price: 0.09450110215384618,
+            exit_price: Some(0.0942),
+            peak_size: 1800.0,
+            total_pnl: 1.0,
+            total_fees: 0.1,
+            is_open: false,
+            legs: vec![],
+        };
+        let open = trading::TradeJourney {
+            id: 2,
+            symbol: "DOGE".to_string(),
+            pos_type: "LONG".to_string(),
+            source: "strategy".to_string(),
+            manual_leg_count: 0,
+            open_ts: "2026-03-10T17:14:56.725000+00:00".to_string(),
+            close_ts: None,
+            entry_price: 0.09460233651026394,
+            exit_price: None,
+            peak_size: 2000.0,
+            total_pnl: 0.2,
+            total_fees: 0.1,
+            is_open: true,
+            legs: vec![
+                trading::JourneyLeg {
+                    id: 2,
+                    timestamp: "2026-03-10T17:14:56.725000+00:00".to_string(),
+                    action: "OPEN".to_string(),
+                    source: "strategy".to_string(),
+                    price: 0.09460233651026394,
+                    size: 1800.0,
+                    pnl: 0.0,
+                    reason: "Signal Trigger".to_string(),
+                    confidence: "medium".to_string(),
+                },
+                trading::JourneyLeg {
+                    id: 3,
+                    timestamp: "2026-03-10T17:30:00.000000+00:00".to_string(),
+                    action: "REDUCE".to_string(),
+                    source: "strategy".to_string(),
+                    price: 0.095,
+                    size: 108.0,
+                    pnl: 0.2,
+                    reason: "Take Profit".to_string(),
+                    confidence: "n/a".to_string(),
+                },
+            ],
+        };
+
+        let picked = detail_fallback_journey(vec![closed, open.clone()], Some(&position)).unwrap();
+        assert_eq!(picked.id, open.id);
+        assert!(picked.is_open);
     }
 }
