@@ -374,6 +374,12 @@ audit exactly which window produced each gate decision.
 factory can fail closed on symbol-level parity regressions, not just aggregate
 balance drift.
 
+The Hub Factory page accepts the canonical Rust run ID even when the artefact
+directory still carries a `run_` prefix, and it now surfaces `directory_name`,
+selection summary fields, candidate evidence, and timer `UnitFileState`
+separately. Treat the page timer `enabled` state as the systemd unit-file
+setting, not as a synonym for the current `ActiveState`.
+
 Keep nightly factory artefacts bounded with:
 
 ```bash
