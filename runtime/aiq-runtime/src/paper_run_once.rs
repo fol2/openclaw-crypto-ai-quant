@@ -2173,6 +2173,27 @@ mod tests {
             .unwrap();
         assert_eq!(close_info.timestamp_ms, FIXED_TS_MS);
         assert_eq!(close_info.reason, "Signal Trigger");
+
+        // Verify CLOSE trade records correct leverage/margin from pre_state, not
+        // the fallback defaults (leverage=1.0, margin=notional) that would result
+        // from only looking at post_state (where the position has been removed).
+        let conn = Connection::open(&paper_db).unwrap();
+        let (recorded_leverage, recorded_margin): (f64, f64) = conn
+            .query_row(
+                "SELECT leverage, margin_used FROM trades WHERE action='CLOSE' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let expected_leverage = 100.0 / 33.3; // notional / margin from pre_state position
+        assert!(
+            (recorded_leverage - expected_leverage).abs() < 1e-6,
+            "CLOSE leverage: got {recorded_leverage}, expected {expected_leverage}",
+        );
+        assert!(
+            (recorded_margin - 33.3).abs() < 1e-6,
+            "CLOSE margin_used: got {recorded_margin}, expected 33.3",
+        );
     }
 
     #[test]
