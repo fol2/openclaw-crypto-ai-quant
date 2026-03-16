@@ -784,6 +784,7 @@
                 <span class="k">
                   {entryActionLabel(e.action)}
                   {#if e.source === 'manual'}<span class="trade-source-badge">MANUAL</span>{/if}
+                  {#if e.timestamp}<span class="entry-age">{sigAge(e.timestamp)}</span>{/if}
                 </span>
                 <span class="v mono">@ {fmtNum(e.price, 6)} &times; {fmtNum(e.size, 4)}</span>
               </div>
@@ -1165,6 +1166,12 @@
     letter-spacing: 0.04em;
     color: #ffd38a;
     background: rgba(245, 158, 11, 0.16);
+  }
+  .entry-age {
+    margin-left: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
   }
 
   /* ── Empty state ───────────────────────────────────────────────────── */
