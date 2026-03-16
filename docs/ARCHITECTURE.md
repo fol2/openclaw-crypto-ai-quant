@@ -51,7 +51,13 @@ Rust-owned surfaces directly.
 1. `ws_sidecar` ingests Hyperliquid feeds and persists candles
 2. `aiq-runtime` resolves config and executes paper/live cycles
 3. `bt-cli` replays the same strategy/config contract offline
-4. `hub` exposes service state, backtest controls, logs, and monitoring views
+4. `hub` exposes service state, backtest/sweep controls, logs, and monitoring views
+
+Hub sweep jobs now persist per-run JSONL artefacts under
+`artifacts/sweeps/<job-id>.jsonl`. The Hub sweep route reads structured stdout
+when the backtester returns it directly and otherwise falls back to that JSONL
+file so the UI can still inspect candidate-family sweeps across `paper1`,
+`paper2`, and `paper3`.
 
 Hub backtest jobs now request equity-curve output from the Rust replay path,
 and the Hub backtest API normalises legacy result keys such as `total_pnl` and
