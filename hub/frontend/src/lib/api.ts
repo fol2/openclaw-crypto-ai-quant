@@ -68,6 +68,11 @@ function resolveHubMode(mode?: string | null): string {
   return normaliseMode(mode || appState.mode);
 }
 
+function resolveExplicitHubMode(mode?: string | null): string | null {
+  if (mode == null) return null;
+  return normaliseMode(mode);
+}
+
 async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -133,8 +138,9 @@ export async function getCandles(symbol: string, interval?: string, limit = 200,
   const params = new URLSearchParams({
     symbol,
     limit: String(limit),
-    mode: resolveHubMode(mode),
   });
+  const explicitMode = resolveExplicitHubMode(mode);
+  if (explicitMode) params.set('mode', explicitMode);
   if (interval) params.set('interval', interval);
   return apiFetch(`/api/candles?${params}`);
 }
@@ -175,8 +181,9 @@ export async function getCandlesRange(symbol: string, interval: string, fromTs?:
     symbol,
     interval,
     limit: String(limit),
-    mode: resolveHubMode(mode),
   });
+  const explicitMode = resolveExplicitHubMode(mode);
+  if (explicitMode) params.set('mode', explicitMode);
   if (fromTs != null) params.set('from_ts', String(fromTs));
   if (toTs != null) params.set('to_ts', String(toTs));
   return apiFetch(`/api/candles/range?${params}`);

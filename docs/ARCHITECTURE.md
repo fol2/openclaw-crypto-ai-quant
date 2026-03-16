@@ -64,6 +64,13 @@ and the Hub backtest API normalises legacy result keys such as `total_pnl` and
 `max_drawdown_pct` into the page contract before rendering. This keeps older
 and newer replay artefacts readable through one operator-facing surface.
 
+The Hub dashboard now normalises legacy `paper` mode selections onto the
+canonical candidate family before querying monitor APIs, and its websocket
+client accepts topic labels exposed through `topic`, `channel`, `stream`, or
+`type`, with payloads carried in `data`, `payload`, `body`, or `message`.
+This keeps older and newer Hub feed envelopes readable through the same
+operator-facing dashboard surface.
+
 Hub symbol-detail transaction views use the trading DB as the primary source of
 position entries and fall back to the latest reconstructed trade journey when a
 live-authoritative position has no ledger `open_trade_id`. This keeps
