@@ -53,6 +53,11 @@ Rust-owned surfaces directly.
 3. `bt-cli` replays the same strategy/config contract offline
 4. `hub` exposes service state, backtest controls, logs, and monitoring views
 
+Hub backtest jobs now request equity-curve output from the Rust replay path,
+and the Hub backtest API normalises legacy result keys such as `total_pnl` and
+`max_drawdown_pct` into the page contract before rendering. This keeps older
+and newer replay artefacts readable through one operator-facing surface.
+
 Hub symbol-detail transaction views use the trading DB as the primary source of
 position entries and fall back to the latest reconstructed trade journey when a
 live-authoritative position has no ledger `open_trade_id`. This keeps
