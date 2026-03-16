@@ -1110,8 +1110,8 @@ pub(crate) fn apply_decision_projection_with_tx(
                 fill.fee_usd / fill.notional_usd.max(1e-12),
                 if idx + 1 == fills.len() { Some(post_state.cash_usd) } else { None },
                 snap.atr,
-                infer_leverage(post_state, intent, fill),
-                infer_margin_used(post_state, intent, fill),
+                infer_leverage(post_state, pre_state, intent, fill),
+                infer_margin_used(post_state, pre_state, intent, fill),
                 format!("{{\"source\":\"paper_run_once\",\"intent_kind\":\"{:?}\"}}", intent.kind),
             ],
         )?;
@@ -1259,10 +1259,18 @@ pub(crate) fn projected_confidence_label(
 
 pub(crate) fn infer_leverage(
     post_state: &StrategyState,
+    pre_state: &StrategyState,
     intent: &OrderIntent,
     fill: &FillEvent,
 ) -> f64 {
+    // Try post_state first (works for OPEN/ADD/REDUCE where position still exists).
     if let Some(position) = post_state.positions.get(&intent.symbol) {
+        if position.margin_usd > 0.0 {
+            return position.notional_usd / position.margin_usd;
+        }
+    }
+    // Fall back to pre_state (works for full CLOSE where position was removed).
+    if let Some(position) = pre_state.positions.get(&intent.symbol) {
         if position.margin_usd > 0.0 {
             return position.notional_usd / position.margin_usd;
         }
@@ -1272,10 +1280,14 @@ pub(crate) fn infer_leverage(
 
 pub(crate) fn infer_margin_used(
     post_state: &StrategyState,
+    pre_state: &StrategyState,
     intent: &OrderIntent,
     fill: &FillEvent,
 ) -> f64 {
     if let Some(position) = post_state.positions.get(&intent.symbol) {
+        return position.margin_usd;
+    }
+    if let Some(position) = pre_state.positions.get(&intent.symbol) {
         return position.margin_usd;
     }
     fill.notional_usd
