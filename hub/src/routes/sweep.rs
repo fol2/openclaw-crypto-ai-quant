@@ -99,10 +99,40 @@ fn parse_sweep_output_file(path: &FsPath) -> Result<Value, HubError> {
 fn parse_sweep_results(stdout_output: &str, output_file: &FsPath) -> Result<Value, HubError> {
     let trimmed = stdout_output.trim();
     if !trimmed.is_empty() {
-        serde_json::from_str::<Value>(trimmed).map_err(HubError::from)
-    } else {
-        parse_sweep_output_file(output_file)
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) => return Ok(value),
+            Err(_) if output_file.exists() => {}
+            Err(err) => return Err(HubError::from(err)),
+        }
     }
+
+    parse_sweep_output_file(output_file)
+}
+
+fn sweep_command_args(
+    config_path: &str,
+    sweep_spec_path: &str,
+    initial_balance: f64,
+    output_file: &FsPath,
+) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "--release".to_string(),
+        "--manifest-path".to_string(),
+        "backtester/Cargo.toml".to_string(),
+        "-p".to_string(),
+        "bt-cli".to_string(),
+        "--".to_string(),
+        "sweep".to_string(),
+        "--config".to_string(),
+        config_path.to_string(),
+        "--sweep-spec".to_string(),
+        sweep_spec_path.to_string(),
+        "--initial-balance".to_string(),
+        initial_balance.to_string(),
+        "--output".to_string(),
+        output_file.display().to_string(),
+    ]
 }
 
 async fn spawn_sweep(
@@ -134,23 +164,15 @@ async fn spawn_sweep(
         }
 
         let mut cmd = Command::new("cargo");
-        cmd.arg("run")
-            .arg("--release")
-            .arg("--manifest-path")
-            .arg("backtester/Cargo.toml")
-            .arg("--")
-            .arg("sweep")
-            .arg("--config")
-            .arg(&config_path)
-            .arg("--sweep-spec")
-            .arg(&sweep_spec_path)
-            .arg("--initial-balance")
-            .arg(initial_balance.to_string())
-            .arg("--output")
-            .arg(&output_file)
-            .current_dir(&aiq_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(sweep_command_args(
+            &config_path,
+            &sweep_spec_path,
+            initial_balance,
+            &output_file,
+        ))
+        .current_dir(&aiq_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
         let child = cmd.spawn();
         let mut child = match child {
@@ -407,7 +429,7 @@ async fn cancel_job(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sweep_output_file, prepare_sweep_output_path};
+    use super::{parse_sweep_output_file, prepare_sweep_output_path, sweep_command_args};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -441,5 +463,40 @@ mod tests {
 
         assert_eq!(path, dir.path().join("sweeps").join("job-123.jsonl"));
         assert!(dir.path().join("sweeps").is_dir());
+    }
+
+    #[test]
+    fn sweep_command_args_targets_bt_cli_binary() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("result.jsonl");
+        let args = sweep_command_args(
+            "config/strategy_overrides.paper1.yaml",
+            "backtester/sweeps/smoke.yaml",
+            10_000.0,
+            &output,
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-p", "bt-cli"]));
+        assert!(args.windows(2).any(|pair| pair == ["--manifest-path", "backtester/Cargo.toml"]));
+        assert!(args.iter().any(|arg| arg == "sweep"));
+        assert!(args.iter().any(|arg| arg == output.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn parse_sweep_results_falls_back_to_jsonl_when_stdout_is_not_json() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("result.jsonl");
+        std::fs::write(
+            &output,
+            json!({ "config_id": "cfg_1", "total_pnl": 12.5 }).to_string(),
+        )
+        .unwrap();
+
+        let parsed = super::parse_sweep_results("Finished `release` profile...", &output).unwrap();
+
+        let rows = parsed.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["config_id"], "cfg_1");
+        assert_eq!(rows[0]["total_pnl"], json!(12.5));
     }
 }

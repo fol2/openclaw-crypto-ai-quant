@@ -53,11 +53,12 @@ Rust-owned surfaces directly.
 3. `bt-cli` replays the same strategy/config contract offline
 4. `hub` exposes service state, backtest/sweep controls, logs, and monitoring views
 
-Hub sweep jobs now persist per-run JSONL artefacts under
-`artifacts/sweeps/<job-id>.jsonl`. The Hub sweep route reads structured stdout
-when the backtester returns it directly and otherwise falls back to that JSONL
-file so the UI can still inspect candidate-family sweeps across `paper1`,
-`paper2`, and `paper3`.
+Hub sweep jobs now target the Rust `bt-cli` binary explicitly and persist
+per-run JSONL artefacts under `artifacts/sweeps/<job-id>.jsonl`. The Hub sweep
+route reads structured stdout when the backtester returns it directly, and
+falls back to that JSONL file whenever stdout is empty or not structured JSON,
+so the UI can still inspect candidate-family sweeps across `paper1`, `paper2`,
+and `paper3`.
 
 Hub backtest jobs now request equity-curve output from the Rust replay path,
 and the Hub backtest API normalises legacy result keys such as `total_pnl` and
