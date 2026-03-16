@@ -1,6 +1,7 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
   import { getSnapshot, getCandles, getMarks, normaliseHubMode, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, requestLiveRollbackConfig } from '../lib/api';
+  import { filterTunnelPointsForPosition, tunnelFromTsForPosition } from '../lib/tunnel';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -177,8 +178,12 @@
   async function fetchTunnelForLive() {
     if (!focusSym || !marks?.position) { tunnelPoints = []; return; }
     try {
-      const res = await getTunnel(focusSym, currentMode());
-      tunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+      const currentPosition = marks.position;
+      const res = await getTunnel(focusSym, currentMode(), tunnelFromTsForPosition(currentPosition));
+      tunnelPoints = filterTunnelPointsForPosition(
+        Array.isArray(res?.tunnel) ? res.tunnel : [],
+        currentPosition,
+      );
     } catch { tunnelPoints = []; }
   }
 

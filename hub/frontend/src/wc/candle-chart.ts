@@ -34,8 +34,10 @@ export interface JourneyMark {
 export interface TunnelPoint {
   ts_ms: number;
   upper_full: number;
+  has_upper_full?: boolean;
   upper_partial?: number | null;
   lower_full: number;
+  has_lower_full?: boolean;
   entry_price: number;
   pos_type: string;     // "LONG" | "SHORT"
 }
@@ -735,8 +737,6 @@ export class CandleChart extends LitElement {
       }
 
       if (mapped.length > 0) {
-        const isLong = /long/i.test(mapped[0].tp.pos_type);
-
         // Draw filled bands between consecutive tunnel points
         for (let k = 0; k < mapped.length - 1; k++) {
           const cur = mapped[k];
@@ -748,17 +748,22 @@ export class CandleChart extends LitElement {
           const entry = cur.tp.entry_price;
           const upper = cur.tp.upper_full;  // TP price (above entry for LONG, below for SHORT)
           const lower = cur.tp.lower_full;  // SL price (below entry for LONG, above for SHORT)
+          const isLong = /long/i.test(cur.tp.pos_type);
+          const hasUpper = cur.tp.has_upper_full !== false;
+          const hasLower = cur.tp.has_lower_full !== false;
 
           // Profit zone: between entry and TP (upper_full)
           // Uses Math.max/min so it works for both LONG and SHORT
-          const pHigh = Math.max(entry, upper);
-          const pLow  = Math.min(entry, upper);
-          ctx.fillStyle = C.tnlGreen;
-          ctx.fillRect(x0, pToY(pHigh), x1 - x0, pToY(pLow) - pToY(pHigh));
+          if (hasUpper) {
+            const pHigh = Math.max(entry, upper);
+            const pLow  = Math.min(entry, upper);
+            ctx.fillStyle = C.tnlGreen;
+            ctx.fillRect(x0, pToY(pHigh), x1 - x0, pToY(pLow) - pToY(pHigh));
+          }
 
           // Risk zone: between entry and SL (lower_full)
           // Skip if locked profit (SL crossed past entry due to trailing)
-          const hasRisk = isLong ? lower < entry : lower > entry;
+          const hasRisk = hasLower && (isLong ? lower < entry : lower > entry);
           if (hasRisk) {
             const rHigh = Math.max(entry, lower);
             const rLow  = Math.min(entry, lower);
@@ -773,20 +778,26 @@ export class CandleChart extends LitElement {
         ctx.strokeStyle = C.tnlTP;
         ctx.setLineDash([4, 3]);
         ctx.beginPath();
+        let tpStarted = false;
         for (let k = 0; k < mapped.length; k++) {
+          if (mapped[k].tp.has_upper_full === false) { tpStarted = false; continue; }
           const x = xOf(mapped[k].i);
           const y = pToY(mapped[k].tp.upper_full);
-          if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          if (!tpStarted) { ctx.moveTo(x, y); tpStarted = true; }
+          else ctx.lineTo(x, y);
         }
         ctx.stroke();
 
         // SL line (lower_full)
         ctx.strokeStyle = C.tnlSL;
         ctx.beginPath();
+        let slStarted = false;
         for (let k = 0; k < mapped.length; k++) {
+          if (mapped[k].tp.has_lower_full === false) { slStarted = false; continue; }
           const x = xOf(mapped[k].i);
           const y = pToY(mapped[k].tp.lower_full);
-          if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          if (!slStarted) { ctx.moveTo(x, y); slStarted = true; }
+          else ctx.lineTo(x, y);
         }
         ctx.stroke();
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getCandles, getMarks, getCandlesRange, getJourneys, getTunnel, tradeEnabled, getSystemServices } from '../lib/api';
+  import { filterTunnelPointsForPosition, tunnelFromTsForPosition } from '../lib/tunnel';
   import { hubWs } from '../lib/ws';
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h'] as const;
@@ -357,9 +358,16 @@
     const requestSymbol = symbol;
     if (!position || !requestSymbol) { tunnelPoints = []; return; }
     try {
-      const res = await getTunnel(requestSymbol, requestMode);
+      const res = await getTunnel(
+        requestSymbol,
+        requestMode,
+        tunnelFromTsForPosition(position),
+      );
       if (!sameModalContext(requestMode, requestSymbol) || !position) return;
-      tunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+      tunnelPoints = filterTunnelPointsForPosition(
+        Array.isArray(res?.tunnel) ? res.tunnel : [],
+        position,
+      );
     } catch {
       if (sameModalContext(requestMode, requestSymbol)) {
         tunnelPoints = [];

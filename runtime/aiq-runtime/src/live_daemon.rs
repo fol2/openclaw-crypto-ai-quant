@@ -1130,29 +1130,61 @@ fn persist_exit_tunnel_rows(
             ts_ms INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             upper_full REAL NOT NULL,
+            has_upper_full INTEGER NOT NULL DEFAULT 1,
             upper_partial REAL,
             lower_full REAL NOT NULL,
+            has_lower_full INTEGER NOT NULL DEFAULT 1,
             entry_price REAL NOT NULL,
             pos_type TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms);",
     )?;
+    ensure_exit_tunnel_columns(&conn)?;
     for row in rows {
         conn.execute(
-            "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, upper_partial, lower_full, entry_price, pos_type) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, has_upper_full, upper_partial, lower_full, has_lower_full, entry_price, pos_type) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 row.ts_ms,
                 row.symbol,
                 row.upper_full,
+                row.has_upper_full,
                 row.upper_partial,
                 row.lower_full,
+                row.has_lower_full,
                 row.entry_price,
                 row.pos_type,
             ],
         )?;
     }
     Ok(())
+}
+
+fn ensure_exit_tunnel_columns(conn: &rusqlite::Connection) -> Result<()> {
+    add_exit_tunnel_column_if_missing(
+        |sql| conn.execute(sql, []),
+        "ALTER TABLE exit_tunnel ADD COLUMN has_upper_full INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_exit_tunnel_column_if_missing(
+        |sql| conn.execute(sql, []),
+        "ALTER TABLE exit_tunnel ADD COLUMN has_lower_full INTEGER NOT NULL DEFAULT 1",
+    )?;
+    Ok(())
+}
+
+fn add_exit_tunnel_column_if_missing<F>(mut exec: F, sql: &str) -> Result<()>
+where
+    F: FnMut(&str) -> rusqlite::Result<usize>,
+{
+    match exec(sql) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn interval_to_ms(interval: &str) -> Result<i64> {
@@ -1505,5 +1537,54 @@ mod tests {
 
         let cursor_ms = initial_fill_cursor_ms(&live_db, &status_path).unwrap();
         assert_eq!(cursor_ms, 1_700_000_100_000_i64);
+    }
+
+    #[test]
+    fn persist_exit_tunnel_rows_backfills_legacy_schema_flags() {
+        let dir = tempdir().unwrap();
+        let live_db = dir.path().join("live.db");
+        let conn = rusqlite::Connection::open(&live_db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE exit_tunnel (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                upper_full REAL NOT NULL,
+                upper_partial REAL,
+                lower_full REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                pos_type TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        persist_exit_tunnel_rows(
+            &live_db,
+            &[crate::paper_cycle::ExitTunnelRow {
+                ts_ms: 1_700_000_000_000,
+                symbol: "ETH".to_string(),
+                upper_full: 0.0,
+                has_upper_full: false,
+                upper_partial: None,
+                lower_full: 99.0,
+                has_lower_full: true,
+                entry_price: 100.0,
+                pos_type: "LONG".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let conn = rusqlite::Connection::open(&live_db).unwrap();
+        let persisted: (i64, i64) = conn
+            .query_row(
+                "SELECT has_upper_full, has_lower_full FROM exit_tunnel LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted, (0, 1));
     }
 }
