@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getSnapshot, getTrendCloses, getTrendCandles, getVolumes, type CandleData } from '../lib/api';
+  import { getSnapshot, getTrendCloses, getTrendCandles, getVolumes, getSystemServices, type CandleData } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
   import SymbolDetailModal from '../components/SymbolDetailModal.svelte';
@@ -206,8 +206,78 @@
     return v >= 0 ? 'green' : 'red';
   }
 
+  // ── Engine / service status ──────────────────────────────────────
+  const MODE_SERVICE_MAP: Record<string, string> = {
+    live: 'openclaw-ai-quant-live-v8',
+    paper1: 'openclaw-ai-quant-trader-v8-paper1',
+    paper2: 'openclaw-ai-quant-trader-v8-paper2',
+    paper3: 'openclaw-ai-quant-trader-v8-paper3',
+  };
+  type ModeRuntimeState = 'on' | 'off' | 'retry' | 'error' | 'unknown';
+  let modeRuntimeState: Record<string, ModeRuntimeState> = $state({
+    live: 'unknown', paper1: 'unknown', paper2: 'unknown', paper3: 'unknown',
+  });
+
+  function classifyModeRuntimeState(service: any): ModeRuntimeState {
+    const active = String(service?.active || '').toLowerCase();
+    const sub = String(service?.sub || '').toLowerCase();
+    const load = String(service?.load || '').toLowerCase();
+    if (active === 'active') return 'on';
+    if (active === 'activating' || sub === 'auto-restart') return 'retry';
+    if (active === 'failed' || sub === 'failed') return 'error';
+    if (load === 'not-found' || active === '' || active === 'unknown') return 'unknown';
+    return 'off';
+  }
+
+  function getModeRuntimeState(m: string): ModeRuntimeState {
+    return modeRuntimeState[m] ?? 'unknown';
+  }
+  function getModeRuntimeLabel(m: string): string {
+    const s = getModeRuntimeState(m);
+    if (s === 'on') return 'ON';
+    if (s === 'retry') return 'RETRY';
+    if (s === 'off') return 'OFF';
+    if (s === 'error') return 'ERR';
+    return 'NA';
+  }
+
+  type HeartbeatState = 'ok' | 'stale' | 'missing';
+  function heartbeatState(rawHealth: any): HeartbeatState {
+    if (!rawHealth?.ok) return 'missing';
+    const tsMs = Number(rawHealth?.ts_ms);
+    if (!Number.isFinite(tsMs) || tsMs <= 0) return 'missing';
+    const loopMs = Math.max(Number(rawHealth?.loop_s || 0) * 1_000, 0);
+    const freshWindowMs = Math.max(loopMs * 6, 60_000);
+    const nowMs = Number(snap?.now_ts_ms);
+    const now = Number.isFinite(nowMs) && nowMs > 0 ? nowMs : Date.now();
+    return (now - tsMs) <= freshWindowMs ? 'ok' : 'stale';
+  }
+
+  async function refreshModeRuntimeStates() {
+    try {
+      const svcs = await getSystemServices();
+      const byName = new Map((svcs || []).map((s: any) => [String(s?.name || ''), s]));
+      modeRuntimeState = {
+        live: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.live)),
+        paper1: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper1)),
+        paper2: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper2)),
+        paper3: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper3)),
+      };
+    } catch {
+      modeRuntimeState = { live: 'unknown', paper1: 'unknown', paper2: 'unknown', paper3: 'unknown' };
+    }
+  }
+
   // ── Derived metrics from snapshot ─────────────────────────────────
   let health = $derived(snap?.health || {});
+  let engineHeartbeatState: HeartbeatState = $derived(heartbeatState(health));
+  let engineHeartbeatLabel = $derived(
+    engineHeartbeatState === 'ok' ? 'ENGINE'
+    : engineHeartbeatState === 'stale' ? 'STALE'
+    : 'NO HB'
+  );
+  let selectedModeRuntimeState: ModeRuntimeState = $derived(getModeRuntimeState(mode));
+  let selectedModeRuntimeLabel = $derived(getModeRuntimeLabel(mode));
   let balances = $derived(snap?.balances || {});
   let daily = $derived(snap?.daily || {});
   let openPositions = $derived(snap?.open_positions || []);
@@ -375,16 +445,21 @@
     return 6;
   }
 
+  let svcTimer: ReturnType<typeof setInterval> | null = null;
+
   $effect(() => {
     refresh();
+    refreshModeRuntimeStates();
     pollTimer = setInterval(refresh, 10000);
     trendTimer = setInterval(refreshTrend, 30000);
     candleTimer = setInterval(refreshCandles, 30000);
+    svcTimer = setInterval(refreshModeRuntimeStates, 30000);
     hubWs.connect();
     return () => {
       if (pollTimer) clearInterval(pollTimer);
       if (trendTimer) clearInterval(trendTimer);
       if (candleTimer) clearInterval(candleTimer);
+      if (svcTimer) clearInterval(svcTimer);
     };
   });
 
@@ -442,6 +517,38 @@
       <button class="trend-toggle" class:active={showTrendBar} onclick={() => showTrendBar = !showTrendBar} title="Trend settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
       </button>
+    </div>
+  </div>
+
+  <div class="status-row">
+    <div
+      class="status-chip"
+      class:ok={engineHeartbeatState === 'ok'}
+      class:warn={engineHeartbeatState === 'stale'}
+      class:bad={engineHeartbeatState === 'missing'}
+    >
+      <span
+        class="status-dot"
+        class:alive={engineHeartbeatState === 'ok'}
+        class:warn-dot={engineHeartbeatState === 'stale'}
+      ></span>
+      {engineHeartbeatLabel}
+    </div>
+    <div
+      class="status-chip mode-runtime-chip"
+      class:ok={selectedModeRuntimeState === 'on'}
+      class:warn={selectedModeRuntimeState === 'retry' || selectedModeRuntimeState === 'off'}
+      class:bad={selectedModeRuntimeState === 'error'}
+      class:unknown={selectedModeRuntimeState === 'unknown'}
+    >
+      <span
+        class="status-dot"
+        class:alive={selectedModeRuntimeState === 'on'}
+        class:warn-dot={selectedModeRuntimeState === 'retry' || selectedModeRuntimeState === 'off'}
+        class:bad-dot={selectedModeRuntimeState === 'error'}
+        class:unknown-dot={selectedModeRuntimeState === 'unknown'}
+      ></span>
+      {selectedModeRuntimeLabel}
     </div>
   </div>
 
@@ -655,6 +762,49 @@
   }
   .page-header h1 {
     font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.02em;
+  }
+
+  /* ── Engine status row ───────────────────────────────────────── */
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: var(--sp-sm);
+  }
+
+  /* ── Engine status chips ──────────────────────────────────────── */
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.04em;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .status-chip.ok  { border-color: rgba(81,207,102,0.3); color: var(--green); }
+  .status-chip.warn { border-color: rgba(255,212,59,0.35); color: var(--yellow); }
+  .status-chip.bad  { border-color: rgba(255,107,107,0.3); color: var(--red); }
+  .mode-runtime-chip.warn { border-color: rgba(255,212,59,0.35); color: var(--yellow); }
+  .mode-runtime-chip.unknown { border-color: rgba(148,163,184,0.35); color: var(--text-dim); }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--red);
+  }
+  .status-dot.alive {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .status-dot.warn-dot { background: var(--yellow); }
+  .status-dot.bad-dot  { background: var(--red); }
+  .status-dot.unknown-dot { background: var(--text-dim); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
 
   /* ── Metrics pills ─────────────────────────────────────────────── */
