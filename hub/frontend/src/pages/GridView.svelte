@@ -197,25 +197,6 @@
     return 'var(--red)';
   }
 
-  function fmtAge(s: number): string {
-    if (s < 60) return `${Math.round(s)}s`;
-    if (s < 3600) return `${Math.round(s / 60)}m`;
-    if (s < 86_400) return `${(s / 3600).toFixed(1)}h`;
-    return `${(s / 86_400).toFixed(1)}d`;
-  }
-
-  function snapshotNowMs(): number {
-    const ts = Number(snap?.now_ts_ms);
-    return Number.isFinite(ts) && ts > 0 ? ts : Date.now();
-  }
-
-  function posAge(ts: string | null | undefined): string {
-    if (!ts) return '';
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return '';
-    return fmtAge((snapshotNowMs() - d.getTime()) / 1000);
-  }
-
   function fmtNum(v: number | null | undefined, dp = 2): string {
     if (v === null || v === undefined || !Number.isFinite(v)) return '\u2014';
     return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
@@ -615,7 +596,6 @@
               <span class="header-right">
                 <span class="meta-notional">{fmtNotional(posEquity(s))}</span>
                 <span class="lev-box" style="background:{levColor(s.position.leverage ?? 1)}">{Math.round(s.position.leverage ?? 1)}&times;</span>
-                {#if s.position.open_timestamp}<span class="pos-age">{posAge(s.position.open_timestamp)}</span>{/if}
               </span>
             {/if}
           </div>
@@ -1030,12 +1010,6 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-muted);
-    font-family: 'IBM Plex Mono', monospace;
-  }
-  .pos-age {
-    font-size: 9px;
-    font-weight: 500;
-    color: var(--text-dim);
     font-family: 'IBM Plex Mono', monospace;
   }
 
