@@ -115,7 +115,8 @@ two opt-in parity lanes:
 
 ## Persistent State
 
-- trading SQLite DBs for paper/live runtime state
+- trading SQLite DBs for paper/live runtime state (including exit tunnel rows
+  persisted each cycle by the Rust paper and live daemons)
 - candle SQLite DBs and optional partition directories
 - runtime status files used by service inspection and paper monitor freshness fallback
 - snapshot JSON files used for continuation and replay seeding
