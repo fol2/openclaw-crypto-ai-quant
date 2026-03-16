@@ -85,8 +85,14 @@ snapshot rows and discard stale modal responses whenever the selected symbol or
 mode changes, which keeps the operator view aligned with the Rust monitor
 payloads during rapid feed updates. Exit tunnel rows now carry explicit
 `has_upper_full` / `has_lower_full` presence flags so behaviour-disabled exit
-bounds do not render as fake zero-price overlays, and live tunnel queries are
-scoped to the current position start when that timestamp is available.
+bounds do not render as fake zero-price overlays. They also carry
+`open_time_ms` as the position-instance identity, and runtime now emits those
+rows from the post-transition position state with `ts_ms = step_close_ts_ms + 1`
+so the record becomes effective from the next bar instead of being re-used as a
+pre-close snapshot. Hub tunnel reads can now filter by `open_time_ms`, journey
+review filters rows back down to the selected opening, and live synthetic
+position fallbacks preserve the opening timestamp when the live snapshot can
+recover it from DB-backed position state.
 
 ## Behaviour-Modular Contract
 
@@ -120,7 +126,8 @@ two opt-in parity lanes:
 
 - trading SQLite DBs for paper/live runtime state (including exit tunnel rows
   persisted each cycle by the Rust paper and live daemons, with bound-presence
-  flags for chart rendering)
+  flags for chart rendering, `open_time_ms` for position-instance attribution,
+  and post-transition tunnel timestamps that become effective on the next bar)
 - candle SQLite DBs and optional partition directories
 - runtime status files used by service inspection and paper monitor freshness fallback
 - snapshot JSON files used for continuation and replay seeding

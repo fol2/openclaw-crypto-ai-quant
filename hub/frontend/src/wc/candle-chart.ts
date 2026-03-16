@@ -33,6 +33,7 @@ export interface JourneyMark {
 
 export interface TunnelPoint {
   ts_ms: number;
+  open_time_ms?: number;
   upper_full: number;
   has_upper_full?: boolean;
   upper_partial?: number | null;

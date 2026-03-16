@@ -1,7 +1,12 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
   import { getSnapshot, getCandles, getMarks, normaliseHubMode, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, requestLiveRollbackConfig } from '../lib/api';
-  import { filterTunnelPointsForPosition, tunnelFromTsForPosition } from '../lib/tunnel';
+  import {
+    filterTunnelPointsForJourney,
+    filterTunnelPointsForPosition,
+    tunnelFromTsForPosition,
+    tunnelOpenTimeMsForJourney,
+  } from '../lib/tunnel';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -179,7 +184,15 @@
     if (!focusSym || !marks?.position) { tunnelPoints = []; return; }
     try {
       const currentPosition = marks.position;
-      const res = await getTunnel(focusSym, currentMode(), tunnelFromTsForPosition(currentPosition));
+      const openTimeMs = tunnelFromTsForPosition(currentPosition);
+      const res = await getTunnel(
+        focusSym,
+        currentMode(),
+        openTimeMs,
+        undefined,
+        2000,
+        openTimeMs,
+      );
       tunnelPoints = filterTunnelPointsForPosition(
         Array.isArray(res?.tunnel) ? res.tunnel : [],
         currentPosition,
@@ -191,8 +204,12 @@
   async function fetchTunnelForJourney(j: any, fromTs: number, toTs: number) {
     if (!j) { journeyTunnelPoints = []; return; }
     try {
-      const res = await getTunnel(j.symbol, currentMode(), fromTs, toTs);
-      journeyTunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+      const openTimeMs = tunnelOpenTimeMsForJourney(j);
+      const res = await getTunnel(j.symbol, currentMode(), fromTs, toTs, 2000, openTimeMs);
+      journeyTunnelPoints = filterTunnelPointsForJourney(
+        Array.isArray(res?.tunnel) ? res.tunnel : [],
+        j,
+      );
     } catch { journeyTunnelPoints = []; }
   }
 

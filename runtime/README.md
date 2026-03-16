@@ -100,10 +100,20 @@ Paper and live reports also surface behaviour traces so parity lanes can verify
 which exit behaviour actually fired on a bar.
 
 The runtime-owned exit tunnel contract now persists `has_upper_full` and
-`has_lower_full` flags alongside the numeric bounds. Hub chart consumers should
-use those flags to suppress behaviour-disabled full TP/SL overlays instead of
-treating missing bounds as `0.0`, and live tunnel requests should be scoped to
-the current position start when that timestamp is available.
+`has_lower_full` flags alongside the numeric bounds, plus `open_time_ms` as the
+stable identity of the position instance that produced the row. Runtime emits
+those rows from the post-transition position state, with
+`ts_ms = step_close_ts_ms + 1`, so a tunnel point becomes effective from the
+next bar instead of reusing the pre-close state on the current bar.
+
+Hub chart consumers should use the presence flags to suppress
+behaviour-disabled full TP/SL overlays instead of treating missing bounds as
+`0.0`. They should also filter by `open_time_ms` whenever the selected journey
+or position exposes that opening, so multiple same-symbol reopenings do not
+bleed into one tunnel path. Live position fallbacks now preserve opening
+timestamps when the Hub can recover them from DB-backed position state, which
+lets live tunnel requests stay scoped to the current opening when that
+metadata exists.
 
 ## Wrappers
 

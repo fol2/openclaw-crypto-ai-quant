@@ -7,7 +7,7 @@ use bt_core::signals::behaviour::BehaviourTrace;
 use serde::Serialize;
 
 use crate::paper_config::PaperEffectiveConfig;
-use crate::paper_cycle::ExitTunnelRow;
+use crate::paper_cycle::{exit_tunnel_row_for_state, ExitTunnelRow};
 use crate::paper_run_once::{
     action_codes_for_symbol, execute_prepared_symbol_step,
     execute_prepared_symbol_step_with_allow_pyramid_override, prepare_symbol_step,
@@ -231,20 +231,6 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
             execute_prepared_symbol_step(&pre_state, &prepared, input.step_close_ts_ms);
 
         if pre_state.positions.contains_key(symbol) {
-            // Capture exit tunnel bounds for every position (including HOLDs).
-            if let (Some(bounds), Some(pos)) = (
-                &decision.diagnostics.exit_bounds,
-                pre_state.positions.get(symbol),
-            ) {
-                tunnel_rows.push(ExitTunnelRow::from_diagnostics(
-                    input.step_close_ts_ms,
-                    symbol,
-                    bounds,
-                    pos.avg_entry_price,
-                    pos.side,
-                ));
-            }
-
             if state_progression_enabled
                 && decision_consumes_entry_budget(&decision)
                 && used_entry_budget >= max_entries
@@ -264,6 +250,16 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
                 budgeted_plan.warnings.push(budget_warning);
                 errors.extend(budgeted_decision.diagnostics.errors.clone());
                 warnings.extend(budgeted_plan.warnings.clone());
+                let tunnel_state = if state_progression_enabled {
+                    &budgeted_decision.state
+                } else {
+                    &pre_state
+                };
+                if let Some(row) =
+                    exit_tunnel_row_for_state(&prepared, tunnel_state, symbol, input.step_close_ts_ms)
+                {
+                    tunnel_rows.push(row);
+                }
                 if !budgeted_decision.intents.is_empty() || !budgeted_decision.fills.is_empty() {
                     if state_progression_enabled {
                         current_state = budgeted_decision.state.clone();
@@ -290,6 +286,16 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
 
             warnings.extend(execution_plan.warnings.clone());
             errors.extend(decision.diagnostics.errors.clone());
+            let tunnel_state = if state_progression_enabled {
+                &decision.state
+            } else {
+                &pre_state
+            };
+            if let Some(row) =
+                exit_tunnel_row_for_state(&prepared, tunnel_state, symbol, input.step_close_ts_ms)
+            {
+                tunnel_rows.push(row);
+            }
             if state_progression_enabled && decision_consumes_entry_budget(&decision) {
                 used_entry_budget += 1;
             }
@@ -351,6 +357,19 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
             execute_prepared_symbol_step(&pre_state, &candidate.prepared, input.step_close_ts_ms);
         warnings.extend(execution_plan.warnings.clone());
         errors.extend(decision.diagnostics.errors.clone());
+        let tunnel_state = if state_progression_enabled {
+            &decision.state
+        } else {
+            &pre_state
+        };
+        if let Some(row) = exit_tunnel_row_for_state(
+            &candidate.prepared,
+            tunnel_state,
+            &candidate.prepared.symbol,
+            input.step_close_ts_ms,
+        ) {
+            tunnel_rows.push(row);
+        }
         if decision
             .intents
             .iter()

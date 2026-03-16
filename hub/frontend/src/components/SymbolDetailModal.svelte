@@ -1,6 +1,11 @@
 <script lang="ts">
   import { getCandles, getMarks, getCandlesRange, getJourneys, getTunnel, tradeEnabled, getSystemServices } from '../lib/api';
-  import { filterTunnelPointsForPosition, tunnelFromTsForPosition } from '../lib/tunnel';
+  import {
+    filterTunnelPointsForJourney,
+    filterTunnelPointsForPosition,
+    tunnelFromTsForPosition,
+    tunnelOpenTimeMsForJourney,
+  } from '../lib/tunnel';
   import { hubWs } from '../lib/ws';
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h'] as const;
@@ -358,10 +363,14 @@
     const requestSymbol = symbol;
     if (!position || !requestSymbol) { tunnelPoints = []; return; }
     try {
+      const openTimeMs = tunnelFromTsForPosition(position);
       const res = await getTunnel(
         requestSymbol,
         requestMode,
-        tunnelFromTsForPosition(position),
+        openTimeMs,
+        undefined,
+        2000,
+        openTimeMs,
       );
       if (!sameModalContext(requestMode, requestSymbol) || !position) return;
       tunnelPoints = filterTunnelPointsForPosition(
@@ -383,9 +392,13 @@
     const requestJourneyId = j.id;
     const requestSeq = journeyFetchSeq;
     try {
-      const res = await getTunnel(j.symbol, requestMode, fromTs, toTs);
+      const openTimeMs = tunnelOpenTimeMsForJourney(j);
+      const res = await getTunnel(j.symbol, requestMode, fromTs, toTs, 2000, openTimeMs);
       if (!sameJourneyContext(requestSeq, requestMode, requestSymbol, requestJourneyId)) return;
-      journeyTunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+      journeyTunnelPoints = filterTunnelPointsForJourney(
+        Array.isArray(res?.tunnel) ? res.tunnel : [],
+        j,
+      );
     } catch {
       if (sameJourneyContext(requestSeq, requestMode, requestSymbol, requestJourneyId)) {
         journeyTunnelPoints = [];

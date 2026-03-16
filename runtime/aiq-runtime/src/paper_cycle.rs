@@ -17,8 +17,8 @@ use crate::decision_events;
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_export;
 use crate::paper_run_once::{
-    action_codes_for_symbol, apply_decision_projection_with_tx, iso_from_ms, prepare_symbol_step,
-    PreparedSymbolStep, ProjectionInput,
+    action_codes_for_symbol, apply_decision_projection_with_tx, build_exit_params, iso_from_ms,
+    prepare_symbol_step, PreparedSymbolStep, ProjectionInput,
 };
 
 pub struct PaperCycleInput<'a> {
@@ -101,6 +101,7 @@ struct ExecutedStep {
 pub struct ExitTunnelRow {
     pub ts_ms: i64,
     pub symbol: String,
+    pub open_time_ms: i64,
     pub upper_full: f64,
     pub has_upper_full: bool,
     pub upper_partial: Option<f64>,
@@ -111,29 +112,58 @@ pub struct ExitTunnelRow {
 }
 
 impl ExitTunnelRow {
-    /// Build from kernel exit bounds plus position metadata.
-    pub fn from_diagnostics(
+    /// Build from a post-transition position plus computed exit bounds.
+    pub fn from_position_bounds(
         ts_ms: i64,
         symbol: &str,
+        position: &bt_core::decision_kernel::Position,
         bounds: &ExitBounds,
-        entry_price: f64,
-        side: PositionSide,
     ) -> Self {
         Self {
             ts_ms,
             symbol: symbol.to_string(),
+            open_time_ms: position.opened_at_ms.max(0),
             upper_full: bounds.upper_full,
             has_upper_full: bounds.has_upper_full,
             upper_partial: bounds.upper_partial,
             lower_full: bounds.lower_full,
             has_lower_full: bounds.has_lower_full,
-            entry_price,
-            pos_type: match side {
+            entry_price: position.avg_entry_price,
+            pos_type: match position.side {
                 PositionSide::Long => "LONG".to_string(),
                 PositionSide::Short => "SHORT".to_string(),
             },
         }
     }
+}
+
+pub(crate) fn effective_tunnel_ts_ms(step_close_ts_ms: i64) -> i64 {
+    step_close_ts_ms.saturating_add(1)
+}
+
+pub(crate) fn exit_tunnel_row_for_state(
+    prepared: &PreparedSymbolStep,
+    state: &StrategyState,
+    symbol: &str,
+    step_close_ts_ms: i64,
+) -> Option<ExitTunnelRow> {
+    let position = state.positions.get(symbol)?.clone();
+    let exit_params = build_exit_params(&prepared.config);
+    let mut position_for_eval = position.clone();
+    let eval = bt_core::kernel_exits::evaluate_exits_with_behaviour_plan_and_diagnostics(
+        &mut position_for_eval,
+        &prepared.snap,
+        &exit_params,
+        step_close_ts_ms,
+        &prepared.behaviour_plan.exits,
+    );
+    let bounds = eval.exit_bounds?;
+    Some(ExitTunnelRow::from_position_bounds(
+        effective_tunnel_ts_ms(step_close_ts_ms),
+        symbol,
+        &position,
+        &bounds,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -408,20 +438,6 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         );
 
         if pre_state.positions.contains_key(symbol) {
-            // Capture exit tunnel bounds for every position (including HOLDs).
-            if let (Some(bounds), Some(pos)) = (
-                &decision.diagnostics.exit_bounds,
-                pre_state.positions.get(symbol),
-            ) {
-                tunnel_rows.push(ExitTunnelRow::from_diagnostics(
-                    input.step_close_ts_ms,
-                    symbol,
-                    bounds,
-                    pos.avg_entry_price,
-                    pos.side,
-                ));
-            }
-
             if state_progression_enabled
                 && decision_consumes_entry_budget(&decision)
                 && used_entry_budget >= max_entries
@@ -441,6 +457,16 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
                 budgeted_plan.warnings.push(budget_warning);
                 errors.extend(budgeted_decision.diagnostics.errors.clone());
                 warnings.extend(budgeted_plan.warnings.clone());
+                let tunnel_state = if state_progression_enabled {
+                    &budgeted_decision.state
+                } else {
+                    &pre_state
+                };
+                if let Some(row) =
+                    exit_tunnel_row_for_state(&prepared, tunnel_state, symbol, input.step_close_ts_ms)
+                {
+                    tunnel_rows.push(row);
+                }
                 if !budgeted_decision.intents.is_empty() || !budgeted_decision.fills.is_empty() {
                     if state_progression_enabled {
                         current_state = budgeted_decision.state.clone();
@@ -472,6 +498,16 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             }
             warnings.extend(execution_plan.warnings.clone());
             errors.extend(decision.diagnostics.errors.clone());
+            let tunnel_state = if state_progression_enabled {
+                &decision.state
+            } else {
+                &pre_state
+            };
+            if let Some(row) =
+                exit_tunnel_row_for_state(&prepared, tunnel_state, symbol, input.step_close_ts_ms)
+            {
+                tunnel_rows.push(row);
+            }
             if state_progression_enabled && decision_consumes_entry_budget(&decision) {
                 used_entry_budget += 1;
             }
@@ -544,6 +580,19 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         );
         warnings.extend(execution_plan.warnings.clone());
         errors.extend(decision.diagnostics.errors.clone());
+        let tunnel_state = if state_progression_enabled {
+            &decision.state
+        } else {
+            &pre_state
+        };
+        if let Some(row) = exit_tunnel_row_for_state(
+            &candidate.prepared,
+            tunnel_state,
+            &candidate.prepared.symbol,
+            input.step_close_ts_ms,
+        ) {
+            tunnel_rows.push(row);
+        }
         if decision
             .intents
             .iter()
@@ -1025,6 +1074,7 @@ fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_ms INTEGER NOT NULL,
             symbol TEXT NOT NULL,
+            open_time_ms INTEGER NOT NULL DEFAULT 0,
             upper_full REAL NOT NULL,
             has_upper_full INTEGER NOT NULL DEFAULT 1,
             upper_partial REAL,
@@ -1049,6 +1099,10 @@ fn ensure_exit_tunnel_columns(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         |sql| tx.execute(sql, []),
         "ALTER TABLE exit_tunnel ADD COLUMN has_lower_full INTEGER NOT NULL DEFAULT 1",
     )?;
+    add_exit_tunnel_column_if_missing(
+        |sql| tx.execute(sql, []),
+        "ALTER TABLE exit_tunnel ADD COLUMN open_time_ms INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
@@ -1069,11 +1123,12 @@ where
 
 fn persist_exit_tunnel_row(tx: &rusqlite::Transaction<'_>, row: &ExitTunnelRow) -> Result<()> {
     tx.execute(
-        "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, has_upper_full, upper_partial, lower_full, has_lower_full, entry_price, pos_type) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO exit_tunnel (ts_ms, symbol, open_time_ms, upper_full, has_upper_full, upper_partial, lower_full, has_lower_full, entry_price, pos_type) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             row.ts_ms,
             row.symbol,
+            row.open_time_ms,
             row.upper_full,
             row.has_upper_full,
             row.upper_partial,
@@ -1850,8 +1905,47 @@ global:
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
+        assert!(columns.iter().any(|name| name == "open_time_ms"));
         assert!(columns.iter().any(|name| name == "has_upper_full"));
         assert!(columns.iter().any(|name| name == "has_lower_full"));
+    }
+
+    #[test]
+    fn cycle_persists_exit_tunnel_rows_with_effective_ts_and_open_time() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
+        let cfg_path = config_path();
+        run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
+            runtime_bootstrap,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: false,
+        })
+        .unwrap();
+
+        let conn = Connection::open(&paper_db).unwrap();
+        let persisted: (i64, i64) = conn
+            .query_row(
+                "SELECT ts_ms, open_time_ms FROM exit_tunnel WHERE symbol = 'ETH' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted.0, effective_tunnel_ts_ms(FIXED_STEP_CLOSE_TS_MS));
+        assert_eq!(persisted.1, 1_772_704_800_000);
     }
 
     #[test]
@@ -1863,8 +1957,9 @@ global:
         persist_exit_tunnel_row(
             &tx,
             &ExitTunnelRow {
-                ts_ms: FIXED_STEP_CLOSE_TS_MS,
+                ts_ms: effective_tunnel_ts_ms(FIXED_STEP_CLOSE_TS_MS),
                 symbol: "ETH".to_string(),
+                open_time_ms: FIXED_STEP_CLOSE_TS_MS - 1_800_000,
                 upper_full: 0.0,
                 has_upper_full: false,
                 upper_partial: None,
@@ -1877,13 +1972,13 @@ global:
         .unwrap();
         tx.commit().unwrap();
 
-        let persisted: (i64, i64) = conn
+        let persisted: (i64, i64, i64) = conn
             .query_row(
-                "SELECT has_upper_full, has_lower_full FROM exit_tunnel LIMIT 1",
+                "SELECT open_time_ms, has_upper_full, has_lower_full FROM exit_tunnel LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(persisted, (0, 1));
+        assert_eq!(persisted, (FIXED_STEP_CLOSE_TS_MS - 1_800_000, 0, 1));
     }
 }
