@@ -119,10 +119,14 @@ pub enum KernelExitResult {
 pub struct ExitBounds {
     /// Composite take-profit level (full TP).
     pub upper_full: f64,
+    /// Whether the composite take-profit boundary is active.
+    pub has_upper_full: bool,
     /// TP1 partial level (None if partial TP disabled or already taken).
     pub upper_partial: Option<f64>,
     /// Composite stop-loss / trailing / breakeven level.
     pub lower_full: f64,
+    /// Whether the composite stop-loss boundary is active.
+    pub has_lower_full: bool,
 }
 
 /// Bundled exit evaluation result with diagnostic threshold records and context.
@@ -265,19 +269,19 @@ fn build_exit_bounds(
     } else {
         None
     };
-    let lower_full = match (sl_price, trailing_sl) {
+    let (lower_full, has_lower_full) = match (sl_price, trailing_sl) {
         (Some(sl), Some(tsl)) => match pos.side {
-            PositionSide::Long => sl.max(tsl),
-            PositionSide::Short => sl.min(tsl),
+            PositionSide::Long => (sl.max(tsl), true),
+            PositionSide::Short => (sl.min(tsl), true),
         },
-        (Some(sl), None) => sl,
-        (None, Some(tsl)) => tsl,
-        (None, None) => 0.0,
+        (Some(sl), None) => (sl, true),
+        (None, Some(tsl)) => (tsl, true),
+        (None, None) => (0.0, false),
     };
-    let upper_full = if behaviour_plan.is_enabled("exit.take_profit.full") {
-        compute_full_tp_price(pos.side, entry, atr, params)
+    let (upper_full, has_upper_full) = if behaviour_plan.is_enabled("exit.take_profit.full") {
+        (compute_full_tp_price(pos.side, entry, atr, params), true)
     } else {
-        0.0
+        (0.0, false)
     };
     let upper_partial = if behaviour_plan.is_enabled("exit.take_profit.partial") {
         compute_partial_tp_price(pos, entry, atr, params)
@@ -287,8 +291,10 @@ fn build_exit_bounds(
 
     Some(ExitBounds {
         upper_full,
+        has_upper_full,
         upper_partial,
         lower_full,
+        has_lower_full,
     })
 }
 
@@ -2604,12 +2610,14 @@ mod tests {
         let bounds = eval.exit_bounds.expect("bounds should be Some");
         // TP = entry + atr * tp_atr_mult = 100 + 1.0*4.0 = 104
         assert!((bounds.upper_full - 104.0).abs() < 0.01);
+        assert!(bounds.has_upper_full);
         // SL ~98 (no trailing at this profit level), must be below entry
         assert!(
             bounds.lower_full < 100.0,
             "lower_full={}",
             bounds.lower_full
         );
+        assert!(bounds.has_lower_full);
         // Partial TP: tp_partial_atr_mult=0 → falls back to tp_atr_mult=4.0 → 104
         assert!(bounds.upper_partial.is_some());
     }
@@ -2626,12 +2634,14 @@ mod tests {
         let bounds = eval.exit_bounds.expect("bounds should be Some");
         // TP = entry - atr * tp_atr_mult = 100 - 4.0 = 96
         assert!((bounds.upper_full - 96.0).abs() < 0.01);
+        assert!(bounds.has_upper_full);
         // SL = entry + atr * sl_atr_mult = 100 + 2.0 = 102 (no trailing)
         assert!(
             bounds.lower_full > 100.0,
             "lower_full={}",
             bounds.lower_full
         );
+        assert!(bounds.has_lower_full);
     }
 
     #[test]
@@ -2649,6 +2659,7 @@ mod tests {
             "trailing should raise lower_full, got {}",
             bounds.lower_full
         );
+        assert!(bounds.has_lower_full);
     }
 
     #[test]
@@ -2679,6 +2690,8 @@ mod tests {
             .expect("bounds should be present even on SL hit");
         assert!(bounds.upper_full > 100.0);
         assert!(bounds.lower_full < 100.0);
+        assert!(bounds.has_upper_full);
+        assert!(bounds.has_lower_full);
     }
 
     #[test]
@@ -2704,5 +2717,43 @@ mod tests {
             bounds.upper_partial.is_none(),
             "partial TP disabled → upper_partial None"
         );
+    }
+
+    #[test]
+    fn test_exit_bounds_full_tp_disabled_marks_upper_absent() {
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(101.0);
+        let plan = custom_plan(&[], &["exit.take_profit.full"]);
+
+        let eval = evaluate_exits_with_behaviour_plan_and_diagnostics(
+            &mut pos,
+            &snap,
+            &default_params(),
+            1000,
+            &plan,
+        );
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        assert!(!bounds.has_upper_full);
+        assert_eq!(bounds.upper_full, 0.0);
+        assert!(bounds.has_lower_full);
+    }
+
+    #[test]
+    fn test_exit_bounds_stop_and_trailing_disabled_mark_lower_absent() {
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(101.0);
+        let plan = custom_plan(&[], &["exit.stop_loss.base", "exit.trailing.base"]);
+
+        let eval = evaluate_exits_with_behaviour_plan_and_diagnostics(
+            &mut pos,
+            &snap,
+            &default_params(),
+            1000,
+            &plan,
+        );
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        assert!(!bounds.has_lower_full);
+        assert_eq!(bounds.lower_full, 0.0);
+        assert!(bounds.has_upper_full);
     }
 }

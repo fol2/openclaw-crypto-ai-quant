@@ -99,6 +99,12 @@ cargo run -p aiq-runtime -- pipeline --mode paper --profile parity_exit_isolatio
 Paper and live reports also surface behaviour traces so parity lanes can verify
 which exit behaviour actually fired on a bar.
 
+The runtime-owned exit tunnel contract now persists `has_upper_full` and
+`has_lower_full` flags alongside the numeric bounds. Hub chart consumers should
+use those flags to suppress behaviour-disabled full TP/SL overlays instead of
+treating missing bounds as `0.0`, and live tunnel requests should be scoped to
+the current position start when that timestamp is available.
+
 ## Wrappers
 
 Use the shell wrappers when you want stable service-style entrypoints:

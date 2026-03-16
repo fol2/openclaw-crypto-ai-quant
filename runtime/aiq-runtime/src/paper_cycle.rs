@@ -102,15 +102,16 @@ pub struct ExitTunnelRow {
     pub ts_ms: i64,
     pub symbol: String,
     pub upper_full: f64,
+    pub has_upper_full: bool,
     pub upper_partial: Option<f64>,
     pub lower_full: f64,
+    pub has_lower_full: bool,
     pub entry_price: f64,
     pub pos_type: String,
 }
 
 impl ExitTunnelRow {
-    /// Build from kernel exit bounds + position metadata.  Returns None when
-    /// the position or bounds are absent.
+    /// Build from kernel exit bounds plus position metadata.
     pub fn from_diagnostics(
         ts_ms: i64,
         symbol: &str,
@@ -122,8 +123,10 @@ impl ExitTunnelRow {
             ts_ms,
             symbol: symbol.to_string(),
             upper_full: bounds.upper_full,
+            has_upper_full: bounds.has_upper_full,
             upper_partial: bounds.upper_partial,
             lower_full: bounds.lower_full,
+            has_lower_full: bounds.has_lower_full,
             entry_price,
             pos_type: match side {
                 PositionSide::Long => "LONG".to_string(),
@@ -1023,27 +1026,59 @@ fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             ts_ms INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             upper_full REAL NOT NULL,
+            has_upper_full INTEGER NOT NULL DEFAULT 1,
             upper_partial REAL,
             lower_full REAL NOT NULL,
+            has_lower_full INTEGER NOT NULL DEFAULT 1,
             entry_price REAL NOT NULL,
             pos_type TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms);
         "#,
     )?;
+    ensure_exit_tunnel_columns(tx)?;
     Ok(())
+}
+
+fn ensure_exit_tunnel_columns(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    add_exit_tunnel_column_if_missing(
+        |sql| tx.execute(sql, []),
+        "ALTER TABLE exit_tunnel ADD COLUMN has_upper_full INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_exit_tunnel_column_if_missing(
+        |sql| tx.execute(sql, []),
+        "ALTER TABLE exit_tunnel ADD COLUMN has_lower_full INTEGER NOT NULL DEFAULT 1",
+    )?;
+    Ok(())
+}
+
+fn add_exit_tunnel_column_if_missing<F>(mut exec: F, sql: &str) -> Result<()>
+where
+    F: FnMut(&str) -> rusqlite::Result<usize>,
+{
+    match exec(sql) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn persist_exit_tunnel_row(tx: &rusqlite::Transaction<'_>, row: &ExitTunnelRow) -> Result<()> {
     tx.execute(
-        "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, upper_partial, lower_full, entry_price, pos_type) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, has_upper_full, upper_partial, lower_full, has_lower_full, entry_price, pos_type) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             row.ts_ms,
             row.symbol,
             row.upper_full,
+            row.has_upper_full,
             row.upper_partial,
             row.lower_full,
+            row.has_lower_full,
             row.entry_price,
             row.pos_type,
         ],
@@ -1784,5 +1819,71 @@ global:
             .pipeline_trace
             .iter()
             .any(|trace| { trace.stage == StageId::Ranking && trace.status == "deferred" }));
+    }
+
+    #[test]
+    fn ensure_cycle_tables_adds_exit_tunnel_presence_flags_to_legacy_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE exit_tunnel (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                upper_full REAL NOT NULL,
+                upper_partial REAL,
+                lower_full REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                pos_type TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        ensure_cycle_tables(&tx).unwrap();
+        tx.commit().unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(exit_tunnel)").unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|name| name == "has_upper_full"));
+        assert!(columns.iter().any(|name| name == "has_lower_full"));
+    }
+
+    #[test]
+    fn persist_exit_tunnel_row_writes_presence_flags() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        ensure_cycle_tables(&tx).unwrap();
+
+        persist_exit_tunnel_row(
+            &tx,
+            &ExitTunnelRow {
+                ts_ms: FIXED_STEP_CLOSE_TS_MS,
+                symbol: "ETH".to_string(),
+                upper_full: 0.0,
+                has_upper_full: false,
+                upper_partial: None,
+                lower_full: 99.0,
+                has_lower_full: true,
+                entry_price: 100.0,
+                pos_type: "LONG".to_string(),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let persisted: (i64, i64) = conn
+            .query_row(
+                "SELECT has_upper_full, has_lower_full FROM exit_tunnel LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted, (0, 1));
     }
 }

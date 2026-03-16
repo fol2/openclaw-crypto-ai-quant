@@ -83,7 +83,10 @@ selections onto the canonical candidate-family modes before they query
 snapshots, journeys, and tunnel data. They also merge live websocket mids over
 snapshot rows and discard stale modal responses whenever the selected symbol or
 mode changes, which keeps the operator view aligned with the Rust monitor
-payloads during rapid feed updates.
+payloads during rapid feed updates. Exit tunnel rows now carry explicit
+`has_upper_full` / `has_lower_full` presence flags so behaviour-disabled exit
+bounds do not render as fake zero-price overlays, and live tunnel queries are
+scoped to the current position start when that timestamp is available.
 
 ## Behaviour-Modular Contract
 
@@ -116,7 +119,8 @@ two opt-in parity lanes:
 ## Persistent State
 
 - trading SQLite DBs for paper/live runtime state (including exit tunnel rows
-  persisted each cycle by the Rust paper and live daemons)
+  persisted each cycle by the Rust paper and live daemons, with bound-presence
+  flags for chart rendering)
 - candle SQLite DBs and optional partition directories
 - runtime status files used by service inspection and paper monitor freshness fallback
 - snapshot JSON files used for continuation and replay seeding
