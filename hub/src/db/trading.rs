@@ -19,6 +19,20 @@ type TradeJourneyRow = (
     String,
 );
 
+type OpenPositionRebuildRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    f64,
+    f64,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +137,7 @@ pub struct RuntimeExchangePositionSnapshot {
     pub symbol: String,
     #[serde(rename = "type")]
     pub pos_type: String,
+    pub open_timestamp: Option<String>,
     pub size: f64,
     pub entry_price: f64,
     pub leverage: f64,
@@ -183,132 +198,134 @@ pub struct JourneyLeg {
 
 /// Compute all open positions from the trades table.
 pub fn compute_open_positions(conn: &Connection) -> Result<Vec<OpenPosition>, HubError> {
-    // Find the latest OPEN trade per symbol that is not closed.
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.timestamp, t.symbol, t.type, t.price, t.size, t.confidence,
-                t.entry_atr, t.leverage, t.margin_used
-         FROM trades t
-         JOIN (
-             SELECT symbol, MAX(id) AS open_id
-             FROM trades WHERE action = 'OPEN' GROUP BY symbol
-         ) lo ON lo.symbol = t.symbol AND lo.open_id = t.id
-         LEFT JOIN (
-             SELECT symbol, MAX(id) AS close_id
-             FROM trades WHERE action = 'CLOSE' GROUP BY symbol
-         ) lc ON lc.symbol = t.symbol
-         WHERE lc.close_id IS NULL OR t.id > lc.close_id",
+        "SELECT id, timestamp, symbol, type, action, price, size, confidence, entry_atr, leverage, margin_used
+         FROM trades
+         WHERE action IN ('OPEN', 'ADD', 'REDUCE', 'CLOSE')
+         ORDER BY id ASC",
     )?;
 
-    let rows: Vec<_> = stmt
+    let mut rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, i64>(0)?,            // id
-                row.get::<_, Option<String>>(1)?, // timestamp
-                row.get::<_, String>(2)?,         // symbol
-                row.get::<_, String>(3)?,         // type
-                row.get::<_, f64>(4)?,            // price
-                row.get::<_, f64>(5)?,            // size
-                row.get::<_, Option<String>>(6)?, // confidence
-                row.get::<_, Option<f64>>(7)?,    // entry_atr
-                row.get::<_, Option<f64>>(8)?,    // leverage
-                row.get::<_, Option<f64>>(9)?,    // margin_used
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                row.get::<_, f64>(5).unwrap_or(0.0),
+                row.get::<_, f64>(6).unwrap_or(0.0),
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<f64>>(8)?,
+                row.get::<_, Option<f64>>(9)?,
+                row.get::<_, Option<f64>>(10)?,
             ))
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<OpenPositionRebuildRow>, _>>()?;
+    rows.sort_by(|left, right| trade_row_time_cmp(&left.1, left.0, &right.1, right.0));
 
-    let mut positions = Vec::new();
+    let mut in_progress = std::collections::HashMap::<String, OpenPosition>::new();
 
     for (
-        open_id,
+        id,
         ts,
         symbol,
         pos_type,
-        mut avg_entry,
-        mut net_size,
+        action,
+        price,
+        size,
         confidence,
-        entry_atr_opt,
-        leverage_opt,
-        margin_used_opt,
+        entry_atr,
+        leverage,
+        margin_used,
     ) in rows
     {
-        let pos_type_upper = pos_type.to_uppercase();
-        if pos_type_upper != "LONG" && pos_type_upper != "SHORT" {
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if symbol.is_empty() {
             continue;
         }
-        if avg_entry <= 0.0 || net_size <= 0.0 {
-            continue;
-        }
-
-        let mut entry_atr = entry_atr_opt.unwrap_or(0.0);
-
-        // Replay ADD/REDUCE to rebuild position
-        let mut add_reduce_stmt = conn.prepare(
-            "SELECT action, price, size, entry_atr FROM trades
-             WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE')
-             ORDER BY id ASC",
-        )?;
-
-        let adjustments: Vec<_> = add_reduce_stmt
-            .query_map(params![symbol, open_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, Option<f64>>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut closed = false;
-        for (action, px, sz, fill_atr) in &adjustments {
-            if *px <= 0.0 || *sz <= 0.0 {
-                continue;
+        let action = action.trim().to_ascii_uppercase();
+        match action.as_str() {
+            "OPEN" => {
+                if price <= 0.0 || size <= 0.0 {
+                    continue;
+                }
+                let pos_type = pos_type.trim().to_ascii_uppercase();
+                if pos_type != "LONG" && pos_type != "SHORT" {
+                    continue;
+                }
+                let leverage = leverage.unwrap_or(1.0).max(0.01);
+                in_progress.insert(
+                    symbol.clone(),
+                    OpenPosition {
+                        symbol,
+                        pos_type,
+                        open_trade_id: id,
+                        open_timestamp: (!ts.trim().is_empty()).then_some(ts),
+                        entry_price: price,
+                        size,
+                        confidence,
+                        entry_atr: entry_atr.unwrap_or(0.0),
+                        leverage,
+                        margin_used: margin_used.unwrap_or_else(|| size * price / leverage),
+                    },
+                );
             }
-            if action == "ADD" {
-                let new_total = net_size + sz;
+            "ADD" => {
+                let Some(position) = in_progress.get_mut(&symbol) else {
+                    continue;
+                };
+                if price <= 0.0 || size <= 0.0 {
+                    continue;
+                }
+                let current_size = position.size;
+                let new_total = current_size + size;
                 if new_total > 0.0 {
-                    avg_entry = (avg_entry * net_size + px * sz) / new_total;
-                    if let Some(fa) = fill_atr {
-                        if *fa > 0.0 {
-                            entry_atr = if entry_atr > 0.0 {
-                                (entry_atr * net_size + fa * sz) / new_total
-                            } else {
-                                *fa
-                            };
-                        }
+                    position.entry_price =
+                        (position.entry_price * current_size + price * size) / new_total;
+                    if let Some(fill_atr) = entry_atr.filter(|value| *value > 0.0) {
+                        position.entry_atr = if position.entry_atr > 0.0 {
+                            (position.entry_atr * current_size + fill_atr * size) / new_total
+                        } else {
+                            fill_atr
+                        };
                     }
-                    net_size = new_total;
+                    position.size = new_total;
                 }
-            } else if action == "REDUCE" {
-                net_size -= sz;
-                if net_size <= 0.0 {
-                    closed = true;
-                    break;
+                if let Some(leverage) = leverage.filter(|value| *value > 0.0) {
+                    position.leverage = leverage.max(0.01);
                 }
+                position.margin_used = margin_used
+                    .unwrap_or_else(|| position.size * position.entry_price / position.leverage);
             }
+            "REDUCE" => {
+                let Some(position) = in_progress.get_mut(&symbol) else {
+                    continue;
+                };
+                if size <= 0.0 {
+                    continue;
+                }
+                position.size = (position.size - size).max(0.0);
+                if position.size <= 0.0 {
+                    in_progress.remove(&symbol);
+                    continue;
+                }
+                if let Some(leverage) = leverage.filter(|value| *value > 0.0) {
+                    position.leverage = leverage.max(0.01);
+                }
+                position.margin_used = margin_used.unwrap_or_else(|| {
+                    position.size * position.entry_price / position.leverage.max(0.01)
+                });
+            }
+            "CLOSE" => {
+                in_progress.remove(&symbol);
+            }
+            _ => {}
         }
-
-        if closed || net_size <= 0.0 {
-            continue;
-        }
-
-        let leverage = leverage_opt.unwrap_or(1.0).max(0.01);
-        let margin_used = margin_used_opt.unwrap_or_else(|| net_size.abs() * avg_entry / leverage);
-
-        positions.push(OpenPosition {
-            symbol: symbol.to_uppercase(),
-            pos_type: pos_type_upper,
-            open_trade_id: open_id,
-            open_timestamp: ts,
-            entry_price: avg_entry,
-            size: net_size,
-            confidence,
-            entry_atr,
-            leverage,
-            margin_used,
-        });
     }
 
+    let mut positions = in_progress.into_values().collect::<Vec<_>>();
+    positions.sort_by(|left, right| left.symbol.cmp(&right.symbol));
     Ok(positions)
 }
 
@@ -583,18 +600,32 @@ pub fn runtime_exchange_positions(
     if !has_table(conn, "runtime_exchange_positions") {
         return Ok(Vec::new());
     }
-    let mut stmt = conn.prepare(
+    let has_position_state = has_table(conn, "position_state");
+    let has_open_time_ms =
+        has_position_state && table_has_column(conn, "position_state", "open_time_ms")?;
+    let sql = if has_open_time_ms {
         "
-        SELECT symbol, pos_type, size, entry_price, leverage, margin_used, ts_ms, updated_at, source
+        SELECT rep.symbol, rep.pos_type, rep.size, rep.entry_price, rep.leverage, rep.margin_used,
+               rep.ts_ms, rep.updated_at, rep.source, ps.open_time_ms
+        FROM runtime_exchange_positions rep
+        LEFT JOIN position_state ps ON ps.symbol = rep.symbol
+        ORDER BY rep.symbol ASC
+        "
+    } else {
+        "
+        SELECT symbol, pos_type, size, entry_price, leverage, margin_used, ts_ms, updated_at, source, NULL
         FROM runtime_exchange_positions
         ORDER BY symbol ASC
-        ",
-    )?;
+        "
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt
         .query_map([], |row| {
+            let open_time_ms = row.get::<_, Option<i64>>(9)?.filter(|value| *value > 0);
             Ok(RuntimeExchangePositionSnapshot {
                 symbol: row.get::<_, String>(0)?.to_uppercase(),
                 pos_type: row.get::<_, String>(1)?.to_uppercase(),
+                open_timestamp: open_time_ms.map(iso_from_ms),
                 size: row.get(2)?,
                 entry_price: row.get(3)?,
                 leverage: row.get(4)?,
@@ -613,6 +644,24 @@ pub fn has_table(conn: &Connection, table: &str) -> bool {
     conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
         .and_then(|mut s| s.query_row(params![table], |_| Ok(())))
         .is_ok()
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, HubError> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row?.eq_ignore_ascii_case(column) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn iso_from_ms(ts_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ts_ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| ts_ms.to_string())
 }
 
 /// List recent symbols from candles + trades.
@@ -1482,6 +1531,87 @@ mod tests {
     }
 
     #[test]
+    fn compute_open_positions_uses_event_time_when_trade_ids_arrive_out_of_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+
+        let rows = [
+            (
+                "2026-03-10T18:00:00Z",
+                "HYPE",
+                "SHORT",
+                "OPEN",
+                33.0,
+                3.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-11T12:00:00Z",
+                "HYPE",
+                "SHORT",
+                "ADD",
+                35.0,
+                2.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-10T08:00:00Z",
+                "HYPE",
+                "SHORT",
+                "OPEN",
+                34.0,
+                1.0,
+                "manual_trade",
+                "MANUAL",
+                0.0,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+            (
+                "2026-03-10T15:00:00Z",
+                "HYPE",
+                "SHORT",
+                "CLOSE",
+                33.5,
+                1.0,
+                "manual_trade",
+                "MANUAL",
+                0.5,
+                0.02,
+                r#"{"source":"manual_trade"}"#,
+            ),
+        ];
+
+        for row in rows {
+            conn.execute(
+                "INSERT INTO trades (timestamp, symbol, type, action, price, size, reason, confidence, pnl, fee_usd, meta_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+                    row.10
+                ],
+            )
+            .unwrap();
+        }
+
+        let positions = compute_open_positions(&conn).unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].symbol, "HYPE");
+        assert_eq!(positions[0].open_trade_id, 1);
+        assert_eq!(positions[0].open_timestamp.as_deref(), Some("2026-03-10T18:00:00Z"));
+        assert!((positions[0].entry_price - 33.8).abs() < 1e-9);
+        assert!((positions[0].size - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn latest_runtime_account_snapshot_reads_latest_snapshot_row() {
         let conn = Connection::open_in_memory().unwrap();
         setup_trades_table(&conn);
@@ -1534,6 +1664,60 @@ mod tests {
         assert_eq!(positions[0].symbol, "DOGE");
         assert_eq!(positions[0].pos_type, "LONG");
         assert_eq!(positions[0].size, 1692.0);
+        assert!(positions[0].open_timestamp.is_none());
+    }
+
+    #[test]
+    fn runtime_exchange_positions_reads_open_timestamp_from_position_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_trades_table(&conn);
+        setup_runtime_sync_tables(&conn);
+        conn.execute_batch(
+            "
+            CREATE TABLE position_state (
+                symbol TEXT PRIMARY KEY,
+                open_trade_id INTEGER,
+                open_time_ms INTEGER,
+                trailing_sl REAL,
+                last_funding_time INTEGER,
+                adds_count INTEGER,
+                tp1_taken INTEGER,
+                last_add_time INTEGER,
+                entry_adx_threshold REAL,
+                updated_at TEXT
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_exchange_positions (symbol, pos_type, size, entry_price, leverage, margin_used, ts_ms, updated_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "DOGE",
+                "LONG",
+                1692.0_f64,
+                0.094602_f64,
+                4.0_f64,
+                40.026798_f64,
+                1_773_500_000_000_i64,
+                "2026-03-14T19:00:00+00:00",
+                "live_fill_sync",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO position_state (symbol, open_trade_id, open_time_ms, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at)
+             VALUES ('DOGE', NULL, 1773490000000, NULL, 1773490000000, 0, 0, 0, 0.0, '2026-03-14T19:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        let positions = runtime_exchange_positions(&conn).unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(
+            positions[0].open_timestamp.as_deref(),
+            Some("2026-03-14T12:06:40+00:00")
+        );
     }
 }
 

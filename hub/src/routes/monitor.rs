@@ -323,6 +323,8 @@ pub struct TunnelQuery {
     #[serde(default = "default_mode")]
     mode: String,
     symbol: String,
+    #[serde(default)]
+    open_time_ms: Option<i64>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
     #[serde(default = "default_tunnel_limit")]
@@ -361,16 +363,34 @@ pub fn routes() -> Router<Arc<AppState>> {
 fn live_position_overrides(
     mode: &str,
     hl_snap: Option<&crate::hyperliquid::HlAccountSnapshot>,
+    db_positions: &[trading::RuntimeExchangePositionSnapshot],
 ) -> HashMap<String, HlPositionSnapshot> {
     if mode != "live" {
         return HashMap::new();
     }
 
+    let db_position_map = db_positions
+        .iter()
+        .map(|position| {
+            (
+                (position.symbol.clone(), position.pos_type.clone()),
+                position.open_timestamp.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
     hl_snap
         .map(|snap| {
             snap.positions
                 .iter()
-                .map(|position| (position.symbol.clone(), position.clone()))
+                .map(|position| {
+                    let mut position = position.clone();
+                    position.open_timestamp = db_position_map
+                        .get(&(position.symbol.clone(), position.pos_type.clone()))
+                        .cloned()
+                        .flatten();
+                    (position.symbol.clone(), position)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -392,6 +412,7 @@ fn live_position_overrides_from_db(
                 HlPositionSnapshot {
                     symbol: position.symbol.clone(),
                     pos_type: position.pos_type.clone(),
+                    open_timestamp: position.open_timestamp.clone(),
                     size: position.size,
                     entry_price: position.entry_price,
                     leverage: position.leverage,
@@ -422,7 +443,7 @@ fn synthetic_open_position_from_live_snapshot(
         symbol: live_position.symbol.clone(),
         pos_type: live_position.pos_type.clone(),
         open_trade_id: 0,
-        open_timestamp: None,
+        open_timestamp: live_position.open_timestamp.clone(),
         entry_price: live_position.entry_price,
         size: live_position.size,
         confidence: None,
@@ -500,6 +521,9 @@ fn merge_positions_with_live_snapshot(
             merged_position.size = live_position.size;
             merged_position.leverage = live_position.leverage.max(0.01);
             merged_position.margin_used = live_position.margin_used.max(0.0);
+            if merged_position.open_timestamp.is_none() {
+                merged_position.open_timestamp = live_position.open_timestamp.clone();
+            }
             merged.push(merged_position);
         } else {
             merged.push(synthetic_open_position_from_live_snapshot(live_position));
@@ -659,7 +683,12 @@ async fn api_snapshot(
         .map(|snapshot| ts.saturating_sub(snapshot.ts_ms) <= DB_SYNC_STALE_MS)
         .unwrap_or(false);
     let live_positions = if let Some(ref hl) = hl_snap {
-        live_position_overrides(mode.as_str(), Some(hl))
+        let timestamp_source = if db_live_snapshot_fresh {
+            db_live_positions.as_slice()
+        } else {
+            &[]
+        };
+        live_position_overrides(mode.as_str(), Some(hl), timestamp_source)
     } else if db_live_snapshot_fresh {
         live_position_overrides_from_db(mode.as_str(), &db_live_positions)
     } else {
@@ -1003,20 +1032,28 @@ async fn api_marks(
         .map(|snapshot| now_ms().saturating_sub(snapshot.ts_ms) <= DB_SYNC_STALE_MS)
         .unwrap_or(false);
     let live_positions = if let Some(ref hl) = hl_snap {
-        live_position_overrides(mode.as_str(), Some(hl))
+        let timestamp_source = if db_live_snapshot_fresh {
+            db_live_positions.as_slice()
+        } else {
+            &[]
+        };
+        live_position_overrides(mode.as_str(), Some(hl), timestamp_source)
     } else if db_live_snapshot_fresh {
         live_position_overrides_from_db(mode.as_str(), &db_live_positions)
     } else {
         HashMap::new()
     };
     let live_snapshot_authoritative = hl_snap.is_some() || db_live_snapshot_fresh;
-    let pos = if live_snapshot_authoritative {
+    let mut pos = if live_snapshot_authoritative {
         match (ledger_pos, live_positions.get(&sym)) {
             (Some(mut ledger), Some(live)) if live.pos_type.eq_ignore_ascii_case(&ledger.pos_type) => {
                 ledger.entry_price = live.entry_price;
                 ledger.size = live.size;
                 ledger.leverage = live.leverage.max(0.01);
                 ledger.margin_used = live.margin_used.max(0.0);
+                if ledger.open_timestamp.is_none() {
+                    ledger.open_timestamp = live.open_timestamp.clone();
+                }
                 Some(ledger)
             }
             (_, Some(live)) => Some(synthetic_open_position_from_live_snapshot(live)),
@@ -1033,6 +1070,11 @@ async fn api_marks(
         let fallback_journey =
             detail_fallback_journey(trading::trade_journeys(&conn, u32::MAX, 0, Some(&sym))?, pos.as_ref());
         if let Some(journey) = fallback_journey {
+            if let Some(position) = pos.as_mut() {
+                if position.open_timestamp.is_none() && journey.is_open {
+                    position.open_timestamp = Some(journey.open_ts.clone());
+                }
+            }
             entries = trading::trade_entries_from_journey(journey);
         }
     }
@@ -1419,7 +1461,14 @@ async fn api_tunnel(
     let conn = pool.get()?;
     let symbol = q.symbol.trim().to_uppercase();
     let limit = q.limit.min(10_000);
-    let points = tunnel::fetch_tunnel(&conn, &symbol, q.from_ts, q.to_ts, limit)?;
+    let points = tunnel::fetch_tunnel(
+        &conn,
+        &symbol,
+        q.from_ts,
+        q.to_ts,
+        q.open_time_ms,
+        limit,
+    )?;
     Ok(Json(json!({ "tunnel": points })))
 }
 
@@ -1589,6 +1638,7 @@ mod tests {
             HlPositionSnapshot {
                 symbol: "DOGE".to_string(),
                 pos_type: "LONG".to_string(),
+                open_timestamp: Some("2026-03-11T17:31:59.945000+00:00".to_string()),
                 size: 1692.0,
                 entry_price: 0.094602,
                 leverage: 4.0,

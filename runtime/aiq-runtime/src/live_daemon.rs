@@ -563,6 +563,7 @@ fn submit_plan(
                 SubmittedOrderProjection {
                     symbol: &plan.symbol,
                     action: submitted_order_action(order_action),
+                    pos_type: position_type_for_plan(plan),
                     ts_ms: step_close_ts_ms,
                     entry_adx_threshold: plan.entry_adx_threshold,
                 },
@@ -992,6 +993,16 @@ fn submitted_order_action(action: OrderAction) -> SubmittedOrderAction {
     }
 }
 
+fn position_type_for_plan(plan: &LiveActionPlan) -> Option<&'static str> {
+    match (plan.action.as_str(), plan.side.as_str()) {
+        ("OPEN" | "ADD", "BUY") => Some("LONG"),
+        ("OPEN" | "ADD", "SELL") => Some("SHORT"),
+        ("CLOSE" | "REDUCE", "SELL") => Some("LONG"),
+        ("CLOSE" | "REDUCE", "BUY") => Some("SHORT"),
+        _ => None,
+    }
+}
+
 fn order_side_from_fill(side: &str) -> Option<OrderSide> {
     match side {
         "BUY" => Some(OrderSide::Buy),
@@ -1129,6 +1140,7 @@ fn persist_exit_tunnel_rows(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_ms INTEGER NOT NULL,
             symbol TEXT NOT NULL,
+            open_time_ms INTEGER NOT NULL DEFAULT 0,
             upper_full REAL NOT NULL,
             has_upper_full INTEGER NOT NULL DEFAULT 1,
             upper_partial REAL,
@@ -1142,11 +1154,12 @@ fn persist_exit_tunnel_rows(
     ensure_exit_tunnel_columns(&conn)?;
     for row in rows {
         conn.execute(
-            "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, has_upper_full, upper_partial, lower_full, has_lower_full, entry_price, pos_type) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO exit_tunnel (ts_ms, symbol, open_time_ms, upper_full, has_upper_full, upper_partial, lower_full, has_lower_full, entry_price, pos_type) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 row.ts_ms,
                 row.symbol,
+                row.open_time_ms,
                 row.upper_full,
                 row.has_upper_full,
                 row.upper_partial,
@@ -1168,6 +1181,10 @@ fn ensure_exit_tunnel_columns(conn: &rusqlite::Connection) -> Result<()> {
     add_exit_tunnel_column_if_missing(
         |sql| conn.execute(sql, []),
         "ALTER TABLE exit_tunnel ADD COLUMN has_lower_full INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_exit_tunnel_column_if_missing(
+        |sql| conn.execute(sql, []),
+        "ALTER TABLE exit_tunnel ADD COLUMN open_time_ms INTEGER NOT NULL DEFAULT 0",
     )?;
     Ok(())
 }
@@ -1566,6 +1583,7 @@ mod tests {
             &[crate::paper_cycle::ExitTunnelRow {
                 ts_ms: 1_700_000_000_000,
                 symbol: "ETH".to_string(),
+                open_time_ms: 1_699_999_100_000,
                 upper_full: 0.0,
                 has_upper_full: false,
                 upper_partial: None,
@@ -1578,13 +1596,43 @@ mod tests {
         .unwrap();
 
         let conn = rusqlite::Connection::open(&live_db).unwrap();
-        let persisted: (i64, i64) = conn
+        let persisted: (i64, i64, i64) = conn
             .query_row(
-                "SELECT has_upper_full, has_lower_full FROM exit_tunnel LIMIT 1",
+                "SELECT open_time_ms, has_upper_full, has_lower_full FROM exit_tunnel LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(persisted, (0, 1));
+        assert_eq!(persisted, (1_699_999_100_000, 0, 1));
+    }
+
+    #[test]
+    fn position_type_for_plan_maps_order_side_back_to_position_side() {
+        let plan = LiveActionPlan {
+            symbol: "ETH".to_string(),
+            phase: "entry".to_string(),
+            action: "OPEN".to_string(),
+            side: "BUY".to_string(),
+            quantity: 1.0,
+            reference_price: 2000.0,
+            notional_usd: 2000.0,
+            leverage: 3.0,
+            confidence: "high".to_string(),
+            reason: "Signal Trigger".to_string(),
+            reason_code: "entry_signal".to_string(),
+            entry_adx_threshold: Some(20.0),
+            score: None,
+            behaviour_trace: Vec::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        assert_eq!(position_type_for_plan(&plan), Some("LONG"));
+
+        let reduce_short = LiveActionPlan {
+            action: "REDUCE".to_string(),
+            side: "BUY".to_string(),
+            ..plan
+        };
+        assert_eq!(position_type_for_plan(&reduce_short), Some("SHORT"));
     }
 }

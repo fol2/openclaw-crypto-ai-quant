@@ -16,6 +16,7 @@ pub struct HlAccountSnapshot {
 pub struct HlPositionSnapshot {
     pub symbol: String,
     pub pos_type: String,
+    pub open_timestamp: Option<String>,
     pub size: f64,
     pub entry_price: f64,
     pub leverage: f64,
@@ -171,6 +172,7 @@ fn parse_account_snapshot(data: ClearinghouseResponse) -> Option<HlAccountSnapsh
                 } else {
                     "SHORT".to_string()
                 },
+                open_timestamp: None,
                 size: signed_size.abs(),
                 entry_price,
                 leverage: leverage.max(1.0),

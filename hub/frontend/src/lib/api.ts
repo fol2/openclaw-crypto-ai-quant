@@ -200,7 +200,14 @@ export async function getDecisions(mode?: string, params: Record<string, string>
 
 // ── Tunnel API ──────────────────────────────────────────
 
-export async function getTunnel(symbol: string, mode?: string, fromTs?: number, toTs?: number, limit = 2000) {
+export async function getTunnel(
+  symbol: string,
+  mode?: string,
+  fromTs?: number,
+  toTs?: number,
+  limit = 2000,
+  openTimeMs?: number,
+) {
   const params = new URLSearchParams({
     symbol,
     mode: resolveHubMode(mode),
@@ -208,6 +215,7 @@ export async function getTunnel(symbol: string, mode?: string, fromTs?: number, 
   });
   if (fromTs != null) params.set('from_ts', String(fromTs));
   if (toTs != null) params.set('to_ts', String(toTs));
+  if (openTimeMs != null) params.set('open_time_ms', String(openTimeMs));
   return apiFetch(`/api/tunnel?${params}`);
 }
 
