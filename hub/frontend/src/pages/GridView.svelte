@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { getSnapshot, getMids, getTrendCloses, getTrendCandles, getVolumes, type CandleData } from '../lib/api';
+  import { getSnapshot, getTrendCloses, getTrendCandles, getVolumes, type CandleData } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
   import SymbolDetailModal from '../components/SymbolDetailModal.svelte';
+
+  const DEFAULT_GRID_MODE = CANDIDATE_FAMILY_ORDER[0];
 
   let mode = $state('_pending_');
   let gridSize = $state(3);
@@ -18,42 +20,130 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let trendTimer: ReturnType<typeof setInterval> | null = null;
   let candleTimer: ReturnType<typeof setInterval> | null = null;
-  let midsSeeded = false;
+  let refreshSeq = 0;
+  let trendSeq = 0;
+  let candleSeq = 0;
+  let volumeSeq = 0;
+
+  function finitePositive(v: unknown): number | null {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function quoteMid(quote: any): number | null {
+    const explicit = finitePositive(quote?.mid);
+    if (explicit != null) return explicit;
+    const bid = finitePositive(quote?.bid);
+    const ask = finitePositive(quote?.ask);
+    if (bid == null || ask == null) return null;
+    return (bid + ask) / 2;
+  }
+
+  function normaliseGridMode(value: string | null | undefined): string {
+    const raw = String(value || '').trim().toLowerCase();
+    if (raw === LIVE_MODE) return LIVE_MODE;
+    if (raw === 'paper' || raw === '') return DEFAULT_GRID_MODE;
+    return CANDIDATE_FAMILY_ORDER.includes(raw as (typeof CANDIDATE_FAMILY_ORDER)[number])
+      ? raw
+      : DEFAULT_GRID_MODE;
+  }
+
+  function collectSnapshotMids(rows: any[]): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const row of rows) {
+      const symbol = String(row?.symbol || '').trim().toUpperCase();
+      const mid = finitePositive(row?.mid);
+      if (!symbol || mid == null) continue;
+      out[symbol] = mid;
+    }
+    return out;
+  }
+
+  function mergeLiveMids(rows: any[]): Record<string, number> {
+    const snapshotMids = collectSnapshotMids(rows);
+    const nextMids: Record<string, number> = {};
+    for (const row of rows) {
+      const symbol = String(row?.symbol || '').trim().toUpperCase();
+      if (!symbol) continue;
+      const liveMid = finitePositive(mids[symbol]);
+      if (liveMid != null) {
+        nextMids[symbol] = liveMid;
+        continue;
+      }
+      const snapshotMid = snapshotMids[symbol];
+      if (snapshotMid != null) nextMids[symbol] = snapshotMid;
+    }
+    return nextMids;
+  }
+
+  function applyLiveMids(rows: any[], liveMids: Record<string, number>): any[] {
+    return rows.map((row) => {
+      const symbol = String(row?.symbol || '').trim().toUpperCase();
+      const liveMid = liveMids[symbol];
+      return liveMid != null ? { ...row, mid: liveMid } : row;
+    });
+  }
+
+  function signalLabel(symbolRow: any): string {
+    return String(symbolRow?.last_signal?.signal ?? symbolRow?.signal ?? '')
+      .trim()
+      .toUpperCase();
+  }
 
   async function refreshTrend() {
+    const seq = ++trendSeq;
+    const interval = trendInterval;
+    const bars = trendBars;
     try {
-      const res = await getTrendCloses(trendInterval, trendBars);
+      const res = await getTrendCloses(interval, bars);
+      if (seq !== trendSeq || trendInterval !== interval || trendBars !== bars) return;
       trendCloses = res.closes || {};
     } catch {}
   }
 
   async function refreshCandles() {
+    const seq = ++candleSeq;
+    const interval = candleInterval;
+    const bars = candleBars;
     try {
-      const res = await getTrendCandles(candleInterval, candleBars);
+      const res = await getTrendCandles(interval, bars);
+      if (seq !== candleSeq || candleInterval !== interval || candleBars !== bars) return;
       trendCandles = res.candles || {};
     } catch {}
   }
 
   async function refreshVolumes() {
+    const seq = ++volumeSeq;
     try {
       const res = await getVolumes();
+      if (seq !== volumeSeq) return;
       volumes = res.volumes || {};
     } catch {}
   }
 
   async function refresh() {
+    const seq = ++refreshSeq;
+    const requestedMode = normaliseGridMode(mode);
+    if (requestedMode !== mode) {
+      mode = requestedMode;
+    }
     try {
-      const rawSnap = await getSnapshot(mode);
-      snap = rawSnap;
-      symbols = rawSnap.symbols || [];
-      if (!midsSeeded) {
-        const m = await getMids();
-        mids = m.mids || {};
-        midsSeeded = true;
+      const rawSnap = await getSnapshot(requestedMode);
+      if (seq !== refreshSeq || mode !== requestedMode) return;
+      const rawSymbols = Array.isArray(rawSnap?.symbols) ? rawSnap.symbols : [];
+      const nextMids = mergeLiveMids(rawSymbols);
+      const nextSymbols = applyLiveMids(rawSymbols, nextMids);
+      mids = nextMids;
+      snap = { ...rawSnap, symbols: nextSymbols };
+      symbols = nextSymbols;
+      if (selectedSymbol && !nextSymbols.some((s: any) => s.symbol === selectedSymbol)) {
+        selectedSymbol = '';
       }
       await Promise.all([refreshTrend(), refreshCandles(), refreshVolumes()]);
     } catch {}
-    loading = false;
+    if (seq === refreshSeq) {
+      loading = false;
+    }
   }
 
   function liveCandles(symbol: string): CandleData[] {
@@ -208,7 +298,7 @@
   }
 
   // ── Persisted view settings ─────────────────────────────────────
-  mode = getCookie('gridMode', 'paper1');
+  mode = normaliseGridMode(getCookie('gridMode', DEFAULT_GRID_MODE));
   gridSize = getNumCookie('gridSize', 3);
 
   // ── Trend controls (persisted via cookies) ─────────────────────
@@ -299,19 +389,6 @@
   });
 
   $effect(() => {
-    function finitePositive(v: unknown): number | null {
-      const n = Number(v);
-      return Number.isFinite(n) && n > 0 ? n : null;
-    }
-    function quoteMid(quote: any): number | null {
-      const explicit = finitePositive(quote?.mid);
-      if (explicit != null) return explicit;
-      const bid = finitePositive(quote?.bid);
-      const ask = finitePositive(quote?.ask);
-      if (bid == null || ask == null) return null;
-      return (bid + ask) / 2;
-    }
-
     const handler = (data: any) => {
       const midsRaw = data?.mids;
       if (midsRaw && typeof midsRaw === 'object') {
@@ -537,9 +614,9 @@
               <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
             {/if}
           </div>
-          {#if s.signal}
+          {#if signalLabel(s)}
             <div class="cell-signal">
-              <span class="signal-badge">{s.signal}</span>
+              <span class="signal-badge">{signalLabel(s)}</span>
             </div>
           {/if}
           <div class="cell-candles">

@@ -77,6 +77,13 @@ live-authoritative position has no ledger `open_trade_id`. This keeps
 `OPEN`/`ADD`/`REDUCE`/`CLOSE` legs visible in detail and journey review flows
 even when the live snapshot is authoritative.
 
+Hub GridView and the symbol-detail modal now normalise legacy `paper`
+selections onto the canonical candidate-family modes before they query
+snapshots, journeys, and tunnel data. They also merge live websocket mids over
+snapshot rows and discard stale modal responses whenever the selected symbol or
+mode changes, which keeps the operator view aligned with the Rust monitor
+payloads during rapid feed updates.
+
 ## Behaviour-Modular Contract
 
 Behaviour-level configuration lives under
