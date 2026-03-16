@@ -204,11 +204,16 @@
     return `${(s / 86_400).toFixed(1)}d`;
   }
 
+  function snapshotNowMs(): number {
+    const ts = Number(snap?.now_ts_ms);
+    return Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+  }
+
   function posAge(ts: string | null | undefined): string {
     if (!ts) return '';
     const d = new Date(ts);
     if (isNaN(d.getTime())) return '';
-    return fmtAge((Date.now() - d.getTime()) / 1000);
+    return fmtAge((snapshotNowMs() - d.getTime()) / 1000);
   }
 
   function fmtNum(v: number | null | undefined, dp = 2): string {
@@ -610,7 +615,7 @@
               <span class="header-right">
                 <span class="meta-notional">{fmtNotional(posEquity(s))}</span>
                 <span class="lev-box" style="background:{levColor(s.position.leverage ?? 1)}">{Math.round(s.position.leverage ?? 1)}&times;</span>
-                {#if posAge(s.position.open_timestamp)}<span class="pos-age">{posAge(s.position.open_timestamp)}</span>{/if}
+                {#if s.position.open_timestamp}<span class="pos-age">{posAge(s.position.open_timestamp)}</span>{/if}
               </span>
             {/if}
           </div>
