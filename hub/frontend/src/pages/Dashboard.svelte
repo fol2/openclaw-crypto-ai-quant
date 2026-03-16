@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, requestLiveRollbackConfig } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, normaliseHubMode, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, requestLiveRollbackConfig } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -70,6 +70,12 @@
   let tunnelPoints: any[] = $state([]);
   let journeyTunnelPoints: any[] = $state([]);
 
+  function currentMode(): string {
+    return normaliseHubMode(appState.mode);
+  }
+
+  appState.mode = currentMode();
+
   function pickJourneyInterval(durationMs: number): string {
     if (durationMs < 30 * 60_000)       return '1m';
     if (durationMs < 2 * 60 * 60_000)   return '3m';
@@ -96,7 +102,7 @@
     try {
       const off = reset ? 0 : journeyOffset;
       const sym = focusSym.trim().toUpperCase() || undefined;
-      const res = await getJourneys(appState.mode, 50, off, sym);
+      const res = await getJourneys(currentMode(), 50, off, sym);
       const batch = res.journeys || [];
       if (reset) {
         journeys = batch;
@@ -148,7 +154,7 @@
 
     const seq = ++journeyFetchSeq;
     try {
-      const res = await getCandlesRange(j.symbol, iv, tr.fromTs, tr.toTs, 500);
+      const res = await getCandlesRange(j.symbol, iv, tr.fromTs, tr.toTs, 500, currentMode());
       if (seq !== journeyFetchSeq) return;
       journeyCandles = res.candles || [];
     } catch (e) { console.error('getCandlesRange failed:', e); }
@@ -171,7 +177,7 @@
   async function fetchTunnelForLive() {
     if (!focusSym || !marks?.position) { tunnelPoints = []; return; }
     try {
-      const res = await getTunnel(focusSym, appState.mode);
+      const res = await getTunnel(focusSym, currentMode());
       tunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
     } catch { tunnelPoints = []; }
   }
@@ -180,7 +186,7 @@
   async function fetchTunnelForJourney(j: any, fromTs: number, toTs: number) {
     if (!j) { journeyTunnelPoints = []; return; }
     try {
-      const res = await getTunnel(j.symbol, appState.mode, fromTs, toTs);
+      const res = await getTunnel(j.symbol, currentMode(), fromTs, toTs);
       journeyTunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
     } catch { journeyTunnelPoints = []; }
   }
@@ -216,7 +222,7 @@
     journeyToTs = tr.toTs;
     const seq = ++journeyFetchSeq;
     try {
-      const res = await getCandlesRange(j.symbol, newIv, tr.fromTs, tr.toTs, 500);
+      const res = await getCandlesRange(j.symbol, newIv, tr.fromTs, tr.toTs, 500, currentMode());
       if (seq !== journeyFetchSeq) return;
       journeyCandles = res.candles || [];
     } catch (e) { console.error('getCandlesRange failed:', e); }
@@ -249,7 +255,7 @@
     journeyExtending = true;
     const seq = ++journeyFetchSeq;
     try {
-      const res = await getCandlesRange(j.symbol, journeyInterval, newFrom, newTo, 2000);
+      const res = await getCandlesRange(j.symbol, journeyInterval, newFrom, newTo, 2000, currentMode());
       if (seq !== journeyFetchSeq) return;
       journeyCandles = mergeCandles(journeyCandles, res.candles || []);
       journeyFromTs = newFrom;
@@ -266,7 +272,7 @@
     const iv = selectedInterval;
     mainExtending = true;
     try {
-      const res = await getCandlesRange(sym, iv, undefined, before, 500);
+      const res = await getCandlesRange(sym, iv, undefined, before, 500, currentMode());
       if (focusSym !== sym || selectedInterval !== iv) return;
       if (res.candles?.length) {
         candles = mergeCandles(res.candles, candles);
@@ -532,7 +538,7 @@
     try {
       appState.loading = true;
       const [data, vol] = await Promise.all([
-        getSnapshot(appState.mode),
+        getSnapshot(currentMode()),
         getVolumes().catch(() => ({ volumes: {} })),
       ]);
       updateServerClockOffset(data?.now_ts_ms);
@@ -635,6 +641,19 @@
   function finitePositive(v: unknown): number | null {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function finiteNumber(v: unknown): number | null {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function firstFiniteNumber(...values: unknown[]): number | null {
+    for (const value of values) {
+      const n = finiteNumber(value);
+      if (n != null) return n;
+    }
+    return null;
   }
 
   function quoteMid(quote: any): number | null {
@@ -788,7 +807,7 @@
     }
     _candlesFetchInFlight = true;
     try {
-      const res = await getCandles(sym, iv, bars);
+      const res = await getCandles(sym, iv, bars, currentMode());
       // Ignore stale responses if focus context changed mid-flight.
       if (focusSym !== sym || selectedInterval !== iv || selectedBars !== bars) return;
       const officialRows = Array.isArray(res?.candles) ? res.candles : [];
@@ -860,7 +879,7 @@
     detailTab = 'detail';
     mobileTab = 'detail';
     try {
-      marks = await getMarks(sym, appState.mode);
+      marks = await getMarks(sym, currentMode());
     } catch { /* ignore */ }
   }
 
@@ -1011,7 +1030,7 @@
   });
 
   function setMode(m: string) {
-    appState.mode = m;
+    appState.mode = normaliseHubMode(m);
     focusSym = '';
     // Reset journey state for the new mode
     journeys = [];
@@ -1156,9 +1175,7 @@
     : engineHeartbeatState === 'stale' ? 'STALE'
     : 'NO HB'
   );
-  let selectedModeKey = $derived(
-    (appState.mode === 'paper' || !appState.mode) ? 'paper1' : appState.mode
-  );
+  let selectedModeKey = $derived(currentMode());
   let selectedModeRuntimeState = $derived(getModeRuntimeState(selectedModeKey));
   let selectedModeRuntimeLabel = $derived(getModeRuntimeLabel(selectedModeKey));
   let selectedLiveStrategyMode = $derived(
@@ -1166,6 +1183,30 @@
   );
   let selectedLivePromotedFamily = $derived(
     promotedFamilyLabel(selectedLiveStrategyMode)
+  );
+  let displayedBalanceUsd = $derived.by(() => {
+    if (selectedModeKey === LIVE_MODE) {
+      return firstFiniteNumber(
+        balances?.realised_cash_usd,
+        balances?.cash_usd,
+        balances?.withdrawable_usd,
+        balances?.exchange_withdrawable_usd,
+        balances?.db_realised_usd,
+        balances?.realised_usd,
+      );
+    }
+    return firstFiniteNumber(
+      balances?.realised_usd,
+      balances?.db_realised_usd,
+    );
+  });
+  let displayedEquityUsd = $derived.by(() =>
+    firstFiniteNumber(
+      balances?.exchange_equity_usd,
+      balances?.equity_est_usd,
+      balances?.account_value_usd,
+      balances?.realised_usd,
+    )
   );
   let adminActionsEnabled = $derived(Boolean(snap?.config?.admin_actions_enabled));
   let liveServiceName = $derived(
@@ -1282,7 +1323,7 @@
     <div class="mode-tabs">
       <button
         class="mode-btn mode-btn-live"
-        class:active={appState.mode === LIVE_MODE}
+        class:active={selectedModeKey === LIVE_MODE}
         onclick={() => setMode(LIVE_MODE)}
       >{getModeLabel(LIVE_MODE)}</button>
 
@@ -1292,7 +1333,7 @@
         {#each CANDIDATE_FAMILY_ORDER as m}
           <button
             class="mode-btn"
-            class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
+            class:active={selectedModeKey === m}
             onclick={() => setMode(m)}
           >{getModeLabel(m)}</button>
         {/each}
@@ -1383,12 +1424,12 @@
       </span>
     {/if}
     <span class="metric-pill">
-      <span class="metric-label">BAL</span>
-      <span class="metric-value">${fmtNum(balances.realised_usd)}</span>
+      <span class="metric-label">{selectedModeKey === LIVE_MODE ? 'CASH' : 'BAL'}</span>
+      <span class="metric-value">${fmtNum(displayedBalanceUsd)}</span>
     </span>
     <span class="metric-pill">
       <span class="metric-label">EQ</span>
-      <span class="metric-value">${fmtNum(balances.equity_est_usd)}</span>
+      <span class="metric-value">${fmtNum(displayedEquityUsd)}</span>
     </span>
     <span class="range-dropdown-wrap">
       <button class="metric-pill range-pill {pnlClass(activePnl)}" onclick={() => rangeMenuOpen = !rangeMenuOpen}>
@@ -1632,14 +1673,14 @@
           </div>
         {/if}
 
-        {#if appState.mode === 'live' && manualTradeEnabled}
+        {#if selectedModeKey === LIVE_MODE && manualTradeEnabled}
           <trade-panel
             symbol={focusSym}
             position={JSON.stringify(marks?.position || null)}
             mid={String(symbols.find((s: any) => s.symbol === focusSym)?.mid ?? '')}
-            mode={appState.mode}
+            mode={selectedModeKey}
             engine-running={liveEngineActive ? 'true' : 'false'}
-            ontradedone={async () => { await refresh(); try { marks = await getMarks(focusSym, appState.mode); } catch {} }}
+            ontradedone={async () => { await refresh(); try { marks = await getMarks(focusSym, currentMode()); } catch {} }}
           ></trade-panel>
         {/if}
       {:else}

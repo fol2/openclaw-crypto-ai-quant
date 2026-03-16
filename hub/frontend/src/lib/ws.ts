@@ -44,11 +44,18 @@ export class HubWS {
     this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        const type = msg.type as string;
-        if (type && this.handlers.has(type)) {
-          for (const handler of this.handlers.get(type)!) {
-            handler(msg.data ?? msg);
-          }
+        if (!msg || typeof msg !== 'object') return;
+
+        const topic = this.extractTopic(msg);
+        const payload = this.extractPayload(msg);
+        if (topic) {
+          this.dispatch(topic, payload);
+          return;
+        }
+
+        if (payload && typeof payload === 'object') {
+          if ('mids' in payload) this.dispatch('mids', payload);
+          if ('bbo' in payload) this.dispatch('bbo', payload);
         }
       } catch {
         // Ignore parse errors.
@@ -93,6 +100,32 @@ export class HubWS {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'subscribe', topic }));
     }
+  }
+
+  private dispatch(topic: string, payload: any) {
+    const handlers = this.handlers.get(topic);
+    if (!handlers) return;
+    for (const handler of handlers) {
+      handler(payload);
+    }
+  }
+
+  private extractTopic(msg: Record<string, any>): string | null {
+    const candidates = [msg.topic, msg.channel, msg.stream, msg.type];
+    for (const raw of candidates) {
+      const topic = typeof raw === 'string' ? raw.trim() : '';
+      if (topic && this.handlers.has(topic)) return topic;
+    }
+    return null;
+  }
+
+  private extractPayload(msg: Record<string, any>) {
+    for (const key of ['data', 'payload', 'body', 'message']) {
+      if (Object.prototype.hasOwnProperty.call(msg, key) && msg[key] !== undefined) {
+        return msg[key];
+      }
+    }
+    return msg;
   }
 
   private buildSocketUrl() {
