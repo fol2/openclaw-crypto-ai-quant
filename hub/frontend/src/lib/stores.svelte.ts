@@ -1,3 +1,5 @@
+import { DEFAULT_PAPER_MODE } from './mode-labels';
+
 /**
  * Simple reactive stores for shared state.
  *
@@ -6,7 +8,7 @@
  */
 
 export const appState = $state({
-  mode: 'paper' as string,
+  mode: DEFAULT_PAPER_MODE as string,
   connected: false,
   mids: {} as Record<string, number>,
   snapshot: null as any,

@@ -2,6 +2,9 @@
  * REST API fetch wrapper with auth token support.
  */
 
+import { normaliseMode } from './mode-labels';
+import { appState } from './stores.svelte';
+
 const AUTH_TOKEN_STORAGE_KEY = 'aiq_hub_auth_token';
 
 let authToken: string | null = null;
@@ -59,6 +62,12 @@ export function bootstrapAuthTokenFromLocation() {
   return authToken;
 }
 
+export const normaliseHubMode = normaliseMode;
+
+function resolveHubMode(mode?: string | null): string {
+  return normaliseMode(mode || appState.mode);
+}
+
 async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -82,8 +91,8 @@ async function apiFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   return resp.json();
 }
 
-export async function getSnapshot(mode = 'paper') {
-  return apiFetch(`/api/snapshot?mode=${encodeURIComponent(mode)}`);
+export async function getSnapshot(mode?: string) {
+  return apiFetch(`/api/snapshot?mode=${encodeURIComponent(resolveHubMode(mode))}`);
 }
 
 export async function getMids() {
@@ -120,8 +129,12 @@ export async function postFlashDebug(events: Array<Record<string, any>>) {
   });
 }
 
-export async function getCandles(symbol: string, interval?: string, limit = 200) {
-  const params = new URLSearchParams({ symbol, limit: String(limit) });
+export async function getCandles(symbol: string, interval?: string, limit = 200, mode?: string) {
+  const params = new URLSearchParams({
+    symbol,
+    limit: String(limit),
+    mode: resolveHubMode(mode),
+  });
   if (interval) params.set('interval', interval);
   return apiFetch(`/api/candles?${params}`);
 }
@@ -130,18 +143,26 @@ export async function getHealth() {
   return apiFetch('/api/health');
 }
 
-export async function getMetrics(mode = 'paper') {
-  return apiFetch(`/api/metrics?mode=${encodeURIComponent(mode)}`);
+export async function getMetrics(mode?: string) {
+  return apiFetch(`/api/metrics?mode=${encodeURIComponent(resolveHubMode(mode))}`);
 }
 
-export async function getJourneys(mode = 'paper', limit = 50, offset = 0, symbol?: string) {
-  const params = new URLSearchParams({ mode, limit: String(limit), offset: String(offset) });
+export async function getJourneys(mode?: string, limit = 50, offset = 0, symbol?: string) {
+  const params = new URLSearchParams({
+    mode: resolveHubMode(mode),
+    limit: String(limit),
+    offset: String(offset),
+  });
   if (symbol) params.set('symbol', symbol);
   return apiFetch(`/api/journeys?${params}`);
 }
 
-export async function getTrades(mode = 'paper', limit = 100, offset = 0, symbol?: string, action?: string, fromTs?: string, toTs?: string) {
-  const params = new URLSearchParams({ mode, limit: String(limit), offset: String(offset) });
+export async function getTrades(mode?: string, limit = 100, offset = 0, symbol?: string, action?: string, fromTs?: string, toTs?: string) {
+  const params = new URLSearchParams({
+    mode: resolveHubMode(mode),
+    limit: String(limit),
+    offset: String(offset),
+  });
   if (symbol) params.set('symbol', symbol);
   if (action) params.set('action', action);
   if (fromTs) params.set('from_ts', fromTs);
@@ -149,26 +170,35 @@ export async function getTrades(mode = 'paper', limit = 100, offset = 0, symbol?
   return apiFetch(`/api/trades?${params}`);
 }
 
-export async function getCandlesRange(symbol: string, interval: string, fromTs?: number, toTs?: number, limit = 500) {
-  const params = new URLSearchParams({ symbol, interval, limit: String(limit) });
+export async function getCandlesRange(symbol: string, interval: string, fromTs?: number, toTs?: number, limit = 500, mode?: string) {
+  const params = new URLSearchParams({
+    symbol,
+    interval,
+    limit: String(limit),
+    mode: resolveHubMode(mode),
+  });
   if (fromTs != null) params.set('from_ts', String(fromTs));
   if (toTs != null) params.set('to_ts', String(toTs));
   return apiFetch(`/api/candles/range?${params}`);
 }
 
-export async function getMarks(symbol: string, mode = 'paper') {
-  return apiFetch(`/api/marks?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
+export async function getMarks(symbol: string, mode?: string) {
+  return apiFetch(`/api/marks?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(resolveHubMode(mode))}`);
 }
 
-export async function getDecisions(mode = 'paper', params: Record<string, string> = {}) {
-  const qs = new URLSearchParams({ mode, ...params });
+export async function getDecisions(mode?: string, params: Record<string, string> = {}) {
+  const qs = new URLSearchParams({ mode: resolveHubMode(mode), ...params });
   return apiFetch(`/api/v2/decisions?${qs}`);
 }
 
 // ── Tunnel API ──────────────────────────────────────────
 
-export async function getTunnel(symbol: string, mode = 'paper', fromTs?: number, toTs?: number, limit = 2000) {
-  const params = new URLSearchParams({ symbol, mode, limit: String(limit) });
+export async function getTunnel(symbol: string, mode?: string, fromTs?: number, toTs?: number, limit = 2000) {
+  const params = new URLSearchParams({
+    symbol,
+    mode: resolveHubMode(mode),
+    limit: String(limit),
+  });
   if (fromTs != null) params.set('from_ts', String(fromTs));
   if (toTs != null) params.set('to_ts', String(toTs));
   return apiFetch(`/api/tunnel?${params}`);
