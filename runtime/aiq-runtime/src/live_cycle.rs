@@ -7,6 +7,7 @@ use bt_core::signals::behaviour::BehaviourTrace;
 use serde::Serialize;
 
 use crate::paper_config::PaperEffectiveConfig;
+use crate::paper_cycle::ExitTunnelRow;
 use crate::paper_run_once::{
     action_codes_for_symbol, execute_prepared_symbol_step,
     execute_prepared_symbol_step_with_allow_pyramid_override, prepare_symbol_step,
@@ -61,6 +62,8 @@ pub struct LiveCycleReport {
     pub executed_entry_count: usize,
     pub plans: Vec<LiveActionPlan>,
     pub pipeline_trace: Vec<LiveCycleStageTrace>,
+    /// Exit tunnel rows to persist for chart visualization.
+    pub tunnel_rows: Vec<ExitTunnelRow>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -165,6 +168,8 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
         ));
     }
 
+    let mut tunnel_rows: Vec<ExitTunnelRow> = Vec::new();
+
     for symbol in &active_symbols {
         let config = input.effective_config.load_config(Some(symbol), true)?;
         match &interval {
@@ -226,6 +231,20 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
             execute_prepared_symbol_step(&pre_state, &prepared, input.step_close_ts_ms);
 
         if pre_state.positions.contains_key(symbol) {
+            // Capture exit tunnel bounds for every position (including HOLDs).
+            if let (Some(bounds), Some(pos)) = (
+                &decision.diagnostics.exit_bounds,
+                pre_state.positions.get(symbol),
+            ) {
+                tunnel_rows.push(ExitTunnelRow::from_diagnostics(
+                    input.step_close_ts_ms,
+                    symbol,
+                    bounds,
+                    pos.avg_entry_price,
+                    pos.side,
+                ));
+            }
+
             if state_progression_enabled
                 && decision_consumes_entry_budget(&decision)
                 && used_entry_budget >= max_entries
@@ -396,6 +415,7 @@ pub fn run_cycle(input: LiveCycleInput<'_>) -> Result<LiveCycleReport> {
         executed_entry_count,
         plans,
         pipeline_trace,
+        tunnel_rows,
         warnings,
         errors,
     })

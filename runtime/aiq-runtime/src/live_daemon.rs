@@ -373,6 +373,7 @@ pub fn run_daemon(input: LiveDaemonInput<'_>) -> Result<LiveDaemonReport> {
             &cycle_report.active_symbols,
             cycle_report.plans.len(),
         )?;
+        persist_exit_tunnel_rows(input.live_db, &cycle_report.tunnel_rows)?;
         last_step_close_ts_ms = Some(next_due_step_close_ts_ms);
         last_cycle = Some(cycle_report);
         idle_polls = 0;
@@ -1112,6 +1113,45 @@ fn record_runtime_cycle_step(
             Utc::now().to_rfc3339()
         ],
     )?;
+    Ok(())
+}
+
+fn persist_exit_tunnel_rows(
+    live_db: &Path,
+    rows: &[crate::paper_cycle::ExitTunnelRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let conn = rusqlite::Connection::open(live_db)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS exit_tunnel (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            upper_full REAL NOT NULL,
+            upper_partial REAL,
+            lower_full REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            pos_type TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms);",
+    )?;
+    for row in rows {
+        conn.execute(
+            "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, upper_partial, lower_full, entry_price, pos_type) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.ts_ms,
+                row.symbol,
+                row.upper_full,
+                row.upper_partial,
+                row.lower_full,
+                row.entry_price,
+                row.pos_type,
+            ],
+        )?;
+    }
     Ok(())
 }
 

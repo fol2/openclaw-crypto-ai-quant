@@ -3,7 +3,8 @@ use aiq_runtime_core::runtime::RuntimeBootstrap;
 use aiq_runtime_core::StageId;
 use anyhow::Result;
 use bt_core::config::Confidence;
-use bt_core::decision_kernel::{self, OrderIntentKind, StrategyState};
+use bt_core::decision_kernel::{self, OrderIntentKind, PositionSide, StrategyState};
+use bt_core::kernel_exits::ExitBounds;
 use bt_core::signals::behaviour::BehaviourTrace;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -93,6 +94,43 @@ struct ExecutedStep {
     pre_state: StrategyState,
     decision: decision_kernel::DecisionResult,
     warnings: Vec<String>,
+}
+
+/// Row to be persisted in the `exit_tunnel` table for chart visualization.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExitTunnelRow {
+    pub ts_ms: i64,
+    pub symbol: String,
+    pub upper_full: f64,
+    pub upper_partial: Option<f64>,
+    pub lower_full: f64,
+    pub entry_price: f64,
+    pub pos_type: String,
+}
+
+impl ExitTunnelRow {
+    /// Build from kernel exit bounds + position metadata.  Returns None when
+    /// the position or bounds are absent.
+    pub fn from_diagnostics(
+        ts_ms: i64,
+        symbol: &str,
+        bounds: &ExitBounds,
+        entry_price: f64,
+        side: PositionSide,
+    ) -> Self {
+        Self {
+            ts_ms,
+            symbol: symbol.to_string(),
+            upper_full: bounds.upper_full,
+            upper_partial: bounds.upper_partial,
+            lower_full: bounds.lower_full,
+            entry_price,
+            pos_type: match side {
+                PositionSide::Long => "LONG".to_string(),
+                PositionSide::Short => "SHORT".to_string(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +368,8 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         );
     }
 
+    let mut tunnel_rows: Vec<ExitTunnelRow> = Vec::new();
+
     for symbol in &active_symbols {
         let config = input
             .effective_config
@@ -365,6 +405,20 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         );
 
         if pre_state.positions.contains_key(symbol) {
+            // Capture exit tunnel bounds for every position (including HOLDs).
+            if let (Some(bounds), Some(pos)) = (
+                &decision.diagnostics.exit_bounds,
+                pre_state.positions.get(symbol),
+            ) {
+                tunnel_rows.push(ExitTunnelRow::from_diagnostics(
+                    input.step_close_ts_ms,
+                    symbol,
+                    bounds,
+                    pos.avg_entry_price,
+                    pos.side,
+                ));
+            }
+
             if state_progression_enabled
                 && decision_consumes_entry_budget(&decision)
                 && used_entry_budget >= max_entries
@@ -571,6 +625,11 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
                 let (written, _, _) = apply_decision_projection_with_tx(&tx, &projection)?;
                 trades_written += written;
             }
+        }
+
+        // Persist exit tunnel rows for chart visualization.
+        for row in &tunnel_rows {
+            persist_exit_tunnel_row(&tx, row)?;
         }
 
         let intent_count = executed_steps
@@ -959,7 +1018,35 @@ fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             open_position_count INTEGER NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS exit_tunnel (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            upper_full REAL NOT NULL,
+            upper_partial REAL,
+            lower_full REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            pos_type TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms);
         "#,
+    )?;
+    Ok(())
+}
+
+fn persist_exit_tunnel_row(tx: &rusqlite::Transaction<'_>, row: &ExitTunnelRow) -> Result<()> {
+    tx.execute(
+        "INSERT INTO exit_tunnel (ts_ms, symbol, upper_full, upper_partial, lower_full, entry_price, pos_type) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            row.ts_ms,
+            row.symbol,
+            row.upper_full,
+            row.upper_partial,
+            row.lower_full,
+            row.entry_price,
+            row.pos_type,
+        ],
     )?;
     Ok(())
 }
