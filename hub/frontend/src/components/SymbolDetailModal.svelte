@@ -44,6 +44,7 @@
   let journeyChartHeight = $state(280);
   let journeyChartDragging = $state(false);
   let journeyFetchSeq = 0;
+  let journeyListSeq = 0;
   let journeyFromTs = 0;
   let journeyToTs = 0;
   let journeyExtending = false;
@@ -197,6 +198,52 @@
     return { openTs, closeTs, dur, fromTs: Math.floor(openTs - pad), toTs: Math.ceil(closeTs + pad) };
   }
 
+  function sameModalContext(requestMode: string, requestSymbol: string): boolean {
+    return mode === requestMode && symbol === requestSymbol;
+  }
+
+  function sameJourneyContext(
+    seq: number,
+    requestMode: string,
+    requestSymbol: string,
+    requestJourneyId: number | null | undefined,
+  ): boolean {
+    return seq === journeyFetchSeq
+      && sameModalContext(requestMode, requestSymbol)
+      && selectedJourney?.id === requestJourneyId;
+  }
+
+  function clearSelectedJourney() {
+    journeyFetchSeq += 1;
+    selectedJourney = null;
+    journeyCandles = [];
+    journeyMarks = [];
+    journeyTunnelPoints = [];
+    journeyFromTs = 0;
+    journeyToTs = 0;
+  }
+
+  function resetJourneyState() {
+    journeyListSeq += 1;
+    journeyLoading = false;
+    journeyExtending = false;
+    journeys = [];
+    journeyOffset = 0;
+    journeyHasMore = true;
+    clearSelectedJourney();
+  }
+
+  function loadMarks(sym: string, currentMode: string) {
+    marks = null;
+    getMarks(sym, currentMode)
+      .then((result) => {
+        if (symbol === sym && mode === currentMode) {
+          marks = result;
+        }
+      })
+      .catch(() => {});
+  }
+
   // ── Candle pipeline helpers ─────────────────────────────────────────
   function setCandlesSeriesContext(sym: string, iv: string) {
     _candlesSeriesSym = sym;
@@ -306,20 +353,36 @@
 
   // ── Tunnel data fetch (live position) ─────────────────────────────
   async function fetchTunnelForLive() {
-    if (!position || !symbol) { tunnelPoints = []; return; }
+    const requestMode = mode;
+    const requestSymbol = symbol;
+    if (!position || !requestSymbol) { tunnelPoints = []; return; }
     try {
-      const res = await getTunnel(symbol, mode);
+      const res = await getTunnel(requestSymbol, requestMode);
+      if (!sameModalContext(requestMode, requestSymbol) || !position) return;
       tunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
-    } catch { tunnelPoints = []; }
+    } catch {
+      if (sameModalContext(requestMode, requestSymbol)) {
+        tunnelPoints = [];
+      }
+    }
   }
 
   // ── Tunnel data fetch (journey review) ────────────────────────────
   async function fetchTunnelForJourney(j: any, fromTs: number, toTs: number) {
     if (!j) { journeyTunnelPoints = []; return; }
+    const requestMode = mode;
+    const requestSymbol = symbol;
+    const requestJourneyId = j.id;
+    const requestSeq = journeyFetchSeq;
     try {
-      const res = await getTunnel(j.symbol, mode, fromTs, toTs);
+      const res = await getTunnel(j.symbol, requestMode, fromTs, toTs);
+      if (!sameJourneyContext(requestSeq, requestMode, requestSymbol, requestJourneyId)) return;
       journeyTunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
-    } catch { journeyTunnelPoints = []; }
+    } catch {
+      if (sameJourneyContext(requestSeq, requestMode, requestSymbol, requestJourneyId)) {
+        journeyTunnelPoints = [];
+      }
+    }
   }
 
   function scheduleRolloverReconcile() {
@@ -343,29 +406,37 @@
 
   // ── Journey functions ───────────────────────────────────────────────
   async function fetchJourneys(reset = false) {
-    if (journeyLoading) return;
+    if (journeyLoading && !reset) return;
+    const requestSeq = ++journeyListSeq;
+    const requestMode = mode;
+    const requestSymbol = symbol;
     journeyLoading = true;
     try {
       const off = reset ? 0 : journeyOffset;
-      const res = await getJourneys(mode, 50, off, symbol);
-      const batch = res.journeys || [];
+      const res = await getJourneys(requestMode, 50, off, requestSymbol);
+      if (requestSeq !== journeyListSeq || !sameModalContext(requestMode, requestSymbol)) return;
+      const batch = Array.isArray(res?.journeys) ? res.journeys : [];
       if (reset) {
         journeys = batch;
         journeyOffset = batch.length;
-        selectedJourney = null;
-        journeyCandles = [];
-        journeyMarks = [];
-        journeyTunnelPoints = [];
+        clearSelectedJourney();
         if (batch.length > 0) {
           await selectJourney(batch[0]);
         }
       }
       else { journeys = [...journeys, ...batch]; journeyOffset += batch.length; }
       journeyHasMore = batch.length >= 50;
-    } catch {} finally { journeyLoading = false; }
+    } catch {} finally {
+      if (requestSeq === journeyListSeq) {
+        journeyLoading = false;
+      }
+    }
   }
 
   async function selectJourney(j: any) {
+    const requestMode = mode;
+    const requestSymbol = symbol;
+    const requestJourneyId = j.id;
     selectedJourney = j;
     journeyCandles = [];
     journeyMarks = [];
@@ -378,9 +449,10 @@
     const seq = ++journeyFetchSeq;
     try {
       const res = await getCandlesRange(j.symbol, iv, tr.fromTs, tr.toTs, 500);
-      if (seq !== journeyFetchSeq) return;
+      if (!sameJourneyContext(seq, requestMode, requestSymbol, requestJourneyId)) return;
       journeyCandles = res.candles || [];
     } catch {}
+    if (!sameJourneyContext(seq, requestMode, requestSymbol, requestJourneyId)) return;
     journeyMarks = (j.legs || []).map((leg: any) => ({
       price: leg.price, timestamp: leg.timestamp, action: leg.action,
       type: j.type || j.pos_type, size: leg.size, pnl: leg.pnl,
@@ -393,6 +465,9 @@
     if (!selectedJourney) return;
     journeyInterval = newIv;
     const j = selectedJourney;
+    const requestMode = mode;
+    const requestSymbol = symbol;
+    const requestJourneyId = j.id;
     const tr = journeyTimeRange(j);
     if (!tr) return;
     journeyFromTs = tr.fromTs;
@@ -400,7 +475,7 @@
     const seq = ++journeyFetchSeq;
     try {
       const res = await getCandlesRange(j.symbol, newIv, tr.fromTs, tr.toTs, 500);
-      if (seq !== journeyFetchSeq) return;
+      if (!sameJourneyContext(seq, requestMode, requestSymbol, requestJourneyId)) return;
       journeyCandles = res.candles || [];
     } catch {}
   }
@@ -422,6 +497,9 @@
     const { before, after } = e.detail || {};
     if (journeyExtending || !selectedJourney) return;
     const j = selectedJourney;
+    const requestMode = mode;
+    const requestSymbol = symbol;
+    const requestJourneyId = j.id;
     const tr = journeyTimeRange(j);
     if (!tr) return;
     const extension = Math.max(tr.dur, intervalToMs(journeyInterval) * 100);
@@ -433,7 +511,7 @@
     const seq = ++journeyFetchSeq;
     try {
       const res = await getCandlesRange(j.symbol, journeyInterval, newFrom, newTo, 2000);
-      if (seq !== journeyFetchSeq) return;
+      if (!sameJourneyContext(seq, requestMode, requestSymbol, requestJourneyId)) return;
       journeyCandles = mergeCandles(journeyCandles, res.candles || []);
       journeyFromTs = newFrom;
       journeyToTs = newTo;
@@ -495,27 +573,32 @@
   // ── Lifecycle: Fetch marks + candles on symbol change ───────────────
   let _prevSymbol = '';
   let _prevInterval = '';
+  let _prevMode = '';
   $effect(() => {
     const sym = symbol;
     const iv = selectedInterval;
     const bars = selectedBars;
+    const currentMode = mode;
     if (!sym) return;
-    if (sym !== _prevSymbol) {
+    const symbolChanged = sym !== _prevSymbol;
+    const modeChanged = currentMode !== _prevMode;
+    if (symbolChanged) {
       candles = [];
-      marks = null;
       _prevSymbol = sym;
-      _prevInterval = iv;
       setCandlesSeriesContext('', '');
-      // Reset journey state
-      journeys = [];
-      selectedJourney = null;
-      journeyCandles = [];
-      journeyMarks = [];
-      journeyOffset = 0;
-      journeyHasMore = true;
       detailTab = 'detail';
-      // Fetch marks
-      getMarks(sym, mode).then(r => { if (symbol === sym) marks = r; }).catch(() => {});
+    }
+    if (symbolChanged || modeChanged) {
+      _prevMode = currentMode;
+      _prevInterval = iv;
+      tunnelPoints = [];
+      resetJourneyState();
+      loadMarks(sym, currentMode);
+      if (detailTab === 'trades') {
+        void fetchJourneys(true);
+      } else if (detailTab === 'detail') {
+        void fetchTunnelForLive();
+      }
     } else if (iv !== _prevInterval) {
       _prevInterval = iv;
     }
@@ -738,7 +821,7 @@
                     <button class="jiv-tab" class:is-on={journeyInterval === iv} onclick={() => changeJourneyInterval(iv)}>{iv.toUpperCase()}</button>
                   {/each}
                 </div>
-                <button class="journey-close-btn" aria-label="Close journey" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; journeyTunnelPoints = []; }}>
+                <button class="journey-close-btn" aria-label="Close journey" onclick={clearSelectedJourney}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
               </div>
