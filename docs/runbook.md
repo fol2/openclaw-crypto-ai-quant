@@ -239,6 +239,13 @@ reads `ai_quant_paper_v8_<lane>.status.json` to refresh paper health
 `ts_ms`/cadence metadata and to surface the current paper `config_id` without
 requiring a fresh `engine ok` row in the trading DB.
 
+Paper snapshot cards now label the first headline balance as `CASH`. For paper
+lanes that value is the ledger cash remainder after reserved margin and fees,
+not total account equity. The companion `EQ` figure is the mark-to-market
+estimate built from cash plus reserved margin plus unrealised PnL minus
+estimated close fees, which keeps open-position monitoring aligned with the
+runtime ledger contract.
+
 Live service state remains a separate contract from heartbeat freshness. An
 intentionally stopped live lane should still surface as service `OFF` through
 `/api/system/services`, and the paper status-file fallback does not change that
