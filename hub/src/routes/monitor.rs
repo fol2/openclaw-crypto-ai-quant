@@ -454,13 +454,14 @@ fn synthetic_open_position_from_live_snapshot(
 }
 
 fn journey_remaining_size(journey: &trading::TradeJourney) -> f64 {
-    journey.legs.iter().fold(0.0, |size, leg| {
-        match leg.action.as_str() {
+    journey
+        .legs
+        .iter()
+        .fold(0.0, |size, leg| match leg.action.as_str() {
             "OPEN" | "ADD" => size + leg.size,
             "REDUCE" | "CLOSE" => (size - leg.size).max(0.0),
             _ => size,
-        }
-    })
+        })
 }
 
 fn approx_equal(left: f64, right: f64, relative_tol: f64) -> bool {
@@ -550,6 +551,79 @@ fn position_json(
         "entry_atr": position.entry_atr,
         "unreal_pnl_est": unreal_pnl,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PositionBalanceEstimate {
+    unreal_pnl_est_usd: Option<f64>,
+    close_fee_est_usd: f64,
+    margin_used_est_usd: f64,
+}
+
+fn estimate_position_balance(
+    position: &trading::OpenPosition,
+    live_override: Option<&HlPositionSnapshot>,
+    mid: Option<f64>,
+    fee_rate: f64,
+) -> PositionBalanceEstimate {
+    let entry_price = live_override
+        .map(|live| live.entry_price)
+        .unwrap_or(position.entry_price);
+    let size = live_override.map(|live| live.size).unwrap_or(position.size);
+    let margin_used_est_usd = live_override
+        .map(|live| live.margin_used)
+        .unwrap_or(position.margin_used)
+        .max(0.0);
+
+    let Some(mark_price) = mid else {
+        return PositionBalanceEstimate {
+            unreal_pnl_est_usd: None,
+            close_fee_est_usd: 0.0,
+            margin_used_est_usd,
+        };
+    };
+
+    let unreal_pnl_est_usd = if position.pos_type == "LONG" {
+        (mark_price - entry_price) * size
+    } else {
+        (entry_price - mark_price) * size
+    };
+
+    PositionBalanceEstimate {
+        unreal_pnl_est_usd: Some(unreal_pnl_est_usd),
+        close_fee_est_usd: size.abs() * mark_price * fee_rate,
+        margin_used_est_usd,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BalanceEstimate {
+    realised_usd: Option<f64>,
+    equity_est_usd: Option<f64>,
+    unreal_pnl_est_usd: f64,
+    margin_used_est_usd: f64,
+    balance_source: &'static str,
+}
+
+fn estimated_db_balance_view(
+    mode: &str,
+    db_realised_usd: Option<f64>,
+    unreal_total: f64,
+    margin_used_total: f64,
+    close_fee_total: f64,
+) -> BalanceEstimate {
+    BalanceEstimate {
+        realised_usd: db_realised_usd,
+        equity_est_usd: db_realised_usd
+            .map(|cash| cash + margin_used_total + unreal_total - close_fee_total),
+        unreal_pnl_est_usd: unreal_total,
+        margin_used_est_usd: margin_used_total,
+        balance_source: if mode == "live" {
+            "db_snapshot"
+        } else {
+            "paper_estimate"
+        },
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────
@@ -753,25 +827,15 @@ async fn api_snapshot(
         let pos = pos_map.get(sym).copied();
         let mut unreal_pnl: Option<f64> = None;
 
-        if let (Some(p), Some(m)) = (pos, mid) {
+        if let Some(p) = pos {
             let live_override = live_position_override_for(p, &live_positions);
-            let entry_price = live_override
-                .map(|live| live.entry_price)
-                .unwrap_or(p.entry_price);
-            let size = live_override.map(|live| live.size).unwrap_or(p.size);
-            let u = if p.pos_type == "LONG" {
-                (m - entry_price) * size
-            } else {
-                (entry_price - m) * size
-            };
-            unreal_pnl = Some(u);
-            unreal_total += u;
-            close_fee_total += size.abs() * m * fee_rate;
-            let lev = live_override
-                .map(|live| live.leverage)
-                .unwrap_or(p.leverage)
-                .max(0.01);
-            margin_used_total += size.abs() * m / lev;
+            let estimate = estimate_position_balance(p, live_override, mid, fee_rate);
+            if let Some(u) = estimate.unreal_pnl_est_usd {
+                unreal_pnl = Some(u);
+                unreal_total += u;
+            }
+            close_fee_total += estimate.close_fee_est_usd;
+            margin_used_total += estimate.margin_used_est_usd;
         }
 
         let position_out = pos.map(|p| {
@@ -818,16 +882,19 @@ async fn api_snapshot(
                 "db_exchange_snapshot",
             )
         } else {
-            (
+            let estimate = estimated_db_balance_view(
+                mode.as_str(),
                 db_realised_usd,
-                db_realised_usd.map(|r| r + unreal_total - close_fee_total),
                 unreal_total,
                 margin_used_total,
-                if mode == "live" {
-                    "db_snapshot"
-                } else {
-                    "paper_estimate"
-                },
+                close_fee_total,
+            );
+            (
+                estimate.realised_usd,
+                estimate.equity_est_usd,
+                estimate.unreal_pnl_est_usd,
+                estimate.margin_used_est_usd,
+                estimate.balance_source,
             )
         };
 
@@ -1046,7 +1113,9 @@ async fn api_marks(
     let live_snapshot_authoritative = hl_snap.is_some() || db_live_snapshot_fresh;
     let mut pos = if live_snapshot_authoritative {
         match (ledger_pos, live_positions.get(&sym)) {
-            (Some(mut ledger), Some(live)) if live.pos_type.eq_ignore_ascii_case(&ledger.pos_type) => {
+            (Some(mut ledger), Some(live))
+                if live.pos_type.eq_ignore_ascii_case(&ledger.pos_type) =>
+            {
                 ledger.entry_price = live.entry_price;
                 ledger.size = live.size;
                 ledger.leverage = live.leverage.max(0.01);
@@ -1067,8 +1136,10 @@ async fn api_marks(
         })
     };
     if entries.is_empty() {
-        let fallback_journey =
-            detail_fallback_journey(trading::trade_journeys(&conn, u32::MAX, 0, Some(&sym))?, pos.as_ref());
+        let fallback_journey = detail_fallback_journey(
+            trading::trade_journeys(&conn, u32::MAX, 0, Some(&sym))?,
+            pos.as_ref(),
+        );
         if let Some(journey) = fallback_journey {
             if let Some(position) = pos.as_mut() {
                 if position.open_timestamp.is_none() && journey.is_open {
@@ -1461,14 +1532,7 @@ async fn api_tunnel(
     let conn = pool.get()?;
     let symbol = q.symbol.trim().to_uppercase();
     let limit = q.limit.min(10_000);
-    let points = tunnel::fetch_tunnel(
-        &conn,
-        &symbol,
-        q.from_ts,
-        q.to_ts,
-        q.open_time_ms,
-        limit,
-    )?;
+    let points = tunnel::fetch_tunnel(&conn, &symbol, q.from_ts, q.to_ts, q.open_time_ms, limit)?;
     Ok(Json(json!({ "tunnel": points })))
 }
 
@@ -1738,8 +1802,7 @@ mod tests {
         .unwrap();
 
         let heartbeat =
-            effective_heartbeat_for_mode(dir.path(), "live", &conn, 1_700_010_000_500_i64)
-                .unwrap();
+            effective_heartbeat_for_mode(dir.path(), "live", &conn, 1_700_010_000_500_i64).unwrap();
 
         assert_eq!(heartbeat.source.as_deref(), Some("sqlite"));
         assert_eq!(heartbeat.ts_ms, Some(1_700_000_000_000_i64));
@@ -2039,5 +2102,56 @@ mod tests {
         let picked = detail_fallback_journey(vec![closed, open.clone()], Some(&position)).unwrap();
         assert_eq!(picked.id, open.id);
         assert!(picked.is_open);
+    }
+
+    #[test]
+    fn estimated_db_balance_view_keeps_reserved_margin_in_paper_equity() {
+        let estimate =
+            estimated_db_balance_view("paper1", Some(309.778052787882), 0.0, 132.901569271113, 0.0);
+
+        assert_eq!(estimate.realised_usd, Some(309.778052787882));
+        assert_eq!(estimate.balance_source, "paper_estimate");
+        assert!(estimate
+            .equity_est_usd
+            .is_some_and(|value| (value - 442.679622058995).abs() < 1e-9));
+        assert!((estimate.margin_used_est_usd - 132.901569271113).abs() < 1e-9);
+    }
+
+    #[test]
+    fn estimated_db_balance_view_subtracts_close_fees_from_mark_to_market_equity() {
+        let estimate = estimated_db_balance_view(
+            "paper1",
+            Some(309.778052787882),
+            -0.682546577327723,
+            132.901569271113,
+            0.0,
+        );
+
+        assert!(estimate
+            .equity_est_usd
+            .is_some_and(|value| (value - 441.997075481667).abs() < 1e-9));
+        assert_eq!(estimate.unreal_pnl_est_usd, -0.682546577327723);
+    }
+
+    #[test]
+    fn estimate_position_balance_keeps_margin_without_mid() {
+        let position = trading::OpenPosition {
+            symbol: "DOT".to_string(),
+            pos_type: "LONG".to_string(),
+            open_trade_id: 28_747,
+            open_timestamp: Some("2026-03-16T20:59:59.999+00:00".to_string()),
+            entry_price: 1.6356,
+            size: 568.788814439832,
+            confidence: Some("high".to_string()),
+            entry_atr: 0.0,
+            leverage: 7.0,
+            margin_used: 132.901569271113,
+        };
+
+        let estimate = estimate_position_balance(&position, None, None, 0.00035);
+
+        assert_eq!(estimate.unreal_pnl_est_usd, None);
+        assert_eq!(estimate.close_fee_est_usd, 0.0);
+        assert!((estimate.margin_used_est_usd - 132.901569271113).abs() < 1e-9);
     }
 }

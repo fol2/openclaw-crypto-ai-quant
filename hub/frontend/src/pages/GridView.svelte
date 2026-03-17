@@ -606,7 +606,7 @@
       </span>
     {/if}
     <span class="metric-pill">
-      <span class="metric-label">BAL</span>
+      <span class="metric-label">{mode === LIVE_MODE ? 'BAL' : 'CASH'}</span>
       <span class="metric-value">${fmtNum(balances.realised_usd)}</span>
     </span>
     <span class="metric-pill">

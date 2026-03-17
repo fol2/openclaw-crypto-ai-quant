@@ -1446,7 +1446,7 @@
       </span>
     {/if}
     <span class="metric-pill">
-      <span class="metric-label">{selectedModeKey === LIVE_MODE ? 'CASH' : 'BAL'}</span>
+      <span class="metric-label">CASH</span>
       <span class="metric-value">${fmtNum(displayedBalanceUsd)}</span>
     </span>
     <span class="metric-pill">

@@ -83,7 +83,11 @@ selections onto the canonical candidate-family modes before they query
 snapshots, journeys, and tunnel data. They also merge live websocket mids over
 snapshot rows and discard stale modal responses whenever the selected symbol or
 mode changes, which keeps the operator view aligned with the Rust monitor
-payloads during rapid feed updates. Exit tunnel rows now carry explicit
+payloads during rapid feed updates. For paper lanes, the monitor payload keeps
+`balances.realised_usd` as the ledger cash figure after margin reservations,
+while `balances.equity_est_usd` marks that cash back up with reserved margin,
+unrealised PnL, and subtracts estimated close fees so operators can distinguish
+free cash from mark-to-market equity during open positions. Exit tunnel rows now carry explicit
 `has_upper_full` / `has_lower_full` presence flags so behaviour-disabled exit
 bounds do not render as fake zero-price overlays. They also carry
 `open_time_ms` as the position-instance identity, and runtime now emits those
