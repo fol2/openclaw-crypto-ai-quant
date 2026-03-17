@@ -85,9 +85,41 @@
   }
 
   function signalLabel(symbolRow: any): string {
-    return String(symbolRow?.last_signal?.signal ?? symbolRow?.signal ?? '')
+    const sig = String(symbolRow?.last_signal?.signal ?? symbolRow?.signal ?? '')
       .trim()
       .toUpperCase();
+    if (sig !== 'BUY' && sig !== 'SELL') return '';
+    if (!isFreshSig(symbolRow?.last_signal?.timestamp)) return '';
+    return sig;
+  }
+
+  function intervalToMs(iv: string): number {
+    const m = /^([0-9]+)([mhd])$/i.exec(String(iv || '').trim());
+    if (!m) return 60_000;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return 60_000;
+    const unit = String(m[2] || '').toLowerCase();
+    if (unit === 'm') return n * 60_000;
+    if (unit === 'h') return n * 60 * 60_000;
+    if (unit === 'd') return n * 24 * 60 * 60_000;
+    return 60_000;
+  }
+
+  function snapshotNowMs(): number {
+    const ts = Number(snap?.now_ts_ms);
+    return Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+  }
+
+  function signalFreshWindowMs(): number {
+    const configured = String(snap?.config?.trader_interval || '').trim().toLowerCase();
+    return Math.max(intervalToMs(configured) * 2, 60 * 60_000);
+  }
+
+  function isFreshSig(ts: string | null | undefined): boolean {
+    if (!ts) return false;
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return false;
+    return (snapshotNowMs() - d.getTime()) < signalFreshWindowMs();
   }
 
   async function refreshTrend() {
