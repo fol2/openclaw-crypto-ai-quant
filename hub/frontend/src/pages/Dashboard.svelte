@@ -1552,14 +1552,13 @@
                 ></mid-price>
               </td>
               <td>
-                {#if normaliseSignal(s.last_signal?.signal) !== ''}
+                {#if normaliseSignal(s.last_signal?.signal) !== '' && isFreshSig(s.last_signal?.timestamp)}
                   <span
                     class="sig-badge"
                     class:buy={normaliseSignal(s.last_signal?.signal) === 'BUY'}
                     class:sell={normaliseSignal(s.last_signal?.signal) === 'SELL'}
-                    class:stale={!isFreshSig(s.last_signal?.timestamp)}
                   >{normaliseSignal(s.last_signal?.signal)}</span>
-                  <span class="sig-age" class:stale={!isFreshSig(s.last_signal?.timestamp)}>{sigAge(s.last_signal?.timestamp)}</span>
+                  <span class="sig-age">{sigAge(s.last_signal?.timestamp)}</span>
                 {:else}
                   <span class="sig-badge none">\u2014</span>
                 {/if}
