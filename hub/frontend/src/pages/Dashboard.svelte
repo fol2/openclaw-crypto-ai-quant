@@ -1559,8 +1559,6 @@
                     class:sell={normaliseSignal(s.last_signal?.signal) === 'SELL'}
                   >{normaliseSignal(s.last_signal?.signal)}</span>
                   <span class="sig-age">{sigAge(s.last_signal?.timestamp)}</span>
-                {:else}
-                  <span class="sig-badge none">\u2014</span>
                 {/if}
               </td>
               <td>
