@@ -640,7 +640,8 @@ struct SelectionReport {
     effective_config_path: String,
     promotion_reference_epoch_s: f64,
     evidence_bundle_paths: SelectionEvidencePaths,
-    selected: ValidationItem,
+    selected: Option<ValidationItem>,
+    best_candidate_preview: Option<ValidationItem>,
     selected_candidates: Vec<ValidationItem>,
     selected_candidates_by_role: Vec<SelectionCandidate>,
     selected_targets: Vec<PaperTargetSummary>,
@@ -3129,7 +3130,7 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         })
         .cloned()
         .collect::<Vec<_>>();
-    let primary = selected
+    let selected_primary = selected
         .iter()
         .find(|item| item.role == "primary")
         .and_then(|role| {
@@ -3138,9 +3139,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
                 .find(|item| item.config_id == role.config_id)
         })
         .cloned()
-        .or_else(|| selected_items.first().cloned())
-        .or_else(|| best_overall_candidate(validated))
-        .ok_or_else(|| anyhow!("missing selected primary candidate"))?;
+        .or_else(|| selected_items.first().cloned());
+    let best_candidate_preview = best_overall_candidate(validated);
     let active_targets = active_paper_targets(selection);
     let partial_selection = selected.len() < active_targets.len();
     let applied_count = deployments
@@ -3242,7 +3242,8 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
             configs_dir: run_dir.join("configs").display().to_string(),
             replays_dir: run_dir.join("replays").display().to_string(),
         },
-        selected: primary,
+        selected: selected_primary,
+        best_candidate_preview,
         selected_candidates: selected_items,
         selected_candidates_by_role: selected.to_vec(),
         selected_targets: active_targets
@@ -6478,6 +6479,46 @@ profiles:
         assert_eq!(report.selection_stage, "selected_partial");
         assert_eq!(report.deploy_stage, "paper_partial");
         assert_eq!(report.step5_gate_status, "partial");
+    }
+
+    #[test]
+    fn blocked_selection_report_keeps_selected_empty_and_uses_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let selection = SelectionSettings::default();
+        let validated = vec![validation_item("efficient", "cfg-preview", -5.0, 0.8, 0.3)];
+
+        let report = build_selection_report(SelectionReportInput {
+            run_id: "run",
+            run_dir: &run_dir,
+            effective_config_id: "effective",
+            effective_config_path: Path::new("/tmp/effective.yaml"),
+            validated: &validated,
+            selected: &[],
+            selection: &selection,
+            base_cfg: &StrategyConfig::default(),
+            blocked: true,
+            blocked_reason: "no deployable candidates passed factory validation".to_string(),
+            challenges: Vec::new(),
+            deployments: Vec::new(),
+            paper_promotion_gate: None,
+            live_promotion: None,
+            promotion_requested: false,
+            selection_warnings: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(report.selected.is_none());
+        assert_eq!(
+            report
+                .best_candidate_preview
+                .as_ref()
+                .map(|item| item.config_id.as_str()),
+            Some("cfg-preview")
+        );
+        assert_eq!(report.selection_stage, "blocked");
+        assert_eq!(report.step5_gate_status, "blocked");
     }
 
     #[test]

@@ -114,6 +114,10 @@ deployment is written:
 - `conservative` selects from the `conservative` shortlist by lower drawdown,
   then profit factor, then total PnL
 
+These role comparators run only on the `deployable` set that survived the full
+validation suite. The shortlist / TPE winner is proposal evidence, not a deploy
+decision on its own.
+
 Each role also applies a materiality gate against its current incumbent before
 replacement is allowed. When a challenger fails that gate, the deployment
 decision is recorded as `incumbent_holds` and the current paper target remains
@@ -123,6 +127,8 @@ The release path no longer requires every secondary lane to have a replacement.
 If only the `primary` role has a deployable challenger, the cycle can still
 advance with `selection_stage: selected_partial` and `deploy_stage:
 paper_partial` while untouched secondary lanes keep their incumbent config.
+If no deployable challenger remains, `selection.json.selected` is `null` and
+`best_candidate_preview` carries the best blocked candidate for audit only.
 
 ### paper → live_small
 

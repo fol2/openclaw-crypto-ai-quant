@@ -77,6 +77,18 @@ on its own when `fallback` or `conservative` have no deployable replacement; in
 that case the report surfaces `selected_partial` / `paper_partial` rather than
 claiming a full rollout.
 
+Selection artefacts now distinguish between an actual deploy selection and a
+preview of the strongest blocked candidate:
+
+- `selected`: the selected deploy candidate summary, or `null` when no role was
+  actually selected
+- `best_candidate_preview`: the strongest blocked candidate summary for audit
+  context only
+
+This prevents blocked runs from looking as if a config was chosen for
+deployment. Deploy decisions always come from the post-validation deployable
+set, never straight from the shortlist / TPE winners.
+
 ## Promotion Criteria (Paper to Live)
 
 ### Gate 1: Paper Minimum Run
