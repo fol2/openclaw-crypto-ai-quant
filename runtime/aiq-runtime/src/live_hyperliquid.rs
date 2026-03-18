@@ -521,6 +521,121 @@ impl HyperliquidClient {
     }
 }
 
+/// Read-only Hyperliquid info client that only needs a wallet address.
+/// Used by the assist daemon to fetch positions and account state without
+/// the ability to sign exchange actions.
+pub struct HyperliquidInfoClient {
+    client: Client,
+    base_url: Url,
+    pub main_address: String,
+}
+
+impl HyperliquidInfoClient {
+    pub fn new(main_address: &str, timeout_s: Option<f64>) -> Result<Self> {
+        Self::with_base_url(main_address, DEFAULT_BASE_URL, timeout_s)
+    }
+
+    pub fn with_base_url(main_address: &str, base_url: &str, timeout_s: Option<f64>) -> Result<Self> {
+        validate_address(main_address, "main_address")?;
+        let base_url = Url::parse(base_url).context("invalid Hyperliquid base URL")?;
+        let timeout_s = timeout_s.unwrap_or(DEFAULT_TIMEOUT_S).clamp(1.0, 30.0);
+        let client = Client::builder()
+            .timeout(Duration::from_secs_f64(timeout_s))
+            .build()
+            .context("failed to build Hyperliquid info HTTP client")?;
+
+        Ok(Self {
+            client,
+            base_url,
+            main_address: main_address.trim().to_string(),
+        })
+    }
+
+    pub fn account_snapshot(&self) -> Result<HyperliquidAccountSnapshot> {
+        let response: ClearinghouseStateResponse =
+            self.info("clearinghouseState", json!({ "user": self.main_address }))?;
+        let account_value_usd = response
+            .margin_summary
+            .account_value
+            .parse_f64("accountValue")?;
+        let total_margin_used_usd = response
+            .margin_summary
+            .total_margin_used
+            .parse_f64("totalMarginUsed")?;
+        let withdrawable_usd = response
+            .withdrawable
+            .as_ref()
+            .map(|value| value.parse_f64("withdrawable"))
+            .transpose()?
+            .unwrap_or(account_value_usd - total_margin_used_usd);
+        Ok(HyperliquidAccountSnapshot {
+            account_value_usd,
+            withdrawable_usd,
+            total_margin_used_usd,
+        })
+    }
+
+    pub fn positions(&self) -> Result<Vec<HyperliquidPosition>> {
+        let response: ClearinghouseStateResponse =
+            self.info("clearinghouseState", json!({ "user": self.main_address }))?;
+        parse_positions(response)
+    }
+
+    pub fn account_and_positions(
+        &self,
+    ) -> Result<(HyperliquidAccountSnapshot, Vec<HyperliquidPosition>)> {
+        let response: ClearinghouseStateResponse =
+            self.info("clearinghouseState", json!({ "user": self.main_address }))?;
+        let account_value_usd = response
+            .margin_summary
+            .account_value
+            .parse_f64("accountValue")?;
+        let total_margin_used_usd = response
+            .margin_summary
+            .total_margin_used
+            .parse_f64("totalMarginUsed")?;
+        let withdrawable_usd = response
+            .withdrawable
+            .as_ref()
+            .map(|value| value.parse_f64("withdrawable"))
+            .transpose()?
+            .unwrap_or(account_value_usd - total_margin_used_usd);
+        let snapshot = HyperliquidAccountSnapshot {
+            account_value_usd,
+            withdrawable_usd,
+            total_margin_used_usd,
+        };
+        let positions = parse_positions(response)?;
+        Ok((snapshot, positions))
+    }
+
+    fn info<T: serde::de::DeserializeOwned>(
+        &self,
+        request_type: &str,
+        extra: serde_json::Value,
+    ) -> Result<T> {
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "type".to_string(),
+            serde_json::Value::String(request_type.to_string()),
+        );
+        if let serde_json::Value::Object(extra) = extra {
+            body.extend(extra);
+        }
+        let response = self
+            .client
+            .post(
+                self.base_url
+                    .join("info")
+                    .context("failed to resolve info URL")?,
+            )
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .context("Hyperliquid info request failed")?;
+        parse_json_response(response, "Hyperliquid info")
+    }
+}
+
 pub fn response_has_embedded_error(response: &serde_json::Value) -> bool {
     response
         .get("response")

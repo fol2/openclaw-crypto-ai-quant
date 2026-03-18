@@ -7,6 +7,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod assist_daemon;
 mod decision_events;
 #[allow(dead_code)]
 mod live_cycle;
@@ -335,6 +336,59 @@ struct LiveSyncFillsArgs {
     json: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct LiveAssistArgs {
+    /// Optional YAML config path override. Falls back to the conventional live config path.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Optional live DB override. Falls back to AI_QUANT_DB_PATH or the conventional live DB path.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Optional candle DB override. Falls back to AI_QUANT_CANDLES_DB_DIR + the resolved interval.
+    #[arg(long)]
+    candles_db: Option<PathBuf>,
+    /// Explicit symbol list override (comma-delimited). Falls back to AI_QUANT_SYMBOLS when empty.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Loaded on each daemon iteration.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 400.
+    #[arg(long)]
+    lookback_bars: Option<usize>,
+    /// Wallet address for read-only exchange position queries. Falls back to AI_QUANT_WALLET_ADDRESS.
+    #[arg(long)]
+    wallet_address: Option<String>,
+    /// Optional live secrets path. Falls back to AI_QUANT_SECRETS_PATH or ~/.config/openclaw/ai-quant-secrets.json.
+    /// Used only when --wallet-address is not set, to read the main_address field from the secrets file.
+    #[arg(long)]
+    secrets_path: Option<PathBuf>,
+    /// Optional daemon lock path override.
+    #[arg(long)]
+    lock_path: Option<PathBuf>,
+    /// Optional daemon status path override.
+    #[arg(long)]
+    status_path: Option<PathBuf>,
+    /// Sleep duration between assist daemon polls.
+    #[arg(long, default_value_t = 5_000)]
+    idle_sleep_ms: u64,
+    /// Maximum number of idle polls before exiting. Zero means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_idle_polls: usize,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModeArg {
     Live,
@@ -421,6 +475,8 @@ enum LiveCommand {
     },
     /// Execute the Rust live daemon owner for the production live lane.
     Daemon(LiveDaemonArgs),
+    /// Run assist mode: generate signals and exit tunnel without trading.
+    Assist(LiveAssistArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1957,9 +2013,100 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 );
             }
         }
+        LiveCommand::Assist(args) => {
+            let report = live_manifest::build_manifest(live_manifest::LiveManifestInput {
+                config: args.config.as_deref(),
+                project_dir: args.project_dir.as_deref(),
+                profile: args.profile.as_deref(),
+                db: args.db.as_deref(),
+                market_db: None,
+                candles_db: args.candles_db.as_deref(),
+                symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                secrets_path: args.secrets_path.as_deref(),
+                lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
+                lookback_bars: args.lookback_bars,
+            })?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve_live(
+                Some(Path::new(&report.config_path)),
+                args.project_dir.as_deref(),
+            )?;
+            let runtime_bootstrap =
+                effective_config.build_runtime_bootstrap(None, true, args.profile.as_deref())?;
+            let symbols = if args.symbols_file.is_some() {
+                load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?
+            } else {
+                report.explicit_symbols.clone()
+            };
+            let wallet_address = resolve_wallet_address(
+                args.wallet_address.as_deref(),
+                args.secrets_path.as_deref(),
+                Some(Path::new(&report.secrets_path)),
+            )?;
+            let daemon_report = assist_daemon::run_daemon(assist_daemon::AssistDaemonInput {
+                effective_config,
+                runtime_bootstrap,
+                live_db: Path::new(&report.live_db),
+                candles_db: Path::new(&report.candles_db),
+                explicit_symbols: &symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: report.lookback_bars,
+                wallet_address: &wallet_address,
+                lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
+                idle_sleep_ms: args.idle_sleep_ms,
+                max_idle_polls: args.max_idle_polls,
+            })?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&daemon_report)?);
+            } else {
+                println!(
+                    "assist daemon ok: pid={} lock={} status={} stop_requested={} plans={}",
+                    daemon_report.pid,
+                    daemon_report.lock_path,
+                    daemon_report.status_path,
+                    daemon_report.stop_requested,
+                    daemon_report
+                        .last_cycle
+                        .as_ref()
+                        .map(|cycle| cycle.plans.len())
+                        .unwrap_or(0)
+                );
+            }
+        }
     }
 
     Ok(())
+}
+
+fn resolve_wallet_address(
+    explicit: Option<&str>,
+    secrets_path_arg: Option<&Path>,
+    manifest_secrets_path: Option<&Path>,
+) -> Result<String> {
+    if let Some(addr) = explicit {
+        let addr = addr.trim().to_string();
+        if !addr.is_empty() {
+            live_secrets::validate_address(&addr, "wallet_address")?;
+            return Ok(addr);
+        }
+    }
+    if let Ok(addr) = std::env::var("AI_QUANT_WALLET_ADDRESS") {
+        let addr = addr.trim().to_string();
+        if !addr.is_empty() {
+            live_secrets::validate_address(&addr, "AI_QUANT_WALLET_ADDRESS")?;
+            return Ok(addr);
+        }
+    }
+    let path = secrets_path_arg
+        .or(manifest_secrets_path)
+        .context("assist mode requires --wallet-address, AI_QUANT_WALLET_ADDRESS, or a secrets file containing main_address")?;
+    let secrets = live_secrets::load_live_secrets(path)?;
+    Ok(secrets.main_address)
 }
 
 fn print_effective_config_report(surface: &str, report: &paper_config::PaperEffectiveConfigReport) {
@@ -2108,5 +2255,44 @@ mod tests {
             } => assert!(args.json),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_live_assist_surface() {
+        let cli = Cli::try_parse_from([
+            "aiq-runtime",
+            "live",
+            "assist",
+            "--project-dir",
+            "/tmp/project",
+            "--wallet-address",
+            "0x1111111111111111111111111111111111111111",
+            "--json",
+        ])
+        .expect("live assist should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::Assist(args),
+            } => {
+                assert!(args.json);
+                assert_eq!(args.project_dir, Some(PathBuf::from("/tmp/project")));
+                assert_eq!(
+                    args.wallet_address.as_deref(),
+                    Some("0x1111111111111111111111111111111111111111")
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_wallet_address_prefers_explicit() {
+        let addr = resolve_wallet_address(
+            Some("0x1111111111111111111111111111111111111111"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(addr, "0x1111111111111111111111111111111111111111");
     }
 }

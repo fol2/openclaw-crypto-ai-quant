@@ -23,6 +23,24 @@ cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 ```
 
+## Assist
+
+Assist mode runs signal generation and exit tunnel computation without
+placing any trades. It requires only a wallet address (no private key).
+
+```bash
+cargo run -p aiq-runtime -- live assist --project-dir "$PWD" --wallet-address 0x...
+cargo run -p aiq-runtime -- live assist --project-dir "$PWD" --json
+```
+
+The wallet address can also be supplied through `AI_QUANT_WALLET_ADDRESS` or
+resolved from the secrets file. The assist daemon writes its status to
+`ai_quant_assist.status.json` and the Hub detects it to surface
+`assist_mode: true` in the snapshot API.
+
+The `openclaw-ai-quant-assist-v8` systemd service conflicts with
+`openclaw-ai-quant-live-v8` so only one can run at a time.
+
 ## Hub Manual Trade
 
 Enable Hub manual-trade writes with `AIQ_MANUAL_TRADE_ENABLE=true` in the Hub
@@ -529,6 +547,7 @@ Service-level tuning knobs:
 cargo run -p aiq-runtime -- doctor --json
 cargo run -p aiq-runtime -- pipeline --json
 journalctl --user -u openclaw-ai-quant-live-v8 -f
+journalctl --user -u openclaw-ai-quant-assist-v8 -f
 journalctl --user -u openclaw-ai-quant-trader-v8-paper1 -f
 ```
 

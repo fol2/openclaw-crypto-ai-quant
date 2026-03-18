@@ -694,6 +694,30 @@ async fn api_flash_debug(
     }))
 }
 
+fn detect_assist_mode(aiq_root: &Path) -> bool {
+    let status_path = aiq_root.join("ai_quant_assist.status.json");
+    let Ok(content) = std::fs::read(&status_path) else {
+        return false;
+    };
+    let Ok(status) = serde_json::from_slice::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let running = status
+        .get("running")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !running {
+        return false;
+    }
+    let updated_at_ms = status
+        .get("updated_at_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let age_ms = now_ms.saturating_sub(updated_at_ms);
+    age_ms < 5 * 60 * 1000
+}
+
 async fn api_snapshot(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ModeQuery>,
@@ -924,9 +948,13 @@ async fn api_snapshot(
     // Available candle intervals
     let intervals = candles::list_available_intervals(&state.config.candles_db_dir);
 
+    // Assist mode detection
+    let assist_mode = detect_assist_mode(&state.config.aiq_root);
+
     Ok(Json(json!({
         "now_ts_ms": ts,
         "mode": mode,
+        "assist_mode": assist_mode,
         "db_path_redacted": true,
         "health": redacted_heartbeat(&heartbeat),
         "config": {
