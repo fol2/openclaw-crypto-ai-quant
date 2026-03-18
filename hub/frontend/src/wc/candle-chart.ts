@@ -750,10 +750,12 @@ export class CandleChart extends LitElement {
           const upper = cur.tp.upper_full;  // TP price (above entry for LONG, below for SHORT)
           const lower = cur.tp.lower_full;  // SL price (below entry for LONG, above for SHORT)
           const isLong = /long/i.test(cur.tp.pos_type);
+          const hasUpper = cur.tp.has_upper_full !== false;
+          const hasLower = cur.tp.has_lower_full !== false;
 
           // Profit zone: between entry and TP (upper_full)
           // Uses Math.max/min so it works for both LONG and SHORT
-          {
+          if (hasUpper) {
             const pHigh = Math.max(entry, upper);
             const pLow  = Math.min(entry, upper);
             ctx.fillStyle = C.tnlGreen;
@@ -762,7 +764,7 @@ export class CandleChart extends LitElement {
 
           // Risk zone: between entry and SL (lower_full)
           // Skip if locked profit (SL crossed past entry due to trailing)
-          const hasRisk = isLong ? lower < entry : lower > entry;
+          const hasRisk = hasLower && (isLong ? lower < entry : lower > entry);
           if (hasRisk) {
             const rHigh = Math.max(entry, lower);
             const rLow  = Math.min(entry, lower);
@@ -779,6 +781,7 @@ export class CandleChart extends LitElement {
         ctx.beginPath();
         let tpStarted = false;
         for (let k = 0; k < mapped.length; k++) {
+          if (mapped[k].tp.has_upper_full === false) { tpStarted = false; continue; }
           const x = xOf(mapped[k].i);
           const y = pToY(mapped[k].tp.upper_full);
           if (!tpStarted) { ctx.moveTo(x, y); tpStarted = true; }
@@ -791,6 +794,7 @@ export class CandleChart extends LitElement {
         ctx.beginPath();
         let slStarted = false;
         for (let k = 0; k < mapped.length; k++) {
+          if (mapped[k].tp.has_lower_full === false) { slStarted = false; continue; }
           const x = xOf(mapped[k].i);
           const y = pToY(mapped[k].tp.lower_full);
           if (!slStarted) { ctx.moveTo(x, y); slStarted = true; }

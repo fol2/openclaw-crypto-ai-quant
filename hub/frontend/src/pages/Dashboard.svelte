@@ -3,9 +3,11 @@
   import { getSnapshot, normaliseHubMode, postFlashDebug, tradeEnabled, getSystemServices, getVolumes, requestLiveRollbackConfig } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
-  import { fmtNum, fmtAge, sigAge, pnlPct, pnlClass, intervalToMs } from '../lib/format';
+  import { fmtNum, sigAge, pnlPct, pnlClass, intervalToMs } from '../lib/format';
   import SymbolDetailPanel from '../components/SymbolDetailPanel.svelte';
 
+  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h'] as const;
+  const BAR_COUNTS = [50, 100, 200] as const;
   const CHART_PREF_INTERVAL_COOKIE = 'aiq_dash_iv';
   const CHART_PREF_BARS_COOKIE = 'aiq_dash_bars';
   const MODE_SERVICE_MAP: Record<string, string> = {
@@ -127,7 +129,6 @@
         paper2: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper2)),
         paper3: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper3)),
       };
-      liveEngineActive = modeRuntimeState.live === 'on';
     } catch {
       modeRuntimeState = {
         live: 'unknown',
@@ -135,7 +136,6 @@
         paper2: 'unknown',
         paper3: 'unknown',
       };
-      liveEngineActive = false;
     }
   }
 
@@ -240,7 +240,6 @@
         getSnapshot(currentMode()),
         getVolumes().catch(() => ({ volumes: {} })),
       ]);
-      updateServerClockOffset(data?.now_ts_ms);
       volumes = vol.volumes || {};
       // Preserve live WS mid prices — don't let stale REST prices overwrite them.
       // WS owns price; REST owns everything else (positions, signals, heartbeat, balances).
@@ -766,17 +765,17 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
     Symbols
   </button>
-  <button class="m-tab" class:active={mobileTab === 'detail'} onclick={() => { mobileTab = 'detail'; detailTab = 'detail'; }}>
+  <button class="m-tab" class:active={mobileTab === 'detail'} onclick={() => { mobileTab = 'detail'; }}>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
     Detail
   </button>
-  <button class="m-tab" class:active={mobileTab === 'feed'} onclick={() => { mobileTab = 'feed'; if (detailTab === 'detail') detailTab = 'trades'; }}>
+  <button class="m-tab" class:active={mobileTab === 'feed'} onclick={() => { mobileTab = 'feed'; }}>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
     Feed
   </button>
 </div>
 
-<div class="dashboard-grid" class:is-dragging={dragging || chartDragging || journeyChartDragging} class:drag-col={dragging} class:drag-row={chartDragging || journeyChartDragging}>
+<div class="dashboard-grid" class:is-dragging={dragging} class:drag-col={dragging}>
   <!-- Symbol table -->
   <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} class:expanded-hidden={detailExpanded} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
@@ -1347,9 +1346,6 @@
   }
   .dashboard-grid.drag-col {
     cursor: col-resize;
-  }
-  .dashboard-grid.drag-row {
-    cursor: row-resize;
   }
 
   .splitter {
