@@ -15,6 +15,8 @@ The repository is organised around four Rust-owned execution surfaces:
 
 - `paper` subcommands own paper effective-config, manifests, service state, and daemon execution
 - `live` subcommands own live effective-config, manifests, service state, and daemon execution
+- `live assist` runs signal generation and exit tunnel computation using a
+  read-only exchange client, without placing trades
 - `snapshot` subcommands own paper snapshot export and paper seeding
 - `pipeline` and `doctor` expose runtime inspection contracts
 
