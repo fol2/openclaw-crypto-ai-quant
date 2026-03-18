@@ -99,6 +99,7 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
     let mut idle_polls = 0usize;
     let mut last_step_close_ts_ms = None;
     let mut last_cycle = None;
+    let mut last_signals_count: usize = 0;
 
     ensure_live_runtime_tables(&rusqlite::Connection::open(input.live_db)?)?;
     write_status(
@@ -110,6 +111,7 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
             StatusContext {
                 latest_common_close_ts_ms: None,
                 last_step_close_ts_ms,
+                last_signals_count: 0,
                 warnings: &[],
                 errors: &[],
                 last_cycle: None,
@@ -205,6 +207,7 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
                     StatusContext {
                         latest_common_close_ts_ms: Some(latest_common_close_ts_ms),
                         last_step_close_ts_ms,
+                        last_signals_count,
                         warnings: &warnings,
                         errors: &errors,
                         last_cycle: last_cycle.as_ref(),
@@ -283,6 +286,7 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
 
         last_step_close_ts_ms = Some(next_due_step_close_ts_ms);
         last_cycle = Some(cycle_report);
+        last_signals_count = signals_written;
         idle_polls = 0;
 
         write_status(
@@ -294,6 +298,7 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
                 StatusContext {
                     latest_common_close_ts_ms: Some(latest_common_close_ts_ms),
                     last_step_close_ts_ms,
+                    last_signals_count,
                     warnings: &warnings,
                     errors: &errors,
                     last_cycle: last_cycle.as_ref(),
@@ -314,6 +319,7 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
             StatusContext {
                 latest_common_close_ts_ms: None,
                 last_step_close_ts_ms,
+                last_signals_count,
                 warnings: &warnings,
                 errors: &errors,
                 last_cycle: last_cycle.as_ref(),
@@ -823,6 +829,7 @@ fn sleep_with_stop_flag(idle_sleep_ms: u64, stop_flag: &AtomicBool) {
 struct StatusContext<'a> {
     latest_common_close_ts_ms: Option<i64>,
     last_step_close_ts_ms: Option<i64>,
+    last_signals_count: usize,
     warnings: &'a [String],
     errors: &'a [String],
     last_cycle: Option<&'a LiveCycleReport>,
@@ -861,7 +868,7 @@ fn build_status(
             .last_cycle
             .map(|cycle| cycle.plans.len())
             .unwrap_or(0),
-        last_signals_count: 0,
+        last_signals_count: context.last_signals_count,
         last_tunnel_count: context
             .last_cycle
             .map(|cycle| cycle.tunnel_rows.len())

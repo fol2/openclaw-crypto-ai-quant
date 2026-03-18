@@ -1,0 +1,34 @@
+[Unit]
+Description=OpenClaw AI Quant V8 Assist Mode (Signal + Tunnel, NO trading)
+After=network-online.target openclaw-ai-quant-ws-sidecar.service
+Wants=network-online.target
+Requires=openclaw-ai-quant-ws-sidecar.service
+Conflicts=openclaw-ai-quant-live-v8.service
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-live-v8.env
+ExecStart=$PROJECT_DIR/target/release/aiq-runtime live assist --project-dir .
+Restart=on-failure
+RestartSec=10
+
+# ASSIST MODE — read-only, NO orders sent to exchange.
+Environment=AI_QUANT_INSTANCE_TAG=v8-ASSIST
+
+# Per-instance state (separate lock from live daemon).
+Environment=AI_QUANT_LOCK_PATH=$PROJECT_DIR/ai_quant_assist.lock
+Environment=AI_QUANT_DB_PATH=$PROJECT_DIR/trading_engine_v8_live.db
+Environment=AI_QUANT_STRATEGY_YAML=$PROJECT_DIR/config/strategy_overrides.live.yaml
+
+# Keep interval consistent.
+Environment=AI_QUANT_INTERVAL=30m
+Environment=AI_QUANT_LOOKBACK_BARS=200
+
+# Sidecar integration (shared production datafeed socket).
+Environment=AI_QUANT_CANDLES_DB_DIR=$PROJECT_DIR/candles_dbs
+
+[Install]
+WantedBy=default.target
