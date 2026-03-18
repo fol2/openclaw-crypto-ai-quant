@@ -83,7 +83,7 @@ All conditions must be met:
 | Slippage stress | Net PnL at 20 bps slippage on the holdout window | > 0 |
 | Minimum trades | Total trades on the holdout window | ≥ 30 |
 | Concentration | PnL share from top-1 symbol on the holdout window | < 50% |
-| Train parity | CPU replay vs GPU sweep result on the train window | Within configured parity thresholds |
+| Train parity | CPU replay vs a dedicated single-combo train parity sweep built from the same lane-effective config | Within configured parity thresholds |
 
 The trailing holdout window is derived from the common DB coverage using
 `validation.holdout_fraction`, while `validation.holdout_splits` controls how
@@ -92,7 +92,7 @@ financial-grade defaults reserve the trailing 25% of common coverage and split
 that holdout into 3 equal slices.
 
 **Source**: validation pipeline output, `run_metadata.json`, holdout summaries,
-and the train-window parity replay artefacts.
+the train-window parity replay artefact, and the train parity sweep artefact.
 
 ### candidate → retired
 

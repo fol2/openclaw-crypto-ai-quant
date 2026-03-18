@@ -497,6 +497,8 @@ struct ParityCheck {
     gpu_final_balance: f64,
     balance_delta_abs: f64,
     balance_delta_rel: f64,
+    comparison_scope: String,
+    symbol_evidence_note: Option<String>,
     symbol_checks: Vec<SymbolParityCheck>,
     thresholds: ParityThresholds,
 }
@@ -570,6 +572,7 @@ struct ValidationItem {
     validation_gate: String,
     validation_windows: ValidationWindowsRecord,
     train_parity_replay_report_path: String,
+    train_parity_sweep_report_path: String,
     holdout_summary_path: String,
     holdout_median_daily_return: f64,
     blocked_reasons: Vec<String>,
@@ -943,6 +946,52 @@ struct SweepCommandInput<'a> {
     stdout_path: &'a Path,
 }
 
+struct TrainParitySweepInput<'a> {
+    paths: &'a ResolvedPaths,
+    profile: &'a FactoryProfileSettings,
+    config_path: &'a Path,
+    initial_balance: f64,
+    db_window: &'a ResolvedDbWindow,
+    spec_path: &'a Path,
+    output_path: &'a Path,
+    stdout_path: &'a Path,
+    stderr_path: &'a Path,
+}
+
+struct CandidateValidationInput<'a> {
+    paths: &'a ResolvedPaths,
+    profile: &'a FactoryProfileSettings,
+    validation: &'a ValidationSettings,
+    base_document: &'a serde_yaml::Value,
+    base_cfg: &'a StrategyConfig,
+    run_dir: &'a Path,
+    validation_windows: &'a ResolvedValidationWindows,
+    shortlisted: ShortlistedCandidate,
+    initial_balance: f64,
+}
+
+struct CandidateConfigInput<'a> {
+    base_document: &'a serde_yaml::Value,
+    base_cfg: &'a StrategyConfig,
+    overrides: &'a BTreeMap<String, f64>,
+    output_path: &'a Path,
+    candidate_name: &'a str,
+    mode: ShortlistMode,
+    rank: usize,
+    sweep: &'a SweepCandidateRow,
+}
+
+struct LivePromotionInput<'a> {
+    project_dir: &'a Path,
+    artifacts_root: &'a Path,
+    run_dir: &'a Path,
+    validated: &'a [ValidationItem],
+    selected: &'a [SelectionCandidate],
+    paper_deployments: &'a [DeploymentEvent],
+    deployment: &'a DeploymentSettings,
+    live_governance: &'a LiveGovernanceSettings,
+}
+
 struct SelectionReportInput<'a> {
     run_id: &'a str,
     run_dir: &'a Path,
@@ -1176,16 +1225,17 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
     let shortlist = build_shortlist(&sweep_rows, profile_settings.shortlist_per_mode);
     let mut validated = Vec::new();
     for candidate in shortlist {
-        validated.push(validate_candidate(
-            &paths,
-            &settings.validation,
-            &raw_document,
-            &base_cfg,
-            &run_dir,
-            &validation_windows,
-            candidate,
-            resolved_balance.amount_usd,
-        )?);
+        validated.push(validate_candidate(CandidateValidationInput {
+            paths: &paths,
+            profile: &profile_settings,
+            validation: &settings.validation,
+            base_document: &raw_document,
+            base_cfg: &base_cfg,
+            run_dir: &run_dir,
+            validation_windows: &validation_windows,
+            shortlisted: candidate,
+            initial_balance: resolved_balance.amount_usd,
+        })?);
     }
     if validated.is_empty() {
         bail!("factory validation produced no candidate evidence");
@@ -1227,16 +1277,16 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
                                 &selected,
                             ) {
                                 Ok(gate) if gate.status == "pass" => {
-                                    match promote_primary_live(
-                                        &paths.project_dir,
-                                        &paths.artifacts_root,
-                                        &run_dir,
-                                        &validated,
-                                        &selected,
-                                        &events,
-                                        &settings.deployment,
-                                        &settings.live_governance,
-                                    ) {
+                                    match promote_primary_live(LivePromotionInput {
+                                        project_dir: &paths.project_dir,
+                                        artifacts_root: &paths.artifacts_root,
+                                        run_dir: &run_dir,
+                                        validated: &validated,
+                                        selected: &selected,
+                                        paper_deployments: &events,
+                                        deployment: &settings.deployment,
+                                        live_governance: &settings.live_governance,
+                                    }) {
                                         Ok(event) => (Some(gate), Some(event)),
                                         Err(err) => {
                                             warnings.push(format!("live_promotion_failed: {err}"));
@@ -1775,6 +1825,45 @@ fn clone_db_window_with_range(
     }
 }
 
+fn rebind_db_window_for_config(
+    base: &ResolvedDbWindow,
+    cfg: &StrategyConfig,
+    candles_db_dir: &Path,
+) -> Result<ResolvedDbWindow> {
+    let resolved = compute_common_time_range(cfg, candles_db_dir)?;
+    if base.start_ts_ms < resolved.start_ts_ms || base.end_ts_ms > resolved.end_ts_ms {
+        bail!(
+            "lane-effective interval coverage {}..{} does not contain requested validation window {}..{}",
+            resolved.start_ts_ms,
+            resolved.end_ts_ms,
+            base.start_ts_ms,
+            base.end_ts_ms
+        );
+    }
+    Ok(ResolvedDbWindow {
+        main_interval: resolved.main_interval,
+        entry_interval: resolved.entry_interval,
+        exit_interval: resolved.exit_interval,
+        main_db: resolved.main_db,
+        entry_db: resolved.entry_db,
+        exit_db: resolved.exit_db,
+        start_ts_ms: base.start_ts_ms,
+        end_ts_ms: base.end_ts_ms,
+    })
+}
+
+fn rebind_validation_windows_for_config(
+    base: &ResolvedValidationWindows,
+    cfg: &StrategyConfig,
+    candles_db_dir: &Path,
+) -> Result<ResolvedValidationWindows> {
+    Ok(ResolvedValidationWindows {
+        coverage: rebind_db_window_for_config(&base.coverage, cfg, candles_db_dir)?,
+        train: rebind_db_window_for_config(&base.train, cfg, candles_db_dir)?,
+        holdout: rebind_db_window_for_config(&base.holdout, cfg, candles_db_dir)?,
+    })
+}
+
 fn resolve_validation_windows(
     coverage: &ResolvedDbWindow,
     holdout_fraction: f64,
@@ -1876,6 +1965,104 @@ fn run_sweep(input: SweepCommandInput<'_>) -> Result<()> {
     Ok(())
 }
 
+fn write_single_combo_sweep_spec(
+    source_spec_path: &Path,
+    output_path: &Path,
+    initial_balance: f64,
+) -> Result<()> {
+    let source = fs::read_to_string(source_spec_path)
+        .with_context(|| format!("read {}", source_spec_path.display()))?;
+    let mut document: serde_yaml::Value = serde_yaml::from_str(&source)
+        .with_context(|| format!("parse {}", source_spec_path.display()))?;
+    let map = document
+        .as_mapping_mut()
+        .context("single-combo sweep spec must have a mapping root")?;
+    map.insert(
+        serde_yaml::Value::String("initial_balance".to_string()),
+        serde_yaml::Value::from(initial_balance),
+    );
+    map.insert(
+        serde_yaml::Value::String("axes".to_string()),
+        serde_yaml::Value::Sequence(Vec::new()),
+    );
+    let yaml =
+        serde_yaml::to_string(&document).context("serialise single-combo sweep spec YAML")?;
+    fs::write(output_path, yaml).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
+fn run_train_parity_sweep(input: TrainParitySweepInput<'_>) -> Result<SweepCandidateRow> {
+    let TrainParitySweepInput {
+        paths,
+        profile,
+        config_path,
+        initial_balance,
+        db_window,
+        spec_path,
+        output_path,
+        stdout_path,
+        stderr_path,
+    } = input;
+    let source_spec_path = resolve_under_project(&paths.project_dir, &profile.sweep_spec);
+    write_single_combo_sweep_spec(&source_spec_path, spec_path, initial_balance)?;
+
+    let mut cmd = Command::new(&paths.backtester_bin);
+    cmd.arg("sweep")
+        .arg("--config")
+        .arg(config_path)
+        .arg("--sweep-spec")
+        .arg(spec_path)
+        .arg("--output")
+        .arg(output_path)
+        .arg("--output-mode")
+        .arg("full")
+        .arg("--initial-balance")
+        .arg(initial_balance.to_string())
+        .arg("--top-n")
+        .arg("1")
+        .arg("--candles-db")
+        .arg(&db_window.main_db)
+        .arg("--interval")
+        .arg(&db_window.main_interval)
+        .arg("--entry-candles-db")
+        .arg(&db_window.entry_db)
+        .arg("--entry-interval")
+        .arg(&db_window.entry_interval)
+        .arg("--exit-candles-db")
+        .arg(&db_window.exit_db)
+        .arg("--exit-interval")
+        .arg(&db_window.exit_interval)
+        .arg("--funding-db")
+        .arg(&paths.funding_db_path)
+        .arg("--start-ts")
+        .arg(db_window.start_ts_ms.to_string())
+        .arg("--end-ts")
+        .arg(db_window.end_ts_ms.to_string())
+        .arg("--no-auto-scope")
+        .arg("--sweep-top-k")
+        .arg("1");
+    if profile.gpu {
+        // Single-candidate parity evidence must use the exact lane-effective config,
+        // even when that role overlays intervals outside the broad sweep safe set.
+        cmd.arg("--gpu")
+            .arg("--parity-mode")
+            .arg("identical-symbol-universe")
+            .arg("--allow-unsafe-gpu-sweep");
+    }
+    run_command(&mut cmd, &paths.project_dir, stdout_path, stderr_path)
+        .context("run train parity sweep")?;
+
+    let mut rows = parse_sweep_candidates(output_path)?;
+    if rows.len() != 1 {
+        bail!(
+            "expected exactly one train parity sweep row in {}, got {}",
+            output_path.display(),
+            rows.len()
+        );
+    }
+    Ok(rows.remove(0))
+}
+
 fn parse_sweep_candidates(path: &Path) -> Result<Vec<SweepCandidateRow>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut rows = Vec::new();
@@ -1950,16 +2137,18 @@ fn shortlist_order_conservative(a: &SweepCandidateRow, b: &SweepCandidateRow) ->
         .then_with(|| b.total_pnl.total_cmp(&a.total_pnl))
 }
 
-fn validate_candidate(
-    paths: &ResolvedPaths,
-    validation: &ValidationSettings,
-    base_document: &serde_yaml::Value,
-    base_cfg: &StrategyConfig,
-    run_dir: &Path,
-    validation_windows: &ResolvedValidationWindows,
-    shortlisted: ShortlistedCandidate,
-    initial_balance: f64,
-) -> Result<ValidationItem> {
+fn validate_candidate(input: CandidateValidationInput<'_>) -> Result<ValidationItem> {
+    let CandidateValidationInput {
+        paths,
+        profile,
+        validation,
+        base_document,
+        base_cfg,
+        run_dir,
+        validation_windows,
+        shortlisted,
+        initial_balance,
+    } = input;
     let candidate_name = format!(
         "candidate_{}_rank{}",
         shortlisted.shortlist_mode.as_str(),
@@ -1968,16 +2157,16 @@ fn validate_candidate(
     let candidate_config_path = run_dir
         .join("configs")
         .join(format!("{candidate_name}.yaml"));
-    let generated_document = generate_candidate_config(
+    let generated_document = generate_candidate_config(CandidateConfigInput {
         base_document,
         base_cfg,
-        &shortlisted.sweep.overrides,
-        &candidate_config_path,
-        &candidate_name,
-        shortlisted.shortlist_mode,
-        shortlisted.rank,
-        &shortlisted.sweep,
-    )?;
+        overrides: &shortlisted.sweep.overrides,
+        output_path: &candidate_config_path,
+        candidate_name: &candidate_name,
+        mode: shortlisted.shortlist_mode,
+        rank: shortlisted.rank,
+        sweep: &shortlisted.sweep,
+    })?;
     let role = shortlist_mode_target_role(shortlisted.shortlist_mode);
     let candidate_effective_config_path = run_dir
         .join("configs")
@@ -1989,6 +2178,14 @@ fn validate_candidate(
         &candidate_config_path,
         true,
     )?;
+    let effective_cfg = load_config_document_checked(&materialised.document, None, false, None)
+        .map_err(|err| anyhow!(err))
+        .context("load lane-effective candidate config")?;
+    let candidate_validation_windows = rebind_validation_windows_for_config(
+        validation_windows,
+        &effective_cfg,
+        &paths.candles_db_dir,
+    )?;
     let config_id = materialised.config_id;
     let config_sha256 = file_sha256_hex(&candidate_effective_config_path)?;
     let replay_dir = run_dir.join("replays");
@@ -1997,7 +2194,7 @@ fn validate_candidate(
         paths,
         config_path: &candidate_effective_config_path,
         initial_balance,
-        db_window: &validation_windows.holdout,
+        db_window: &candidate_validation_windows.holdout,
         output_path: &replay_path,
         stdout_path: &run_dir
             .join("replays")
@@ -2012,7 +2209,7 @@ fn validate_candidate(
         paths,
         config_path: &candidate_effective_config_path,
         initial_balance,
-        db_window: &validation_windows.holdout,
+        db_window: &candidate_validation_windows.holdout,
         output_path: &slippage_path,
         stdout_path: &run_dir
             .join("replays")
@@ -2028,7 +2225,7 @@ fn validate_candidate(
         paths,
         config_path: &candidate_effective_config_path,
         initial_balance,
-        db_window: &validation_windows.train,
+        db_window: &candidate_validation_windows.train,
         output_path: &train_parity_replay_path,
         stdout_path: &run_dir
             .join("replays")
@@ -2038,11 +2235,30 @@ fn validate_candidate(
             .join(format!("{candidate_name}.train_parity.stderr.txt")),
         slippage_bps: None,
     })?;
+    let train_parity_sweep_path =
+        replay_dir.join(format!("{candidate_name}.train_parity.sweep.jsonl"));
+    let train_parity_sweep = run_train_parity_sweep(TrainParitySweepInput {
+        paths,
+        profile,
+        config_path: &candidate_effective_config_path,
+        initial_balance,
+        db_window: &candidate_validation_windows.train,
+        spec_path: &run_dir
+            .join("replays")
+            .join(format!("{candidate_name}.train_parity.sweep.yaml")),
+        output_path: &train_parity_sweep_path,
+        stdout_path: &run_dir
+            .join("replays")
+            .join(format!("{candidate_name}.train_parity.sweep.stdout.txt")),
+        stderr_path: &run_dir
+            .join("replays")
+            .join(format!("{candidate_name}.train_parity.sweep.stderr.txt")),
+    })?;
     let holdout_summary = build_holdout_summary(
         paths,
         &candidate_effective_config_path,
         initial_balance,
-        &validation_windows.holdout,
+        &candidate_validation_windows.holdout,
         validation.holdout_splits,
         &run_dir.join("holdout").join(&candidate_name),
     )?;
@@ -2053,7 +2269,7 @@ fn validate_candidate(
     write_json(&holdout_summary_path, &holdout_summary)?;
     let top1_pnl_pct = top1_symbol_share(&replay_report);
     let parity =
-        compare_cpu_replay_to_gpu_candidate(&train_parity_report, &shortlisted.sweep, validation);
+        compare_cpu_replay_to_gpu_candidate(&train_parity_report, &train_parity_sweep, validation);
     let mut blocked_reasons = Vec::new();
     if replay_report.total_trades < validation.min_trades {
         blocked_reasons.push(format!(
@@ -2115,8 +2331,9 @@ fn validate_candidate(
         total_pnl: replay_report.total_pnl,
         total_trades: replay_report.total_trades,
         validation_gate: "candidate->validated_holdout".to_string(),
-        validation_windows: validation_windows.record(),
+        validation_windows: candidate_validation_windows.record(),
         train_parity_replay_report_path: train_parity_replay_path.display().to_string(),
+        train_parity_sweep_report_path: train_parity_sweep_path.display().to_string(),
         holdout_summary_path: holdout_summary_path.display().to_string(),
         holdout_median_daily_return: holdout_summary.median_holdout_daily_return,
         blocked_reasons: blocked_reasons.clone(),
@@ -2473,16 +2690,17 @@ fn stable_override_key(overrides: &BTreeMap<String, f64>) -> String {
         .join(",")
 }
 
-fn generate_candidate_config(
-    base_document: &serde_yaml::Value,
-    base_cfg: &StrategyConfig,
-    overrides: &BTreeMap<String, f64>,
-    output_path: &Path,
-    candidate_name: &str,
-    mode: ShortlistMode,
-    rank: usize,
-    sweep: &SweepCandidateRow,
-) -> Result<serde_yaml::Value> {
+fn generate_candidate_config(input: CandidateConfigInput<'_>) -> Result<serde_yaml::Value> {
+    let CandidateConfigInput {
+        base_document,
+        base_cfg,
+        overrides,
+        output_path,
+        candidate_name,
+        mode,
+        rank,
+        sweep,
+    } = input;
     let mut cfg = base_cfg.clone();
     for (path, value) in overrides {
         apply_one_pub(&mut cfg, path, *value);
@@ -2654,51 +2872,70 @@ fn compare_cpu_replay_to_gpu_candidate(
         .iter()
         .map(|item| (item.symbol.clone(), item))
         .collect::<BTreeMap<_, _>>();
-    let gpu_by_symbol = gpu
-        .by_symbol
-        .iter()
-        .map(|item| (item.symbol.clone(), item))
-        .collect::<BTreeMap<_, _>>();
-    let mut all_symbols = cpu_by_symbol
-        .keys()
-        .chain(gpu_by_symbol.keys())
-        .cloned()
-        .collect::<Vec<_>>();
-    all_symbols.sort();
-    all_symbols.dedup();
-    let symbol_checks = all_symbols
-        .into_iter()
-        .map(|symbol| {
-            let cpu_symbol = cpu_by_symbol.get(&symbol);
-            let gpu_symbol = gpu_by_symbol.get(&symbol);
-            let cpu_trades = cpu_symbol.map_or(0, |item| item.trades);
-            let gpu_trades = gpu_symbol.map_or(0, |item| item.trades);
-            let cpu_pnl = cpu_symbol.map_or(0.0, |item| item.pnl);
-            let gpu_pnl = gpu_symbol.map_or(0.0, |item| item.pnl);
-            let pnl_delta_abs = (cpu_pnl - gpu_pnl).abs();
-            let pnl_delta_rel = if cpu_pnl.abs() < f64::EPSILON {
-                0.0
-            } else {
-                pnl_delta_abs / cpu_pnl.abs()
-            };
-            let trade_delta = cpu_trades.abs_diff(gpu_trades);
-            let pass = trade_delta <= validation.parity_trade_delta_max
-                && (pnl_delta_abs <= validation.parity_abs_eps
-                    || pnl_delta_rel <= validation.parity_rel_eps);
-            SymbolParityCheck {
-                symbol,
-                cpu_trades,
-                gpu_trades,
-                trade_delta,
-                cpu_pnl,
-                gpu_pnl,
-                pnl_delta_abs,
-                pnl_delta_rel,
-                status: if pass { "pass" } else { "warn" }.to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
-    let symbol_pass = symbol_checks.iter().all(|item| item.status == "pass");
+    let (comparison_scope, symbol_evidence_note, symbol_checks, symbol_pass) =
+        if gpu.by_symbol.is_empty() {
+            (
+                "aggregate_only".to_string(),
+                Some(
+                    "gpu sweep evidence omitted by_symbol breakdown; aggregate parity only"
+                        .to_string(),
+                ),
+                Vec::new(),
+                true,
+            )
+        } else {
+            let gpu_by_symbol = gpu
+                .by_symbol
+                .iter()
+                .map(|item| (item.symbol.clone(), item))
+                .collect::<BTreeMap<_, _>>();
+            let mut all_symbols = cpu_by_symbol
+                .keys()
+                .chain(gpu_by_symbol.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            all_symbols.sort();
+            all_symbols.dedup();
+            let symbol_checks = all_symbols
+                .into_iter()
+                .map(|symbol| {
+                    let cpu_symbol = cpu_by_symbol.get(&symbol);
+                    let gpu_symbol = gpu_by_symbol.get(&symbol);
+                    let cpu_trades = cpu_symbol.map_or(0, |item| item.trades);
+                    let gpu_trades = gpu_symbol.map_or(0, |item| item.trades);
+                    let cpu_pnl = cpu_symbol.map_or(0.0, |item| item.pnl);
+                    let gpu_pnl = gpu_symbol.map_or(0.0, |item| item.pnl);
+                    let pnl_delta_abs = (cpu_pnl - gpu_pnl).abs();
+                    let pnl_delta_rel = if cpu_pnl.abs() < f64::EPSILON {
+                        0.0
+                    } else {
+                        pnl_delta_abs / cpu_pnl.abs()
+                    };
+                    let trade_delta = cpu_trades.abs_diff(gpu_trades);
+                    let pass = trade_delta <= validation.parity_trade_delta_max
+                        && (pnl_delta_abs <= validation.parity_abs_eps
+                            || pnl_delta_rel <= validation.parity_rel_eps);
+                    SymbolParityCheck {
+                        symbol,
+                        cpu_trades,
+                        gpu_trades,
+                        trade_delta,
+                        cpu_pnl,
+                        gpu_pnl,
+                        pnl_delta_abs,
+                        pnl_delta_rel,
+                        status: if pass { "pass" } else { "warn" }.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let symbol_pass = symbol_checks.iter().all(|item| item.status == "pass");
+            (
+                "aggregate_and_symbol".to_string(),
+                None,
+                symbol_checks,
+                symbol_pass,
+            )
+        };
     let pass = trade_delta <= validation.parity_trade_delta_max
         && (balance_delta_abs <= validation.parity_abs_eps
             || balance_delta_rel <= validation.parity_rel_eps)
@@ -2712,6 +2949,8 @@ fn compare_cpu_replay_to_gpu_candidate(
         gpu_final_balance,
         balance_delta_abs,
         balance_delta_rel,
+        comparison_scope,
+        symbol_evidence_note,
         symbol_checks,
         thresholds: ParityThresholds {
             abs_eps: validation.parity_abs_eps,
@@ -4026,16 +4265,17 @@ fn is_close_action(action: &str) -> bool {
     )
 }
 
-fn promote_primary_live(
-    project_dir: &Path,
-    artifacts_root: &Path,
-    run_dir: &Path,
-    validated: &[ValidationItem],
-    selected: &[SelectionCandidate],
-    paper_deployments: &[DeploymentEvent],
-    deployment: &DeploymentSettings,
-    live_governance: &LiveGovernanceSettings,
-) -> Result<LivePromotionEvent> {
+fn promote_primary_live(input: LivePromotionInput<'_>) -> Result<LivePromotionEvent> {
+    let LivePromotionInput {
+        project_dir,
+        artifacts_root,
+        run_dir,
+        validated,
+        selected,
+        paper_deployments,
+        deployment,
+        live_governance,
+    } = input;
     let primary_role = selected
         .iter()
         .find(|role| role.role.eq_ignore_ascii_case("primary"))
@@ -5234,6 +5474,90 @@ esac
         fs::set_permissions(path, perms).unwrap();
     }
 
+    fn write_role_aware_fake_factory_backtester(path: &Path) {
+        let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="$1"
+shift
+
+output=""
+slippage=""
+config=""
+interval=""
+entry_interval=""
+exit_interval=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    --slippage-bps)
+      slippage="$2"
+      shift 2
+      ;;
+    --config)
+      config="$2"
+      shift 2
+      ;;
+    --interval)
+      interval="$2"
+      shift 2
+      ;;
+    --entry-interval)
+      entry_interval="$2"
+      shift 2
+      ;;
+    --exit-interval)
+      exit_interval="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$output")"
+
+case "$cmd" in
+  sweep)
+    if [[ "$interval" == "1h" && "$entry_interval" == "15m" && "$exit_interval" == "15m" ]]; then
+      cat >"$output" <<'JSON'
+{"config_id":"cfg-effective","output_mode":"full","total_pnl":50.0,"final_balance":10050.0,"total_trades":40,"total_wins":20,"win_rate":0.5,"profit_factor":1.5,"max_drawdown_pct":0.10,"overrides":{"trade.leverage":7.0}}
+JSON
+    else
+      cat >"$output" <<'JSON'
+{"config_id":"cfg-raw","output_mode":"full","total_pnl":120.0,"final_balance":10120.0,"total_trades":40,"total_wins":20,"win_rate":0.5,"profit_factor":1.5,"max_drawdown_pct":0.10,"overrides":{"trade.leverage":7.0}}
+JSON
+    fi
+    ;;
+  replay)
+    if [[ -n "$slippage" ]]; then
+      cat >"$output" <<'JSON'
+{"initial_balance":10000.0,"final_balance":10030.0,"total_pnl":30.0,"total_trades":40,"profit_factor":1.3,"max_drawdown_pct":0.10,"total_fees":1.0,"by_symbol":[{"symbol":"BTC","trades":14,"pnl":10.0,"win_rate":0.5},{"symbol":"ETH","trades":13,"pnl":10.0,"win_rate":0.5},{"symbol":"SOL","trades":13,"pnl":10.0,"win_rate":0.5}]}
+JSON
+    else
+      cat >"$output" <<'JSON'
+{"initial_balance":10000.0,"final_balance":10050.0,"total_pnl":50.0,"total_trades":40,"profit_factor":1.5,"max_drawdown_pct":0.10,"total_fees":1.0,"by_symbol":[{"symbol":"BTC","trades":14,"pnl":20.0,"win_rate":0.5},{"symbol":"ETH","trades":13,"pnl":15.0,"win_rate":0.5},{"symbol":"SOL","trades":13,"pnl":15.0,"win_rate":0.5}]}
+JSON
+    fi
+    ;;
+  *)
+    echo "unsupported command: $cmd" >&2
+    exit 1
+    ;;
+esac
+"#;
+
+        fs::write(path, script).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -5568,6 +5892,11 @@ esac
                 gpu_final_balance: 10_000.0 + pnl,
                 balance_delta_abs: 0.0,
                 balance_delta_rel: 0.0,
+                comparison_scope: "aggregate_only".to_string(),
+                symbol_evidence_note: Some(
+                    "gpu sweep evidence omitted by_symbol breakdown; aggregate parity only"
+                        .to_string(),
+                ),
                 symbol_checks: Vec::new(),
                 thresholds: ParityThresholds {
                     abs_eps: 0.001,
@@ -5596,6 +5925,7 @@ esac
                 },
             },
             train_parity_replay_report_path: "/tmp/train_parity.json".to_string(),
+            train_parity_sweep_report_path: "/tmp/train_parity_sweep.jsonl".to_string(),
             holdout_summary_path: "/tmp/holdout.json".to_string(),
             holdout_median_daily_return: 0.01,
             blocked_reasons: Vec::new(),
@@ -5723,7 +6053,13 @@ parity_enforce: true
         fs::create_dir_all(&candles_dir).unwrap();
         fs::create_dir_all(&artifacts_dir).unwrap();
         fs::write(&config_path, factory_root_config_yaml()).unwrap();
-        fs::write(&sweep_spec_path, "initial_balance: 10000\nlookback: 10\naxes: []\n").unwrap();
+        fs::write(
+            &sweep_spec_path,
+            "initial_balance: 10000\nlookback: 10\naxes: []\n",
+        )
+        .unwrap();
+        write_candles_fixture(&candles_dir.join("candles_5m.db"), "5m");
+        write_candles_fixture(&candles_dir.join("candles_1m.db"), "1m");
         write_candles_fixture(&candles_dir.join("candles_30m.db"), "30m");
         write_candles_fixture(&candles_dir.join("candles_3m.db"), "3m");
         fs::write(candles_dir.join("funding_rates.db"), "").unwrap();
@@ -5826,8 +6162,10 @@ profiles:
         let item = &report["items"][0];
         assert_eq!(item["validation_windows"], *windows);
         let train_replay = PathBuf::from(item["train_parity_replay_report_path"].as_str().unwrap());
+        let train_sweep = PathBuf::from(item["train_parity_sweep_report_path"].as_str().unwrap());
         let holdout_summary_path = PathBuf::from(item["holdout_summary_path"].as_str().unwrap());
         assert!(train_replay.is_file());
+        assert!(train_sweep.is_file());
         assert!(holdout_summary_path.is_file());
 
         let holdout_summary: Value =
@@ -5844,7 +6182,9 @@ profiles:
             8
         );
         assert_eq!(
-            selection["selected"]["holdout_summary_path"].as_str().unwrap(),
+            selection["selected"]["holdout_summary_path"]
+                .as_str()
+                .unwrap(),
             holdout_summary_path.display().to_string()
         );
     }
@@ -5858,15 +6198,15 @@ profiles:
         let base_cfg = load_config_document_checked(&raw_document, None, false, None)
             .map_err(|err| anyhow!(err))
             .unwrap();
-        let candidate = generate_candidate_config(
-            &raw_document,
-            &base_cfg,
-            &BTreeMap::from([("trade.leverage".to_string(), 7.0)]),
-            &path,
-            "candidate_growth_rank1",
-            ShortlistMode::Growth,
-            1,
-            &SweepCandidateRow {
+        let candidate = generate_candidate_config(CandidateConfigInput {
+            base_document: &raw_document,
+            base_cfg: &base_cfg,
+            overrides: &BTreeMap::from([("trade.leverage".to_string(), 7.0)]),
+            output_path: &path,
+            candidate_name: "candidate_growth_rank1",
+            mode: ShortlistMode::Growth,
+            rank: 1,
+            sweep: &SweepCandidateRow {
                 candidate_mode: true,
                 config_id: "row".to_string(),
                 max_drawdown_pct: 0.1,
@@ -5876,7 +6216,7 @@ profiles:
                 total_trades: 64,
                 by_symbol: Vec::new(),
             },
-        )
+        })
         .unwrap();
 
         let root = candidate.as_mapping().unwrap();
@@ -6257,6 +6597,133 @@ profiles:
     }
 
     #[test]
+    fn parity_uses_aggregate_scope_when_gpu_symbol_breakdown_is_missing() {
+        let cpu = ReplaySummary {
+            initial_balance: 10_000.0,
+            final_balance: 10_200.0,
+            total_pnl: 200.0,
+            total_trades: 4,
+            profit_factor: 1.5,
+            max_drawdown_pct: 0.1,
+            total_fees: 4.0,
+            by_symbol: vec![
+                SymbolBucket {
+                    symbol: "BTC".to_string(),
+                    trades: 2,
+                    pnl: 120.0,
+                    win_rate: 0.5,
+                },
+                SymbolBucket {
+                    symbol: "ETH".to_string(),
+                    trades: 2,
+                    pnl: 80.0,
+                    win_rate: 0.5,
+                },
+            ],
+        };
+        let gpu = SweepCandidateRow {
+            candidate_mode: true,
+            config_id: "cfg".to_string(),
+            max_drawdown_pct: 0.1,
+            overrides: BTreeMap::new(),
+            profit_factor: 1.5,
+            total_pnl: 200.0,
+            total_trades: 4,
+            by_symbol: Vec::new(),
+        };
+
+        let parity =
+            compare_cpu_replay_to_gpu_candidate(&cpu, &gpu, &ValidationSettings::default());
+
+        assert_eq!(parity.status, "pass");
+        assert_eq!(parity.comparison_scope, "aggregate_only");
+        assert!(parity.symbol_checks.is_empty());
+        assert!(parity
+            .symbol_evidence_note
+            .as_deref()
+            .unwrap()
+            .contains("aggregate parity only"));
+    }
+
+    #[test]
+    fn validate_candidate_uses_effective_config_for_train_parity_sweep() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("strategy_overrides.yaml");
+        let sweep_spec_path = dir.path().join("sweep.yaml");
+        let candles_dir = dir.path().join("candles");
+        let artifacts_dir = dir.path().join("artifacts");
+        let run_dir = artifacts_dir.join("2026-03-16").join("run_test");
+        let fake_backtester = dir.path().join("fake-backtester.sh");
+
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(&config_path, factory_root_config_yaml()).unwrap();
+        fs::write(
+            &sweep_spec_path,
+            "initial_balance: 10000\nlookback: 10\naxes: []\n",
+        )
+        .unwrap();
+        write_candles_fixture(&candles_dir.join("candles_1h.db"), "1h");
+        write_candles_fixture(&candles_dir.join("candles_15m.db"), "15m");
+        write_candles_fixture(&candles_dir.join("candles_30m.db"), "30m");
+        write_candles_fixture(&candles_dir.join("candles_3m.db"), "3m");
+        fs::write(candles_dir.join("funding_rates.db"), "").unwrap();
+        write_role_aware_fake_factory_backtester(&fake_backtester);
+
+        let raw_document = read_yaml_document(&config_path).unwrap();
+        let base_cfg = load_config_document_checked(&raw_document, None, false, None)
+            .map_err(|err| anyhow!(err))
+            .unwrap();
+        let coverage = compute_common_time_range(&base_cfg, &candles_dir).unwrap();
+        let validation_windows = resolve_validation_windows(&coverage, 0.25).unwrap();
+        let paths = ResolvedPaths {
+            project_dir: dir.path().to_path_buf(),
+            config_path: config_path.clone(),
+            settings_path: dir.path().join("factory_defaults.yaml"),
+            artifacts_root: artifacts_dir,
+            candles_db_dir: candles_dir.clone(),
+            funding_db_path: candles_dir.join("funding_rates.db"),
+            backtester_bin: fake_backtester,
+        };
+        let mut validation = ValidationSettings::default();
+        validation.parity_enforce = true;
+        let mut profile = FactoryProfileSettings::daily();
+        profile.sweep_spec = PathBuf::from("sweep.yaml");
+        let item = validate_candidate(CandidateValidationInput {
+            paths: &paths,
+            profile: &profile,
+            validation: &validation,
+            base_document: &raw_document,
+            base_cfg: &base_cfg,
+            run_dir: &run_dir,
+            validation_windows: &validation_windows,
+            shortlisted: ShortlistedCandidate {
+                shortlist_mode: ShortlistMode::Conservative,
+                rank: 8,
+                sweep: SweepCandidateRow {
+                    candidate_mode: true,
+                    config_id: "cfg-raw".to_string(),
+                    max_drawdown_pct: 0.12,
+                    overrides: BTreeMap::from([("trade.leverage".to_string(), 7.0)]),
+                    profit_factor: 1.8,
+                    total_pnl: 120.0,
+                    total_trades: 40,
+                    by_symbol: Vec::new(),
+                },
+            },
+            initial_balance: 10_000.0,
+        })
+        .unwrap();
+
+        assert!(!item.rejected);
+        assert_eq!(item.step4_parity.status, "pass");
+        assert_eq!(item.step4_parity.gpu_final_balance, 10_050.0);
+        assert_eq!(item.step4_parity.comparison_scope, "aggregate_only");
+        assert!(Path::new(&item.train_parity_sweep_report_path).is_file());
+    }
+
+    #[test]
     fn resolve_initial_balance_uses_live_equity_by_default() {
         let settings = BalanceSettings::default();
         let profile = FactoryProfileSettings::daily();
@@ -6379,16 +6846,16 @@ profiles:
             live_service: "openclaw-ai-quant-live-v8".to_string(),
         };
 
-        let event = promote_primary_live(
+        let event = promote_primary_live(LivePromotionInput {
             project_dir,
-            &artifacts_root,
-            &run_dir,
-            &validated,
-            &selected,
-            &paper_deployments,
-            &deployment,
-            &LiveGovernanceSettings::default(),
-        )
+            artifacts_root: &artifacts_root,
+            run_dir: &run_dir,
+            validated: &validated,
+            selected: &selected,
+            paper_deployments: &paper_deployments,
+            deployment: &deployment,
+            live_governance: &LiveGovernanceSettings::default(),
+        })
         .unwrap();
 
         assert_eq!(event.role, "primary");
@@ -6501,16 +6968,16 @@ profiles:
         };
         let live_governance = LiveGovernanceSettings::default();
 
-        let event = promote_primary_live(
+        let event = promote_primary_live(LivePromotionInput {
             project_dir,
-            &artifacts_root,
-            &run_dir,
-            &validated,
-            &selected,
-            &paper_deployments,
-            &deployment,
-            &live_governance,
-        )
+            artifacts_root: &artifacts_root,
+            run_dir: &run_dir,
+            validated: &validated,
+            selected: &selected,
+            paper_deployments: &paper_deployments,
+            deployment: &deployment,
+            live_governance: &live_governance,
+        })
         .unwrap();
 
         let state = load_live_governance_state(project_dir, &live_governance)
@@ -6603,16 +7070,16 @@ profiles:
         };
         write_live_governance_state(project_dir, &live_governance, &state).unwrap();
 
-        let event = promote_primary_live(
+        let event = promote_primary_live(LivePromotionInput {
             project_dir,
-            &artifacts_root,
-            &run_dir,
-            &validated,
-            &selected,
-            &paper_deployments,
-            &deployment,
-            &live_governance,
-        )
+            artifacts_root: &artifacts_root,
+            run_dir: &run_dir,
+            validated: &validated,
+            selected: &selected,
+            paper_deployments: &paper_deployments,
+            deployment: &deployment,
+            live_governance: &live_governance,
+        })
         .unwrap();
 
         assert_eq!(event.status, "live_small_stage_2");
@@ -6702,16 +7169,16 @@ profiles:
         };
         write_live_governance_state(project_dir, &live_governance, &state).unwrap();
 
-        let event = promote_primary_live(
+        let event = promote_primary_live(LivePromotionInput {
             project_dir,
-            &artifacts_root,
-            &run_dir,
-            &validated,
-            &selected,
-            &paper_deployments,
-            &deployment,
-            &live_governance,
-        )
+            artifacts_root: &artifacts_root,
+            run_dir: &run_dir,
+            validated: &validated,
+            selected: &selected,
+            paper_deployments: &paper_deployments,
+            deployment: &deployment,
+            live_governance: &live_governance,
+        })
         .unwrap();
 
         assert_eq!(event.status, "held");
