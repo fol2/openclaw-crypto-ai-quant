@@ -380,7 +380,7 @@ Factory validation now splits the common DB coverage into an explicit train
 window plus a trailing holdout window. Tune `validation.holdout_fraction` and
 `validation.holdout_splits` in `config/factory_defaults.yaml` when operators
 need a different holdout share or slice count. Sweep / TPE search and the
-dedicated CPU parity replay run on the train window, while candidate gating and
+train parity evidence run on the train window, while candidate gating and
 incumbent/challenger comparison use the holdout window only.
 Because the backtester treats `--start-ts` and `--end-ts` as inclusive, the
 factory now makes the train window end one timestamp before the holdout window
@@ -391,11 +391,17 @@ holdout window and summarise it in 3 equal holdout slices.
 Inspect `artifacts/.../run_metadata.json` and the candidate rows in
 `reports/report.json` for the resolved `coverage`, `train`, and `holdout`
 boundaries. Candidate rows now expose `train_parity_replay_report_path`,
-`holdout_summary_path`, and `holdout_median_daily_return` so operators can
-audit exactly which window produced each gate decision.
-`step4_parity.symbol_checks` now records per-symbol trade and PnL drift so the
-factory can fail closed on symbol-level parity regressions, not just aggregate
-balance drift.
+`train_parity_sweep_report_path`, `holdout_summary_path`, and
+`holdout_median_daily_return` so operators can audit exactly which window
+produced each gate decision.
+Train parity now compares a CPU replay against a dedicated single-combo train
+parity sweep built from the same lane-effective config rather than against the
+original shortlist sweep row.
+`step4_parity.comparison_scope` reports whether the evidence is
+`aggregate_only` or `aggregate_and_symbol`. When the GPU sweep artefact omits a
+per-symbol breakdown, `step4_parity.symbol_checks` stays empty and
+`step4_parity.symbol_evidence_note` explains why only aggregate parity was
+evaluated.
 
 The Hub Factory page accepts the canonical Rust run ID even when the artefact
 directory still carries a `run_` prefix, and it now surfaces `directory_name`,

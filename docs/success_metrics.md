@@ -50,9 +50,14 @@ Holdout promotion into `validated` still requires:
 
 Artefacts now record the resolved `coverage`, `train`, and `holdout` windows in
 `run_metadata.json`, candidate validation items, and incumbent/challenger
-performance summaries. Candidate parity evidence also records
-`step4_parity.symbol_checks` so operators can see which symbol drifted and by
-how much.
+performance summaries. Candidate parity evidence now records both
+`train_parity_replay_report_path` and `train_parity_sweep_report_path`, plus
+the `step4_parity.comparison_scope` used for the decision.
+When the GPU sweep artefact includes per-symbol evidence,
+`step4_parity.symbol_checks` records the trade and PnL drift by symbol. When it
+does not, `comparison_scope` falls back to `aggregate_only`,
+`step4_parity.symbol_checks` stays empty, and `step4_parity.symbol_evidence_note`
+explains why the gate used aggregate parity only.
 
 ## Role-Governed Paper Replacement
 
