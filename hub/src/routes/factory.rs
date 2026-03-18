@@ -173,6 +173,10 @@ fn should_replace_run_summary(existing: &Value, candidate: &Value) -> bool {
 }
 
 fn selection_summary(selection: &Value) -> Value {
+    let role_candidates_by_role = selection["role_candidates_by_role"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let selected_candidates_by_role = selection["selected_candidates_by_role"]
         .as_array()
         .cloned()
@@ -196,6 +200,8 @@ fn selection_summary(selection: &Value) -> Value {
         "promotion_stage": selection["promotion_stage"],
         "step5_gate_status": selection["step5_gate_status"],
         "deployed": selection["deployed"],
+        "role_candidate_count": role_candidates_by_role.len(),
+        "role_candidates_by_role": role_candidates_by_role,
         "selected_count": selected_candidates_by_role.len(),
         "selected_candidates_by_role": selected_candidates_by_role,
         "selected_targets": selected_targets,
@@ -335,6 +341,9 @@ async fn list_runs(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>
                     .as_str()
                     .unwrap_or("unknown"),
                 "candidate_count": candidate_count_from_sources(report.as_ref(), &metadata),
+                "role_candidate_count": selection.as_ref()
+                    .and_then(|value| value["role_candidates_by_role"].as_array())
+                    .map(|items| items.len()),
                 "selected_count": selection.as_ref()
                     .and_then(|value| value["selected_candidates_by_role"].as_array())
                     .map(|items| items.len()),
@@ -848,7 +857,9 @@ mod tests {
     #[tokio::test]
     async fn list_runs_ignores_malformed_optional_reports_per_row() {
         let dir = tempdir().unwrap();
-        let run_dir = dir.path().join("artifacts/2026-03-15/run_daily_20260315T010203Z_001");
+        let run_dir = dir
+            .path()
+            .join("artifacts/2026-03-15/run_daily_20260315T010203Z_001");
         std::fs::create_dir_all(run_dir.join("reports")).unwrap();
         std::fs::write(
             run_dir.join("run_metadata.json"),
@@ -987,7 +998,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        fs::write(broken_run_dir.join("reports/report.json"), b"{not valid json").unwrap();
+        fs::write(
+            broken_run_dir.join("reports/report.json"),
+            b"{not valid json",
+        )
+        .unwrap();
         fs::write(
             broken_run_dir.join("reports/selection.json"),
             b"{still not valid json",

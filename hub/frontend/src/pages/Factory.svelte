@@ -34,6 +34,7 @@
     has_report?: boolean;
     profile?: string;
     candidate_count?: number | null;
+    role_candidate_count?: number | null;
     selected_count?: number | null;
     selection_stage?: string | null;
     deploy_stage?: string | null;
@@ -45,6 +46,7 @@
     promotion_stage?: string;
     step5_gate_status?: string;
     deployed?: boolean;
+    role_candidate_count?: number;
     selected_count?: number;
     challenge_count?: number;
     deployment_count?: number;
@@ -409,6 +411,7 @@
                 </div>
                 <div class="run-meta">
                   <span>candidates: <strong>{formatCount(run.candidate_count)}</strong></span>
+                  <span>role candidates: <strong>{formatCount(run.role_candidate_count)}</strong></span>
                   <span>selected: <strong>{formatCount(run.selected_count)}</strong></span>
                   <span>report: <strong>{run.has_report ? 'yes' : 'no'}</strong></span>
                 </div>
@@ -460,6 +463,14 @@
               <div>
                 <div class="field-label">Step 5 gate</div>
                 <div class="mono">{humanise(selectedRun.selection_summary.step5_gate_status)}</div>
+              </div>
+              <div>
+                <div class="field-label">Role candidates</div>
+                <div class="mono">{formatCount(selectedRun.selection_summary.role_candidate_count)}</div>
+              </div>
+              <div>
+                <div class="field-label">Selected</div>
+                <div class="mono">{formatCount(selectedRun.selection_summary.selected_count)}</div>
               </div>
             </div>
           {/if}

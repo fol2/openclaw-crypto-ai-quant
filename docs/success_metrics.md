@@ -78,10 +78,15 @@ that case the report surfaces `selected_partial` / `paper_partial` rather than
 claiming a full rollout.
 
 Selection artefacts now distinguish between an actual deploy selection and a
-preview of the strongest blocked candidate:
+preview of the strongest blocked candidate, plus the pre-incumbent role
+challengers:
 
+- `deployable_candidates`: configs that passed the validation suite
+- `role_candidates_by_role`: best challengers per role before incumbent compare
 - `selected`: the selected deploy candidate summary, or `null` when no role was
   actually selected
+- `selected_candidates_by_role`: actual deploy targets after incumbent and
+  materiality checks
 - `best_candidate_preview`: the strongest blocked candidate summary for audit
   context only
 
