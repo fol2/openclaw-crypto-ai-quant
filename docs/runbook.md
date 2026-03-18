@@ -420,6 +420,12 @@ original shortlist sweep row.
 per-symbol breakdown, `step4_parity.symbol_checks` stays empty and
 `step4_parity.symbol_evidence_note` explains why only aggregate parity was
 evaluated.
+`reports/selection.json` now keeps `selected` strictly for an actually selected
+deploy candidate. When the run is blocked before any role selection succeeds,
+`selected` is `null` and `best_candidate_preview` carries the best blocked
+candidate summary instead. Treat `best_candidate_preview` as diagnostic context
+only: deploy decisions are made from the deployable set after validation, not
+directly from the shortlist or raw TPE winner.
 
 The Hub Factory page accepts the canonical Rust run ID even when the artefact
 directory still carries a `run_` prefix, and it now surfaces `directory_name`,
