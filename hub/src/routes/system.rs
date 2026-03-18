@@ -35,6 +35,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 const ALLOWED_SERVICES: &[&str] = &[
     "openclaw-ai-quant-hub",
     "openclaw-ai-quant-live-v8",
+    "openclaw-ai-quant-assist-v8",
     "openclaw-ai-quant-trader-v8-livepaper",
     "openclaw-ai-quant-trader-v8-paper1",
     "openclaw-ai-quant-trader-v8-paper2",
