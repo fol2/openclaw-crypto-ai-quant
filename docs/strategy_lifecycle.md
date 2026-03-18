@@ -123,6 +123,13 @@ replacement is allowed. When a challenger fails that gate, the deployment
 decision is recorded as `incumbent_holds` and the current paper target remains
 in place.
 
+Selection artefacts now distinguish between:
+
+- `deployable_candidates`: full-validation passers
+- `role_candidates_by_role`: best challengers per role before incumbent compare
+- `selected` / `selected_candidates_by_role`: actual deploy targets after the
+  incumbent/materiality gate
+
 The release path no longer requires every secondary lane to have a replacement.
 If only the `primary` role has a deployable challenger, the cycle can still
 advance with `selection_stage: selected_partial` and `deploy_stage:

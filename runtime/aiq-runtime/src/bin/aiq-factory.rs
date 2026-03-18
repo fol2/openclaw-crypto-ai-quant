@@ -642,6 +642,9 @@ struct SelectionReport {
     evidence_bundle_paths: SelectionEvidencePaths,
     selected: Option<ValidationItem>,
     best_candidate_preview: Option<ValidationItem>,
+    deployable_candidates: Vec<ValidationItem>,
+    role_candidates: Vec<ValidationItem>,
+    role_candidates_by_role: Vec<SelectionCandidate>,
     selected_candidates: Vec<ValidationItem>,
     selected_candidates_by_role: Vec<SelectionCandidate>,
     selected_targets: Vec<PaperTargetSummary>,
@@ -3121,7 +3124,12 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         promotion_requested,
         selection_warnings,
     } = input;
-    let selected_items = selected
+    let deployable_items = validated
+        .iter()
+        .filter(|item| !item.rejected)
+        .cloned()
+        .collect::<Vec<_>>();
+    let role_candidate_items = selected
         .iter()
         .filter_map(|role| {
             validated
@@ -3130,7 +3138,30 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         })
         .cloned()
         .collect::<Vec<_>>();
-    let selected_primary = selected
+    let selected_targets_by_role = selected
+        .iter()
+        .filter(|role| {
+            deployments.iter().any(|event| {
+                event.role == role.role
+                    && event.config_id == role.config_id
+                    && matches!(
+                        event.status.as_str(),
+                        "applied" | "already_applied" | "staged_only"
+                    )
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_items = selected_targets_by_role
+        .iter()
+        .filter_map(|role| {
+            validated
+                .iter()
+                .find(|item| item.config_id == role.config_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_primary = selected_targets_by_role
         .iter()
         .find(|item| item.role == "primary")
         .and_then(|role| {
@@ -3141,8 +3172,10 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         .cloned()
         .or_else(|| selected_items.first().cloned());
     let best_candidate_preview = best_overall_candidate(validated);
+    let role_candidate_count = selected.len();
+    let selected_target_count = selected_targets_by_role.len();
     let active_targets = active_paper_targets(selection);
-    let partial_selection = selected.len() < active_targets.len();
+    let partial_selected_targets = selected_target_count < active_targets.len();
     let applied_count = deployments
         .iter()
         .filter(|item| item.status == "applied")
@@ -3155,6 +3188,7 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         .iter()
         .filter(|item| item.status == "incumbent_holds")
         .count();
+    let any_selected_targets = selected_target_count > 0;
     let deployment_failed = selection_warnings
         .iter()
         .any(|warning| warning.starts_with("paper_deploy_failed:"));
@@ -3166,11 +3200,15 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         "blocked"
     } else if deployment_failed {
         "failed"
-    } else if applied_count > 0 && partial_selection {
+    } else if any_selected_targets && partial_selected_targets {
         "paper_partial"
     } else if applied_count > 0 {
         "paper_applied"
-    } else if same_config_count == active_targets.len() && !active_targets.is_empty() {
+    } else if any_selected_targets
+        && same_config_count == selected_target_count
+        && selected_target_count == active_targets.len()
+        && !active_targets.is_empty()
+    {
         "paper_steady"
     } else if incumbent_hold_count > 0 {
         "challenger_blocked"
@@ -3203,16 +3241,21 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         selection_policy: DEFAULT_SELECTION_POLICY,
         selection_stage: if blocked || deployment_failed || promotion_failed {
             "blocked"
-        } else if partial_selection {
+        } else if selected_target_count == 0 && role_candidate_count > 0 {
+            "challenger_blocked"
+        } else if partial_selected_targets {
             "selected_partial"
         } else {
             "selected"
         }
         .to_string(),
         selection_warnings,
-        step5_gate_status: if blocked || deployment_failed {
+        step5_gate_status: if blocked
+            || deployment_failed
+            || (!any_selected_targets && role_candidate_count > 0)
+        {
             "blocked"
-        } else if partial_selection {
+        } else if partial_selected_targets {
             "partial"
         } else {
             "passed"
@@ -3244,8 +3287,11 @@ fn build_selection_report(input: SelectionReportInput<'_>) -> Result<SelectionRe
         },
         selected: selected_primary,
         best_candidate_preview,
+        deployable_candidates: deployable_items,
+        role_candidates: role_candidate_items,
+        role_candidates_by_role: selected.to_vec(),
         selected_candidates: selected_items,
-        selected_candidates_by_role: selected.to_vec(),
+        selected_candidates_by_role: selected_targets_by_role,
         selected_targets: active_targets
             .iter()
             .map(|target| PaperTargetSummary {
@@ -5057,7 +5103,15 @@ fn build_selection_markdown(report: &SelectionReport) -> String {
         }
         out.push('\n');
     }
-    out.push_str("| Role | Config ID | Service |\n|---|---|---|\n");
+    out.push_str("| Role | Challenger | Service |\n|---|---|---|\n");
+    for item in &report.role_candidates_by_role {
+        out.push_str(&format!(
+            "| {} | `{}` | `{}` |\n",
+            item.role, item.config_id, item.service
+        ));
+    }
+    out.push('\n');
+    out.push_str("| Role | Selected for deploy | Service |\n|---|---|---|\n");
     for item in &report.selected_candidates_by_role {
         out.push_str(&format!(
             "| {} | `{}` | `{}` |\n",
@@ -6519,6 +6573,189 @@ profiles:
         );
         assert_eq!(report.selection_stage, "blocked");
         assert_eq!(report.step5_gate_status, "blocked");
+    }
+
+    #[test]
+    fn challenger_blocked_report_keeps_role_candidates_out_of_selected_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let selection = SelectionSettings::default();
+        let validated = vec![validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3)];
+        let role_candidates = select_roles(&validated, &selection);
+        let challenges = vec![DeploymentChallenge {
+            role: "primary".to_string(),
+            slot: 1,
+            service: "svc".to_string(),
+            target_yaml_path: "/tmp/target.yaml".to_string(),
+            source_config_path: "/tmp/source.yaml".to_string(),
+            decision: "incumbent_holds".to_string(),
+            reason: "current deployed config remains stronger on the role comparator".to_string(),
+            incumbent: Some(performance_summary("cfg-incumbent", 120.0, 1.3, 0.2)),
+            challenger: performance_summary("cfg-primary", 100.0, 1.2, 0.3),
+        }];
+        let deployments = vec![DeploymentEvent {
+            role: "primary".to_string(),
+            slot: 1,
+            source_config_path: "/tmp/source.yaml".to_string(),
+            config_id: "cfg-primary".to_string(),
+            config_sha256: "cfg-primary".to_string(),
+            promoted_config_path: String::new(),
+            target_yaml_path: "/tmp/target.yaml".to_string(),
+            service: "svc".to_string(),
+            soak_marker_path: None,
+            restarted_service: false,
+            status: "incumbent_holds".to_string(),
+        }];
+
+        let report = build_selection_report(SelectionReportInput {
+            run_id: "run",
+            run_dir: &run_dir,
+            effective_config_id: "effective",
+            effective_config_path: Path::new("/tmp/effective.yaml"),
+            validated: &validated,
+            selected: &role_candidates,
+            selection: &selection,
+            base_cfg: &StrategyConfig::default(),
+            blocked: false,
+            blocked_reason: String::new(),
+            challenges,
+            deployments,
+            paper_promotion_gate: None,
+            live_promotion: None,
+            promotion_requested: false,
+            selection_warnings: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(report.selected.is_none());
+        assert!(report.selected_candidates.is_empty());
+        assert!(report.selected_candidates_by_role.is_empty());
+        assert_eq!(report.role_candidates.len(), 1);
+        assert_eq!(report.role_candidates_by_role.len(), 1);
+        assert_eq!(report.role_candidates_by_role[0].config_id, "cfg-primary");
+        assert_eq!(report.selection_stage, "challenger_blocked");
+        assert_eq!(report.deploy_stage, "challenger_blocked");
+        assert_eq!(report.step5_gate_status, "blocked");
+    }
+
+    #[test]
+    fn mixed_incumbent_holds_and_selected_targets_report_partial_rollout() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let selection = SelectionSettings::default();
+        let validated = vec![
+            validation_item("efficient", "cfg-primary", 100.0, 1.2, 0.3),
+            validation_item("growth", "cfg-fallback", 50.0, 1.8, 0.2),
+        ];
+        let role_candidates = vec![
+            SelectionCandidate {
+                role: "primary".to_string(),
+                slot: 1,
+                service: "svc-primary".to_string(),
+                source: "promotion_roles".to_string(),
+                selected: true,
+                config_id: "cfg-primary".to_string(),
+            },
+            SelectionCandidate {
+                role: "fallback".to_string(),
+                slot: 2,
+                service: "svc-fallback".to_string(),
+                source: "promotion_roles".to_string(),
+                selected: true,
+                config_id: "cfg-fallback".to_string(),
+            },
+        ];
+        let challenges = vec![
+            DeploymentChallenge {
+                role: "primary".to_string(),
+                slot: 1,
+                service: "svc-primary".to_string(),
+                target_yaml_path: "/tmp/primary.yaml".to_string(),
+                source_config_path: "/tmp/primary-source.yaml".to_string(),
+                decision: "challenger_wins".to_string(),
+                reason: "challenger outranks current deployed config on the role comparator"
+                    .to_string(),
+                incumbent: Some(performance_summary("cfg-incumbent-primary", 80.0, 1.1, 0.4)),
+                challenger: performance_summary("cfg-primary", 100.0, 1.2, 0.3),
+            },
+            DeploymentChallenge {
+                role: "fallback".to_string(),
+                slot: 2,
+                service: "svc-fallback".to_string(),
+                target_yaml_path: "/tmp/fallback.yaml".to_string(),
+                source_config_path: "/tmp/fallback-source.yaml".to_string(),
+                decision: "incumbent_holds".to_string(),
+                reason: "current deployed config remains stronger on the role comparator"
+                    .to_string(),
+                incumbent: Some(performance_summary(
+                    "cfg-incumbent-fallback",
+                    60.0,
+                    2.0,
+                    0.1,
+                )),
+                challenger: performance_summary("cfg-fallback", 50.0, 1.8, 0.2),
+            },
+        ];
+        let deployments = vec![
+            DeploymentEvent {
+                role: "primary".to_string(),
+                slot: 1,
+                source_config_path: "/tmp/primary-source.yaml".to_string(),
+                config_id: "cfg-primary".to_string(),
+                config_sha256: "cfg-primary".to_string(),
+                promoted_config_path: "/tmp/promoted-primary.yaml".to_string(),
+                target_yaml_path: "/tmp/primary.yaml".to_string(),
+                service: "svc-primary".to_string(),
+                soak_marker_path: None,
+                restarted_service: false,
+                status: "applied".to_string(),
+            },
+            DeploymentEvent {
+                role: "fallback".to_string(),
+                slot: 2,
+                source_config_path: "/tmp/fallback-source.yaml".to_string(),
+                config_id: "cfg-fallback".to_string(),
+                config_sha256: "cfg-fallback".to_string(),
+                promoted_config_path: String::new(),
+                target_yaml_path: "/tmp/fallback.yaml".to_string(),
+                service: "svc-fallback".to_string(),
+                soak_marker_path: None,
+                restarted_service: false,
+                status: "incumbent_holds".to_string(),
+            },
+        ];
+
+        let report = build_selection_report(SelectionReportInput {
+            run_id: "run",
+            run_dir: &run_dir,
+            effective_config_id: "effective",
+            effective_config_path: Path::new("/tmp/effective.yaml"),
+            validated: &validated,
+            selected: &role_candidates,
+            selection: &selection,
+            base_cfg: &StrategyConfig::default(),
+            blocked: false,
+            blocked_reason: String::new(),
+            challenges,
+            deployments,
+            paper_promotion_gate: None,
+            live_promotion: None,
+            promotion_requested: false,
+            selection_warnings: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(report.selection_stage, "selected_partial");
+        assert_eq!(report.deploy_stage, "paper_partial");
+        assert_eq!(report.step5_gate_status, "partial");
+        assert_eq!(report.role_candidates_by_role.len(), 2);
+        assert_eq!(report.selected_candidates_by_role.len(), 1);
+        assert_eq!(
+            report.selected_candidates_by_role[0].config_id,
+            "cfg-primary"
+        );
     }
 
     #[test]
