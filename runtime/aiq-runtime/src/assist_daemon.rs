@@ -382,6 +382,13 @@ fn persist_signal_rows(
 
     let mut count = 0usize;
     for plan in &cycle_report.plans {
+        // Only persist entry signals (symbols without open positions).
+        // Skip open_position / open_position_staged / open_position_preview phases
+        // — those just echo the existing holding direction and aren't actionable.
+        if plan.phase.starts_with("open_position") {
+            continue;
+        }
+
         let signal = if plan.side == "BUY" {
             "BUY"
         } else if plan.side == "SELL" {
