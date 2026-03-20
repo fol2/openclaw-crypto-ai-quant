@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bt_core::candle::{CandleData, OhlcvBar};
+use bt_core::json_metrics::deserialize_profit_factor;
 use bt_core::{engine, report};
 use serde::Deserialize;
 
@@ -33,6 +34,7 @@ struct ExpectedGpuSweepResult {
     total_trades: u32,
     total_wins: u32,
     win_rate: f64,
+    #[serde(deserialize_with = "deserialize_profit_factor")]
     profit_factor: f64,
     max_drawdown_pct: f64,
 }

@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use bt_core::json_metrics::profit_factor_json_value;
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -2214,7 +2215,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "overrides": overrides,
                         "total_pnl": r.total_pnl,
                         "total_trades": r.total_trades,
-                        "profit_factor": r.profit_factor,
+                        "profit_factor": profit_factor_json_value(r.profit_factor)?,
                         "max_drawdown_pct": r.max_drawdown_pct,
                         "candidate_mode": true,
                     })
@@ -2227,7 +2228,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "total_trades": r.total_trades,
                         "total_wins": r.total_wins,
                         "win_rate": r.win_rate,
-                        "profit_factor": r.profit_factor,
+                        "profit_factor": profit_factor_json_value(r.profit_factor)?,
                         "max_drawdown_pct": r.max_drawdown_pct,
                         "overrides": overrides,
                     })
@@ -2295,7 +2296,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "overrides": overrides,
                         "total_pnl": r.total_pnl,
                         "total_trades": r.total_trades,
-                        "profit_factor": r.profit_factor,
+                        "profit_factor": profit_factor_json_value(r.profit_factor)?,
                         "max_drawdown_pct": r.max_drawdown_pct,
                         "candidate_mode": true,
                     })
@@ -2307,7 +2308,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "final_balance": r.final_balance,
                         "total_trades": r.total_trades,
                         "win_rate": r.win_rate,
-                        "profit_factor": r.profit_factor,
+                        "profit_factor": profit_factor_json_value(r.profit_factor)?,
                         "max_drawdown_pct": r.max_drawdown_pct,
                         "overrides": overrides,
                     })
@@ -2381,7 +2382,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "overrides": obj.get("overrides").cloned().unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
                         "total_pnl": r.report.total_pnl,
                     "total_trades": r.report.total_trades,
-                    "profit_factor": r.report.profit_factor,
+                    "profit_factor": profit_factor_json_value(r.report.profit_factor)?,
                     "max_drawdown_pct": r.report.max_drawdown_pct,
                     "candidate_mode": true,
                 })

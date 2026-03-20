@@ -412,6 +412,11 @@ boundaries. Candidate rows now expose `train_parity_replay_report_path`,
 `train_parity_sweep_report_path`, `holdout_summary_path`, and
 `holdout_median_daily_return` so operators can audit exactly which window
 produced each gate decision.
+Backtester replay and sweep JSON artefacts now serialise non-finite
+`profit_factor` as the string token `"Infinity"` instead of emitting JSON
+`null`. Factory readers remain backward-compatible with older artefacts that
+still contain `profit_factor: null`, so historical holdout and parity evidence
+can still be inspected after the upgrade.
 Train parity now compares a CPU replay against a dedicated single-combo train
 parity sweep built from the same lane-effective config rather than against the
 original shortlist sweep row.
@@ -427,6 +432,11 @@ evaluated.
   incumbent/materiality comparison
 - `selected` / `selected_candidates_by_role`: the configs actually selected as
   deploy targets after incumbent/materiality checks
+
+If a historical run failed while parsing a replay or sweep report with
+`invalid type: null, expected f64`, treat that as a legacy `profit_factor`
+serialisation issue. Current factory builds accept that older artefact shape,
+while newly emitted artefacts record the explicit `"Infinity"` token.
 
 When the run is blocked before any role selection succeeds, `selected` is
 `null` and `best_candidate_preview` carries the best blocked candidate summary

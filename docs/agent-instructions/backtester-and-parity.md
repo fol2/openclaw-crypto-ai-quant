@@ -40,6 +40,9 @@ cargo run --manifest-path backtester/Cargo.toml -p bt-cli -- dump-indicators
 - For strict CPU/GPU parity on factory-owned sweep flows, prefer
   `--parity-mode identical-symbol-universe` so symbol-cap truncation does not
   create noisy mismatches.
+- Replay and sweep JSON artefacts serialise non-finite `profit_factor` as the
+  string token `"Infinity"`. Factory and parity readers must stay compatible
+  with legacy artefacts that still encode that state as JSON `null`.
 - When changing factory validation or artefact contracts, add or update an
   end-to-end test that asserts `run_metadata.json`, candidate validation rows,
   and referenced holdout/parity artefacts stay consistent.

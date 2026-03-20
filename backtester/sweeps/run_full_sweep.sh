@@ -165,12 +165,19 @@ for IV in $INTERVALS; do
     if [[ -f "$OUTFILE" ]]; then
         # First line = best (already sorted by PnL desc)
         HEAD=$(head -1 "$OUTFILE" 2>/dev/null || echo "{}")
-        PNL="$(echo "$HEAD" | jq -r '[
-            "PnL=" + ((.total_pnl // 0) | tonumber | tostring),
-            "trades=" + ((.total_trades // 0) | tostring),
-            "WR=" + ((((.win_rate // 0) | tonumber) * 100) | tostring) + "%",
-            "PF=" + ((.profit_factor // 0) | tonumber | tostring)
-        ] | join(", ")' 2>/dev/null || echo "parse error")"
+        PNL="$(echo "$HEAD" | jq -r '
+            def metric($value):
+                if $value == null then "0"
+                elif ($value | type) == "number" then ($value | tostring)
+                elif ($value | type) == "string" then $value
+                else "0"
+                end;
+            [
+                "PnL=" + metric(.total_pnl),
+                "trades=" + ((.total_trades // 0) | tostring),
+                "WR=" + ((((.win_rate // 0) | tonumber) * 100) | tostring) + "%",
+                "PF=" + metric(.profit_factor)
+            ] | join(", ")' 2>/dev/null || echo "parse error")"
         echo "  ${IV}: ${PNL}"
     fi
 done

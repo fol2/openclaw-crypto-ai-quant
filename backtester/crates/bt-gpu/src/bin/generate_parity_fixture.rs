@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use bt_core::candle::{CandleData, OhlcvBar};
 use bt_core::config::StrategyConfig;
+use bt_core::json_metrics::serialize_profit_factor;
 use bt_core::sweep::SweepSpec;
 
 #[derive(Parser, Debug)]
@@ -65,6 +66,7 @@ struct ExpectedGpuSweepResult {
     total_trades: u32,
     total_wins: u32,
     win_rate: f64,
+    #[serde(serialize_with = "serialize_profit_factor")]
     profit_factor: f64,
     max_drawdown_pct: f64,
 }

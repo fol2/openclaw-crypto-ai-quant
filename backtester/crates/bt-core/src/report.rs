@@ -32,6 +32,7 @@ pub struct SimReport {
     pub total_wins: u32,
     pub total_losses: u32,
     pub win_rate: f64,
+    #[serde(serialize_with = "crate::json_metrics::serialize_profit_factor")]
     pub profit_factor: f64,
     pub sharpe_ratio: f64,
     pub max_drawdown_usd: f64,
@@ -1025,6 +1026,32 @@ mod tests {
             include_equity_curve: false,
         });
         assert!(report.profit_factor.is_infinite());
+    }
+
+    #[test]
+    fn test_profit_factor_no_losses_serialises_as_infinity_token() {
+        let trades = vec![make_close(
+            "ETH",
+            10.0,
+            "TP",
+            Confidence::High,
+            "CLOSE_LONG",
+        )];
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10010.0,
+            config_id: "json_no_losses",
+            include_trades: false,
+            include_equity_curve: false,
+        });
+
+        let json = serde_json::to_string(&report).expect("report should serialise to JSON");
+
+        assert!(json.contains(r#""profit_factor":"Infinity""#));
     }
 
     #[test]

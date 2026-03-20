@@ -4,6 +4,7 @@ use bt_core::config::{
     load_config_document_checked, materialise_runtime_document, strategy_config_fingerprint_sha256,
     strategy_config_to_yaml_value, StrategyConfig,
 };
+use bt_core::json_metrics::{deserialize_profit_factor, serialize_profit_factor};
 use bt_core::sweep::apply_one_pub;
 use bt_data::sqlite_loader::query_time_range_multi;
 use chrono::{SecondsFormat, Utc};
@@ -418,6 +419,10 @@ struct SweepCandidateRow {
     config_id: String,
     max_drawdown_pct: f64,
     overrides: BTreeMap<String, f64>,
+    #[serde(
+        serialize_with = "serialize_profit_factor",
+        deserialize_with = "deserialize_profit_factor"
+    )]
     profit_factor: f64,
     total_pnl: f64,
     total_trades: u32,
@@ -460,6 +465,10 @@ struct ReplaySummary {
     final_balance: f64,
     total_pnl: f64,
     total_trades: u32,
+    #[serde(
+        serialize_with = "serialize_profit_factor",
+        deserialize_with = "deserialize_profit_factor"
+    )]
     profit_factor: f64,
     max_drawdown_pct: f64,
     total_fees: f64,
@@ -554,6 +563,7 @@ struct ValidationItem {
     initial_balance: f64,
     max_drawdown_pct: f64,
     pipeline_stage: String,
+    #[serde(serialize_with = "serialize_profit_factor")]
     profit_factor: f64,
     rank: usize,
     replay_report_path: String,
@@ -694,6 +704,7 @@ struct PerformanceSummary {
     final_balance: f64,
     initial_balance: f64,
     max_drawdown_pct: f64,
+    #[serde(serialize_with = "serialize_profit_factor")]
     profit_factor: f64,
     total_pnl: f64,
     total_trades: u32,
@@ -781,6 +792,7 @@ struct LiveGovernanceState {
 
 #[derive(Debug, Clone, Serialize)]
 struct LiveGovernanceSummary {
+    #[serde(serialize_with = "serialize_profit_factor")]
     rolling_profit_factor: f64,
     rolling_close_trades: u32,
     max_drawdown_pct: f64,
@@ -800,6 +812,7 @@ struct PaperPromotionGate {
     last_trade_ts: Option<String>,
     runtime_hours: f64,
     close_trades: u32,
+    #[serde(serialize_with = "serialize_profit_factor")]
     profit_factor: f64,
     max_drawdown_pct: f64,
     median_slippage_bps: f64,
@@ -5613,6 +5626,48 @@ esac
         fs::set_permissions(path, perms).unwrap();
     }
 
+    fn write_null_profit_factor_backtester(path: &Path) {
+        let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="$1"
+shift
+
+output=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$output")"
+
+case "$cmd" in
+  replay)
+    cat >"$output" <<'JSON'
+{"initial_balance":10000.0,"final_balance":10005.0,"total_pnl":5.0,"total_trades":2,"profit_factor":null,"max_drawdown_pct":0.01,"total_fees":0.1,"by_symbol":[{"symbol":"BTC","trades":2,"pnl":5.0,"win_rate":1.0}]}
+JSON
+    ;;
+  *)
+    echo "unsupported command: $cmd" >&2
+    exit 1
+    ;;
+esac
+"#;
+
+        fs::write(path, script).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -5987,6 +6042,84 @@ esac
             rejected: false,
             reject_reason: String::new(),
         }
+    }
+
+    #[test]
+    fn replay_summary_deserialises_legacy_null_profit_factor_as_infinity() {
+        let report: ReplaySummary = serde_json::from_str(
+            r#"{
+  "initial_balance": 10000.0,
+  "final_balance": 10005.0,
+  "total_pnl": 5.0,
+  "total_trades": 2,
+  "profit_factor": null,
+  "max_drawdown_pct": 0.01,
+  "total_fees": 0.1,
+  "by_symbol": [{"symbol":"BTC","trades":2,"pnl":5.0,"win_rate":1.0}]
+}"#,
+        )
+        .unwrap();
+
+        assert!(report.profit_factor.is_infinite());
+        assert!(report.profit_factor.is_sign_positive());
+    }
+
+    #[test]
+    fn validation_item_serialises_infinite_profit_factor_as_string_token() {
+        let item = validation_item("efficient", "cfg-infinite", 50.0, f64::INFINITY, 0.1);
+
+        let value = serde_json::to_value(&item).unwrap();
+
+        assert_eq!(
+            value.get("profit_factor"),
+            Some(&Value::String("Infinity".to_string()))
+        );
+    }
+
+    #[test]
+    fn build_holdout_summary_accepts_legacy_null_profit_factor_reports() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("strategy_overrides.yaml");
+        let candles_dir = dir.path().join("candles");
+        let fake_backtester = dir.path().join("fake-backtester.sh");
+        let holdout_dir = dir.path().join("holdout");
+
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::write(&config_path, config_yaml("30m")).unwrap();
+        write_candles_fixture(&candles_dir.join("candles_30m.db"), "30m");
+        write_candles_fixture(&candles_dir.join("candles_3m.db"), "3m");
+        fs::write(candles_dir.join("funding_rates.db"), "").unwrap();
+        write_null_profit_factor_backtester(&fake_backtester);
+
+        let paths = ResolvedPaths {
+            project_dir: dir.path().to_path_buf(),
+            config_path: config_path.clone(),
+            settings_path: dir.path().join("factory_defaults.yaml"),
+            artifacts_root: dir.path().join("artifacts"),
+            candles_db_dir: candles_dir.clone(),
+            funding_db_path: candles_dir.join("funding_rates.db"),
+            backtester_bin: fake_backtester,
+        };
+        let db_window = ResolvedDbWindow {
+            main_interval: "30m".to_string(),
+            entry_interval: "3m".to_string(),
+            exit_interval: "3m".to_string(),
+            main_db: candles_dir.join("candles_30m.db"),
+            entry_db: candles_dir.join("candles_3m.db"),
+            exit_db: candles_dir.join("candles_3m.db"),
+            start_ts_ms: 1,
+            end_ts_ms: 10,
+        };
+
+        let summary =
+            build_holdout_summary(&paths, &config_path, 10_000.0, &db_window, 2, &holdout_dir)
+                .unwrap();
+
+        assert_eq!(summary.split_count, 2);
+        assert_eq!(summary.splits.len(), 2);
+        assert!(holdout_dir.join("split1.replay.json").exists());
+        assert!(holdout_dir.join("split2.replay.json").exists());
     }
 
     fn performance_summary(config_id: &str, pnl: f64, pf: f64, dd: f64) -> PerformanceSummary {
