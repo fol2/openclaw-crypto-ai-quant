@@ -207,7 +207,10 @@
 
   function fmtNum(n: any, d = 2): string {
     if (n == null || isNaN(n)) return '—';
-    return Number(n).toFixed(d);
+    const numeric = Number(n);
+    if (numeric === Number.POSITIVE_INFINITY) return '∞';
+    if (numeric === Number.NEGATIVE_INFINITY) return '-∞';
+    return numeric.toFixed(d);
   }
 
   function getNetPnl(result: any): number | null {

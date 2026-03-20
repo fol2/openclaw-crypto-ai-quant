@@ -10,6 +10,7 @@ pub mod execution_contract;
 pub mod exits;
 pub mod indicators;
 pub mod init_state;
+pub mod json_metrics;
 pub mod kernel_entries;
 pub mod kernel_exits;
 pub mod position;

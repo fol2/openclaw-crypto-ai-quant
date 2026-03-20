@@ -121,7 +121,16 @@
   }
 
   function formatNumber(value: unknown, digits = 2) {
-    return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—';
+    const numeric =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() !== ''
+          ? Number(value)
+          : Number.NaN;
+    if (Number.isFinite(numeric)) return numeric.toFixed(digits);
+    if (numeric === Number.POSITIVE_INFINITY) return '∞';
+    if (numeric === Number.NEGATIVE_INFINITY) return '-∞';
+    return '—';
   }
 
   function formatPercent(value: unknown, digits = 2) {

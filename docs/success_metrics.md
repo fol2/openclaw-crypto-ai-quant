@@ -53,6 +53,9 @@ Artefacts now record the resolved `coverage`, `train`, and `holdout` windows in
 performance summaries. Candidate parity evidence now records both
 `train_parity_replay_report_path` and `train_parity_sweep_report_path`, plus
 the `step4_parity.comparison_scope` used for the decision.
+Replay and sweep artefacts serialise non-finite `profit_factor` as the string
+token `"Infinity"`. Factory readers also accept legacy artefacts where older
+serialisers wrote that same state as JSON `null`.
 When the GPU sweep artefact includes per-symbol evidence,
 `step4_parity.symbol_checks` records the trade and PnL drift by symbol. When it
 does not, `comparison_scope` falls back to `aggregate_only`,

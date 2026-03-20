@@ -93,6 +93,9 @@ that holdout into 3 equal slices.
 
 **Source**: validation pipeline output, `run_metadata.json`, holdout summaries,
 the train-window parity replay artefact, and the train parity sweep artefact.
+Those artefacts serialise non-finite `profit_factor` as the string token
+`"Infinity"`. Factory readers also accept legacy artefacts that still encode
+that same state as JSON `null`.
 
 ### candidate → retired
 
@@ -136,6 +139,8 @@ advance with `selection_stage: selected_partial` and `deploy_stage:
 paper_partial` while untouched secondary lanes keep their incumbent config.
 If no deployable challenger remains, `selection.json.selected` is `null` and
 `best_candidate_preview` carries the best blocked candidate for audit only.
+Candidate and selection artefacts continue to surface `profit_factor`, but
+non-finite values now appear as `"Infinity"` rather than ambiguous JSON `null`.
 
 ### paper → live_small
 
