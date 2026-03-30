@@ -30,5 +30,5 @@ crossbeam-channel = "0.5"
 risk-core = { path = "../risk-core" }
 
 [build-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 serde_json = "1"
