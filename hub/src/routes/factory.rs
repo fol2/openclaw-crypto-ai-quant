@@ -514,9 +514,9 @@ async fn run_factory(
         .unwrap_or_else(|| "daily".to_string())
         .trim()
         .to_ascii_lowercase();
-    if !matches!(profile.as_str(), "daily" | "deep") {
+    if !matches!(profile.as_str(), "daily") {
         return HubError::BadRequest(format!(
-            "invalid factory profile: {profile} (valid: daily, deep)"
+            "invalid factory profile: {profile} (valid: daily)"
         ))
         .into_response();
     }
@@ -918,17 +918,17 @@ mod tests {
         write_run_metadata(
             dir.path(),
             "2026-03-15",
-            "run_deep_20260315T020000Z_002",
+            "run_archive_20260315T020000Z_002",
             20,
-            "deep",
+            "archive",
         );
 
         let state = test_state(dir.path());
         let Json(runs) = list_runs(State(state)).await.unwrap();
 
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0]["run_id"], "deep_20260315T020000Z_002");
-        assert_eq!(runs[0]["directory_name"], "run_deep_20260315T020000Z_002");
+        assert_eq!(runs[0]["run_id"], "archive_20260315T020000Z_002");
+        assert_eq!(runs[0]["directory_name"], "run_archive_20260315T020000Z_002");
         assert_eq!(runs[1]["run_id"], "daily_20260315T010000Z_001");
     }
 

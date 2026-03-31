@@ -93,21 +93,18 @@ struct RunArgs {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, ValueEnum)]
 enum FactoryProfile {
     Daily,
-    Deep,
 }
 
 impl FactoryProfile {
     fn as_str(self) -> &'static str {
         match self {
             Self::Daily => "daily",
-            Self::Deep => "deep",
         }
     }
 
     fn run_prefix(self) -> &'static str {
         match self {
             Self::Daily => "nightly",
-            Self::Deep => "deep",
         }
     }
 }
@@ -133,7 +130,6 @@ impl Default for FactoryDefaults {
     fn default() -> Self {
         let mut profiles = BTreeMap::new();
         profiles.insert("daily".to_string(), FactoryProfileSettings::daily());
-        profiles.insert("deep".to_string(), FactoryProfileSettings::deep());
         Self {
             version: 1,
             backtester_bin: None,
@@ -179,14 +175,6 @@ impl FactoryProfileSettings {
             sweep_top_k: 50_000,
             shortlist_per_mode: 5,
             allow_unsafe_gpu_sweep: false,
-        }
-    }
-
-    fn deep() -> Self {
-        Self {
-            tpe_trials: 10_000_000,
-            shortlist_per_mode: 8,
-            ..Self::daily()
         }
     }
 }
