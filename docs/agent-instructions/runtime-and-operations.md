@@ -59,9 +59,9 @@ running, and the Hub service allow-list includes
 - Treat the production profile as the default live profile.
 - Use runtime manifests, effective config, and pipeline inspection before making
   assumptions about live state.
-- Keep factory timer cadences non-racing by schedule design; do not rely on the
-  global factory lock as the primary collision-avoidance mechanism for
-  `daily` vs `deep` runs.
+- Keep the single factory timer non-racing by schedule design; do not
+  reintroduce competing factory schedules that rely on the global factory lock
+  as the primary collision-avoidance mechanism.
 - Treat deployment-enabled factory modes as fail-closed: if deployment,
   selection, profile, validation, or live-governance settings are missing or
   incomplete, fix the settings contract instead of falling back to permissive

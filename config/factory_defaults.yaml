@@ -86,16 +86,3 @@ profiles:
     sweep_top_k: 50000
     shortlist_per_mode: 5
     allow_unsafe_gpu_sweep: false
-
-  deep:
-    sweep_spec: backtester/sweeps/full_144v.yaml
-    # Used only when balance.mode=fixed. Financial-grade default is live_equity.
-    initial_balance: 10000.0
-    gpu: true
-    tpe: true
-    tpe_trials: 10000000
-    tpe_batch: 256
-    tpe_seed: 42
-    sweep_top_k: 50000
-    shortlist_per_mode: 8
-    allow_unsafe_gpu_sweep: false

@@ -41,7 +41,6 @@ const ALLOWED_SERVICES: &[&str] = &[
     "openclaw-ai-quant-trader-v8-paper2",
     "openclaw-ai-quant-trader-v8-paper3",
     "openclaw-ai-quant-factory-v8",
-    "openclaw-ai-quant-factory-v8-deep",
     "openclaw-ai-quant-funding-v8",
     "openclaw-ai-quant-ws-sidecar",
     "openclaw-ai-quant-prune-runtime-logs-v8",

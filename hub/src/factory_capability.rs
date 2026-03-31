@@ -7,10 +7,7 @@ use crate::config::HubConfig;
 
 pub const FACTORY_ENABLE_ENV: &str = "AI_QUANT_FACTORY_ENABLE";
 pub const FACTORY_SETTINGS_PATH: &str = "config/factory_defaults.yaml";
-pub const FACTORY_SERVICE_UNITS: [&str; 2] = [
-    "openclaw-ai-quant-factory-v8",
-    "openclaw-ai-quant-factory-v8-deep",
-];
+pub const FACTORY_SERVICE_UNITS: [&str; 1] = ["openclaw-ai-quant-factory-v8"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FactoryCapability {
@@ -22,7 +19,7 @@ pub struct FactoryCapability {
     pub reason: String,
     pub enable_env: &'static str,
     pub settings_path: &'static str,
-    pub service_units: [&'static str; 2],
+    pub service_units: [&'static str; 1],
 }
 
 impl FactoryCapability {

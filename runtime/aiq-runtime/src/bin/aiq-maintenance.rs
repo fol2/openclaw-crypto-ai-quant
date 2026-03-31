@@ -72,14 +72,12 @@ struct FetchFundingRatesArgs {
 #[derive(Clone, Debug, ValueEnum)]
 enum FactoryArtifactsProfile {
     Nightly,
-    Deep,
 }
 
 impl FactoryArtifactsProfile {
     fn run_prefix(&self) -> &'static str {
         match self {
             Self::Nightly => "nightly",
-            Self::Deep => "deep",
         }
     }
 }
@@ -1219,17 +1217,17 @@ mod tests {
         let deployed_run_id = "nightly_20260314T004910Z_444";
         let stale_run_id = "nightly_20260313T001500Z_111";
         let latest_run_id = "nightly_20260315T010000Z_222";
-        let deep_run_id = "deep_20260315T020000Z_333";
+        let archive_run_id = "archive_20260315T020000Z_333";
 
         let deployed_run_dir = create_run_dir(&artifacts_dir, "2026-03-14", deployed_run_id);
         let stale_run_dir = create_run_dir(&artifacts_dir, "2026-03-13", stale_run_id);
         let latest_run_dir = create_run_dir(&artifacts_dir, "2026-03-15", latest_run_id);
-        let deep_run_dir = create_run_dir(&artifacts_dir, "2026-03-15", deep_run_id);
+        let archive_run_dir = create_run_dir(&artifacts_dir, "2026-03-15", archive_run_id);
 
         write_effective_config_stub(&artifacts_dir, deployed_run_id);
         write_effective_config_stub(&artifacts_dir, stale_run_id);
         write_effective_config_stub(&artifacts_dir, latest_run_id);
-        write_effective_config_stub(&artifacts_dir, deep_run_id);
+        write_effective_config_stub(&artifacts_dir, archive_run_id);
 
         write_json_file(
             &artifacts_dir.join("state/factory_paper_soak_primary.json"),
@@ -1254,7 +1252,7 @@ mod tests {
         assert!(deployed_run_dir.is_dir(), "deployed run should remain");
         assert!(latest_run_dir.is_dir(), "latest run should remain");
         assert!(!stale_run_dir.exists(), "stale run should be removed");
-        assert!(deep_run_dir.is_dir(), "other profiles should remain");
+        assert!(archive_run_dir.is_dir(), "other run prefixes should remain");
 
         assert!(
             artifacts_dir
@@ -1276,9 +1274,9 @@ mod tests {
         );
         assert!(
             artifacts_dir
-                .join(format!("_effective_configs/{deep_run_id}.yaml"))
+                .join(format!("_effective_configs/{archive_run_id}.yaml"))
                 .is_file(),
-            "other profile effective config should remain"
+            "other run-prefix effective config should remain"
         );
         assert!(
             !artifacts_dir.join("2026-03-13").exists(),

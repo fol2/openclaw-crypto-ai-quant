@@ -490,16 +490,12 @@ The tracked service examples live under:
 ```bash
 systemd/openclaw-ai-quant-factory-v8.service.example
 systemd/openclaw-ai-quant-factory-v8.timer.example
-systemd/openclaw-ai-quant-factory-v8-deep.service.example
-systemd/openclaw-ai-quant-factory-v8-deep.timer.example
 ```
 
-The example timers are intentionally staggered: the nightly timer stays at
-`00:50 UTC`, while the deep weekly timer runs at `02:10 UTC` on Sundays so the
-two schedules cannot collide by calendar design. The nightly service example
-also runs `aiq-maintenance prune-factory-artifacts --profile nightly` as a
-post-success housekeeping step so only the latest nightly artefact bundle and
-the currently deployed factory references stay on disk. Build the
+The nightly timer stays at `00:50 UTC`. The nightly service example also runs
+`aiq-maintenance prune-factory-artifacts --profile nightly` as a post-success
+housekeeping step so only the latest nightly artefact bundle and the currently
+deployed factory references stay on disk. Build the
 `aiq-maintenance` binary alongside `aiq-factory` before enabling that service
 example, otherwise systemd will skip the post-step because the example uses a
 non-fatal `ExecStartPost=-...` contract.
