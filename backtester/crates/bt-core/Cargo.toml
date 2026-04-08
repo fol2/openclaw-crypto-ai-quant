@@ -12,7 +12,7 @@ rayon = "1"
 rustc-hash = "2"
 risk-core = { path = "../risk-core" }
 rusqlite = { version = "0.33", features = ["bundled"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
