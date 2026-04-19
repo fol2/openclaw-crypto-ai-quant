@@ -1,8 +1,10 @@
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
 const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const USD_QUOTE_COINS: &[&str] = &["USDC", "USDH", "USDE", "USDT0"];
 
 #[derive(Debug, Clone)]
 pub struct HlAccountSnapshot {
@@ -23,32 +25,69 @@ pub struct HlPositionSnapshot {
     pub margin_used: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserAbstractionMode {
+    StandardLike,
+    UnifiedAccount,
+    PortfolioMargin,
+}
+
+impl UserAbstractionMode {
+    fn from_raw(raw: &str) -> Self {
+        match raw.trim() {
+            "unifiedAccount" => Self::UnifiedAccount,
+            "portfolioMargin" => Self::PortfolioMargin,
+            _ => Self::StandardLike,
+        }
+    }
+
+    fn uses_spot_balance_source(self) -> bool {
+        matches!(self, Self::UnifiedAccount | Self::PortfolioMargin)
+    }
+}
+
 /// Raw HL clearinghouseState response (only fields we need).
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ClearinghouseResponse {
     #[serde(rename = "marginSummary")]
     margin_summary: MarginSummary,
-    /// Top-level withdrawable (string numeric).
     #[serde(default)]
-    withdrawable: Option<String>,
+    withdrawable: Option<StringOrNumber>,
     #[serde(rename = "assetPositions", default)]
     asset_positions: Vec<ClearinghouseAssetPosition>,
 }
 
-#[derive(Deserialize)]
-struct MarginSummary {
-    #[serde(rename = "accountValue")]
-    account_value: String,
-    #[serde(rename = "totalMarginUsed")]
-    total_margin_used: String,
+#[derive(Debug, Deserialize)]
+struct SpotClearinghouseResponse {
+    #[serde(default)]
+    balances: Vec<SpotBalance>,
+    #[serde(rename = "tokenToAvailableAfterMaintenance", default)]
+    token_to_available_after_maintenance: Vec<(u32, StringOrNumber)>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+struct SpotBalance {
+    coin: String,
+    token: u32,
+    hold: StringOrNumber,
+    total: StringOrNumber,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarginSummary {
+    #[serde(rename = "accountValue")]
+    account_value: StringOrNumber,
+    #[serde(rename = "totalMarginUsed")]
+    total_margin_used: StringOrNumber,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum StringOrNumber {
     String(String),
     Number(f64),
     Integer(i64),
+    Unsigned(u64),
 }
 
 impl StringOrNumber {
@@ -57,16 +96,17 @@ impl StringOrNumber {
             Self::String(value) => value.parse().ok(),
             Self::Number(value) => Some(*value),
             Self::Integer(value) => Some(*value as f64),
+            Self::Unsigned(value) => Some(*value as f64),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ClearinghouseAssetPosition {
     position: ClearinghousePosition,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ClearinghousePosition {
     coin: String,
     #[serde(rename = "entryPx")]
@@ -77,12 +117,12 @@ struct ClearinghousePosition {
     szi: StringOrNumber,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ClearinghouseLeverage {
     value: Option<StringOrNumber>,
 }
 
-/// Fetch account snapshot from Hyperliquid clearinghouse API.
+/// Fetch account snapshot from Hyperliquid while respecting unified-account balance semantics.
 ///
 /// Returns `None` on any error (network, parse, timeout) so callers can
 /// gracefully fall back to DB-based values.
@@ -90,11 +130,53 @@ pub async fn fetch_account_snapshot(
     client: &reqwest::Client,
     address: &str,
 ) -> Option<HlAccountSnapshot> {
-    let body = serde_json::json!({
-        "type": "clearinghouseState",
-        "user": address,
-    });
+    let abstraction = fetch_user_abstraction(client, address)
+        .await
+        .unwrap_or(UserAbstractionMode::StandardLike);
+    let perps = fetch_info(
+        client,
+        serde_json::json!({
+            "type": "clearinghouseState",
+            "user": address,
+        }),
+    )
+    .await?;
+    let positions = parse_positions(&perps)?;
 
+    if abstraction.uses_spot_balance_source() {
+        let spot = fetch_info(
+            client,
+            serde_json::json!({
+                "type": "spotClearinghouseState",
+                "user": address,
+            }),
+        )
+        .await?;
+        parse_unified_account_snapshot(&spot, &positions)
+    } else {
+        parse_perps_account_snapshot(&perps, positions)
+    }
+}
+
+async fn fetch_user_abstraction(
+    client: &reqwest::Client,
+    address: &str,
+) -> Option<UserAbstractionMode> {
+    let raw: String = fetch_info(
+        client,
+        serde_json::json!({
+            "type": "userAbstraction",
+            "user": address,
+        }),
+    )
+    .await?;
+    Some(UserAbstractionMode::from_raw(&raw))
+}
+
+async fn fetch_info<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    body: serde_json::Value,
+) -> Option<T> {
     let resp = client
         .post(HL_INFO_URL)
         .timeout(REQUEST_TIMEOUT)
@@ -112,30 +194,97 @@ pub async fn fetch_account_snapshot(
         return None;
     }
 
-    let data: ClearinghouseResponse = resp
-        .json()
+    resp.json()
         .await
         .map_err(|e| {
             tracing::warn!("HL API response parse failed: {e}");
             e
         })
-        .ok()?;
-
-    parse_account_snapshot(data)
+        .ok()
 }
 
-fn parse_account_snapshot(data: ClearinghouseResponse) -> Option<HlAccountSnapshot> {
-    let account_value: f64 = data.margin_summary.account_value.parse().ok()?;
-    let total_margin_used: f64 = data.margin_summary.total_margin_used.parse().ok()?;
-    let withdrawable: f64 = data
+fn parse_perps_account_snapshot(
+    data: &ClearinghouseResponse,
+    positions: Vec<HlPositionSnapshot>,
+) -> Option<HlAccountSnapshot> {
+    let account_value = data.margin_summary.account_value.as_f64()?;
+    let total_margin_used = data.margin_summary.total_margin_used.as_f64()?;
+    let withdrawable = data
         .withdrawable
-        .as_deref()
-        .and_then(|s| s.parse().ok())
+        .as_ref()
+        .and_then(StringOrNumber::as_f64)
         .unwrap_or(account_value - total_margin_used);
 
-    let positions = data
-        .asset_positions
-        .into_iter()
+    Some(HlAccountSnapshot {
+        account_value,
+        withdrawable,
+        total_margin_used,
+        positions,
+    })
+}
+
+fn parse_unified_account_snapshot(
+    data: &SpotClearinghouseResponse,
+    positions: &[HlPositionSnapshot],
+) -> Option<HlAccountSnapshot> {
+    let available_by_token = data
+        .token_to_available_after_maintenance
+        .iter()
+        .map(|(token, value)| value.as_f64().map(|value| (*token, value)))
+        .collect::<Option<HashMap<_, _>>>()?;
+
+    let mut account_value = 0.0;
+    let mut withdrawable = 0.0;
+    let mut saw_usdc = false;
+
+    for balance in data
+        .balances
+        .iter()
+        .filter(|balance| balance.coin.eq_ignore_ascii_case("USDC"))
+    {
+        saw_usdc = true;
+        let total = balance.total.as_f64()?;
+        let hold = balance.hold.as_f64()?;
+        account_value += total;
+        withdrawable += available_by_token
+            .get(&balance.token)
+            .copied()
+            .unwrap_or((total - hold).max(0.0));
+    }
+
+    if !saw_usdc {
+        for balance in data.balances.iter().filter(|balance| {
+            USD_QUOTE_COINS
+                .iter()
+                .any(|coin| balance.coin.eq_ignore_ascii_case(coin))
+        }) {
+            let total = balance.total.as_f64()?;
+            let hold = balance.hold.as_f64()?;
+            account_value += total;
+            withdrawable += available_by_token
+                .get(&balance.token)
+                .copied()
+                .unwrap_or((total - hold).max(0.0));
+        }
+    }
+
+    let hold_back = (account_value - withdrawable).max(0.0);
+    let perps_margin_used = positions
+        .iter()
+        .map(|position| position.margin_used.max(0.0))
+        .sum::<f64>();
+
+    Some(HlAccountSnapshot {
+        account_value,
+        withdrawable,
+        total_margin_used: hold_back.max(perps_margin_used),
+        positions: positions.to_vec(),
+    })
+}
+
+fn parse_positions(data: &ClearinghouseResponse) -> Option<Vec<HlPositionSnapshot>> {
+    data.asset_positions
+        .iter()
         .filter_map(|asset| {
             let symbol = asset.position.coin.trim().to_ascii_uppercase();
             if symbol.is_empty() {
@@ -151,7 +300,7 @@ fn parse_account_snapshot(data: ClearinghouseResponse) -> Option<HlAccountSnapsh
                 .as_ref()
                 .and_then(StringOrNumber::as_f64)
                 .unwrap_or(0.0);
-            let leverage: f64 = asset
+            let leverage = asset
                 .position
                 .leverage
                 .as_ref()
@@ -179,14 +328,8 @@ fn parse_account_snapshot(data: ClearinghouseResponse) -> Option<HlAccountSnapsh
                 margin_used,
             })
         })
-        .collect();
-
-    Some(HlAccountSnapshot {
-        account_value,
-        withdrawable,
-        total_margin_used,
-        positions,
-    })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 #[cfg(test)]
@@ -194,7 +337,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_account_snapshot_extracts_positions() {
+    fn parse_perps_account_snapshot_extracts_positions() {
         let payload = serde_json::json!({
             "marginSummary": {
                 "accountValue": "222.032332",
@@ -223,14 +366,34 @@ mod tests {
             ]
         });
 
-        let parsed = parse_account_snapshot(serde_json::from_value(payload).unwrap()).unwrap();
-        assert_eq!(parsed.positions.len(), 2);
-        assert_eq!(parsed.positions[0].symbol, "HYPE");
-        assert_eq!(parsed.positions[0].pos_type, "SHORT");
-        assert!((parsed.positions[0].size - 8.31).abs() < 1e-9);
-        assert!((parsed.positions[0].margin_used - 77.627865).abs() < 1e-9);
-        assert_eq!(parsed.positions[1].symbol, "DOGE");
-        assert_eq!(parsed.positions[1].pos_type, "LONG");
-        assert!((parsed.positions[1].entry_price - 0.094602).abs() < 1e-9);
+        let parsed: ClearinghouseResponse = serde_json::from_value(payload).unwrap();
+        let positions = parse_positions(&parsed).unwrap();
+        let snapshot = parse_perps_account_snapshot(&parsed, positions.clone()).unwrap();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].symbol, "HYPE");
+        assert_eq!(positions[0].pos_type, "SHORT");
+        assert!((positions[0].size - 8.31).abs() < 1e-9);
+        assert!((positions[0].margin_used - 77.627865).abs() < 1e-9);
+        assert_eq!(positions[1].symbol, "DOGE");
+        assert_eq!(positions[1].pos_type, "LONG");
+        assert!((positions[1].entry_price - 0.094602).abs() < 1e-9);
+        assert!((snapshot.withdrawable - 42.1756).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_unified_account_snapshot_prefers_spot_balances() {
+        let spot: SpotClearinghouseResponse = serde_json::from_value(serde_json::json!({
+            "balances": [
+                { "coin": "USDC", "token": 0, "total": "208.63", "hold": "0.0" },
+                { "coin": "USDH", "token": 360, "total": "0.0", "hold": "0.0" }
+            ],
+            "tokenToAvailableAfterMaintenance": [[0, "208.63"]]
+        }))
+        .unwrap();
+
+        let snapshot = parse_unified_account_snapshot(&spot, &[]).unwrap();
+        assert!((snapshot.account_value - 208.63).abs() < 1e-9);
+        assert!((snapshot.withdrawable - 208.63).abs() < 1e-9);
+        assert_eq!(snapshot.total_margin_used, 0.0);
     }
 }

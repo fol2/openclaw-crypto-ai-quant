@@ -15,6 +15,7 @@ use crate::live_secrets::{validate_address, validate_secret_key, LiveSecrets};
 const DEFAULT_BASE_URL: &str = "https://api.hyperliquid.xyz";
 const DEFAULT_TIMEOUT_S: f64 = 4.0;
 const MAX_LEVERAGE: u32 = 50;
+const USD_QUOTE_COINS: &[&str] = &["USDC", "USDH", "USDE", "USDT0"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HyperliquidSignature {
@@ -80,6 +81,22 @@ struct ClearinghouseStateResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct SpotClearinghouseStateResponse {
+    #[serde(default)]
+    balances: Vec<SpotBalance>,
+    #[serde(rename = "tokenToAvailableAfterMaintenance", default)]
+    token_to_available_after_maintenance: Vec<(u32, StringOrNumber)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotBalance {
+    coin: String,
+    token: u32,
+    hold: StringOrNumber,
+    total: StringOrNumber,
+}
+
+#[derive(Debug, Deserialize)]
 struct MarginSummary {
     #[serde(rename = "accountValue")]
     account_value: StringOrNumber,
@@ -128,12 +145,34 @@ impl StringOrNumber {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserAbstractionMode {
+    StandardLike,
+    UnifiedAccount,
+    PortfolioMargin,
+}
+
+impl UserAbstractionMode {
+    fn from_raw(raw: &str) -> Self {
+        match raw.trim() {
+            "unifiedAccount" => Self::UnifiedAccount,
+            "portfolioMargin" => Self::PortfolioMargin,
+            _ => Self::StandardLike,
+        }
+    }
+
+    fn uses_spot_balance_source(self) -> bool {
+        matches!(self, Self::UnifiedAccount | Self::PortfolioMargin)
+    }
+}
+
 pub struct HyperliquidClient {
     client: Client,
     base_url: Url,
     signing_key: SigningKey,
     pub main_address: String,
     asset_map: Mutex<Option<HashMap<String, HyperliquidAssetMeta>>>,
+    abstraction_mode: Mutex<Option<UserAbstractionMode>>,
 }
 
 impl HyperliquidClient {
@@ -169,37 +208,32 @@ impl HyperliquidClient {
             signing_key,
             main_address: secrets.main_address.trim().to_string(),
             asset_map: Mutex::new(None),
+            abstraction_mode: Mutex::new(None),
         })
     }
 
     pub fn account_snapshot(&self) -> Result<HyperliquidAccountSnapshot> {
-        let response: ClearinghouseStateResponse =
-            self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        let account_value_usd = response
-            .margin_summary
-            .account_value
-            .parse_f64("accountValue")?;
-        let total_margin_used_usd = response
-            .margin_summary
-            .total_margin_used
-            .parse_f64("totalMarginUsed")?;
-        let withdrawable_usd = response
-            .withdrawable
-            .as_ref()
-            .map(|value| value.parse_f64("withdrawable"))
-            .transpose()?
-            .unwrap_or(account_value_usd - total_margin_used_usd);
-        Ok(HyperliquidAccountSnapshot {
-            account_value_usd,
-            withdrawable_usd,
-            total_margin_used_usd,
-        })
+        let abstraction = self.user_abstraction()?;
+        if abstraction.uses_spot_balance_source() {
+            let spot_state: SpotClearinghouseStateResponse = self.info(
+                "spotClearinghouseState",
+                json!({ "user": self.main_address }),
+            )?;
+            let perps_state: ClearinghouseStateResponse =
+                self.info("clearinghouseState", json!({ "user": self.main_address }))?;
+            let positions = parse_positions(&perps_state)?;
+            parse_unified_account_snapshot(&spot_state, &positions)
+        } else {
+            parse_perps_account_snapshot(
+                &self.info("clearinghouseState", json!({ "user": self.main_address }))?,
+            )
+        }
     }
 
     pub fn positions(&self) -> Result<Vec<HyperliquidPosition>> {
         let response: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        parse_positions(response)
+        parse_positions(&response)
     }
 
     pub fn all_mids(&self) -> Result<HashMap<String, f64>> {
@@ -419,6 +453,26 @@ impl HyperliquidClient {
         self.post_action(action)
     }
 
+    fn user_abstraction(&self) -> Result<UserAbstractionMode> {
+        let cached = self
+            .abstraction_mode
+            .lock()
+            .map_err(|_| anyhow::anyhow!("abstraction mode mutex poisoned"))?;
+        if let Some(mode) = *cached {
+            return Ok(mode);
+        }
+        drop(cached);
+
+        let raw: String = self.info("userAbstraction", json!({ "user": self.main_address }))?;
+        let mode = UserAbstractionMode::from_raw(&raw);
+        let mut cached = self
+            .abstraction_mode
+            .lock()
+            .map_err(|_| anyhow::anyhow!("abstraction mode mutex poisoned"))?;
+        *cached = Some(mode);
+        Ok(mode)
+    }
+
     fn asset_for_symbol(&self, symbol: &str) -> Result<u32> {
         Ok(self.asset_meta(symbol)?.asset)
     }
@@ -528,6 +582,7 @@ pub struct HyperliquidInfoClient {
     client: Client,
     base_url: Url,
     pub main_address: String,
+    abstraction_mode: Mutex<Option<UserAbstractionMode>>,
 }
 
 impl HyperliquidInfoClient {
@@ -535,7 +590,11 @@ impl HyperliquidInfoClient {
         Self::with_base_url(main_address, DEFAULT_BASE_URL, timeout_s)
     }
 
-    pub fn with_base_url(main_address: &str, base_url: &str, timeout_s: Option<f64>) -> Result<Self> {
+    pub fn with_base_url(
+        main_address: &str,
+        base_url: &str,
+        timeout_s: Option<f64>,
+    ) -> Result<Self> {
         validate_address(main_address, "main_address")?;
         let base_url = Url::parse(base_url).context("invalid Hyperliquid base URL")?;
         let timeout_s = timeout_s.unwrap_or(DEFAULT_TIMEOUT_S).clamp(1.0, 30.0);
@@ -548,65 +607,71 @@ impl HyperliquidInfoClient {
             client,
             base_url,
             main_address: main_address.trim().to_string(),
+            abstraction_mode: Mutex::new(None),
         })
     }
 
     pub fn account_snapshot(&self) -> Result<HyperliquidAccountSnapshot> {
-        let response: ClearinghouseStateResponse =
-            self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        let account_value_usd = response
-            .margin_summary
-            .account_value
-            .parse_f64("accountValue")?;
-        let total_margin_used_usd = response
-            .margin_summary
-            .total_margin_used
-            .parse_f64("totalMarginUsed")?;
-        let withdrawable_usd = response
-            .withdrawable
-            .as_ref()
-            .map(|value| value.parse_f64("withdrawable"))
-            .transpose()?
-            .unwrap_or(account_value_usd - total_margin_used_usd);
-        Ok(HyperliquidAccountSnapshot {
-            account_value_usd,
-            withdrawable_usd,
-            total_margin_used_usd,
-        })
+        let abstraction = self.user_abstraction()?;
+        if abstraction.uses_spot_balance_source() {
+            let spot_state: SpotClearinghouseStateResponse = self.info(
+                "spotClearinghouseState",
+                json!({ "user": self.main_address }),
+            )?;
+            let perps_state: ClearinghouseStateResponse =
+                self.info("clearinghouseState", json!({ "user": self.main_address }))?;
+            let positions = parse_positions(&perps_state)?;
+            parse_unified_account_snapshot(&spot_state, &positions)
+        } else {
+            parse_perps_account_snapshot(
+                &self.info("clearinghouseState", json!({ "user": self.main_address }))?,
+            )
+        }
     }
 
     pub fn positions(&self) -> Result<Vec<HyperliquidPosition>> {
         let response: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        parse_positions(response)
+        parse_positions(&response)
     }
 
     pub fn account_and_positions(
         &self,
     ) -> Result<(HyperliquidAccountSnapshot, Vec<HyperliquidPosition>)> {
-        let response: ClearinghouseStateResponse =
+        let abstraction = self.user_abstraction()?;
+        let perps_state: ClearinghouseStateResponse =
             self.info("clearinghouseState", json!({ "user": self.main_address }))?;
-        let account_value_usd = response
-            .margin_summary
-            .account_value
-            .parse_f64("accountValue")?;
-        let total_margin_used_usd = response
-            .margin_summary
-            .total_margin_used
-            .parse_f64("totalMarginUsed")?;
-        let withdrawable_usd = response
-            .withdrawable
-            .as_ref()
-            .map(|value| value.parse_f64("withdrawable"))
-            .transpose()?
-            .unwrap_or(account_value_usd - total_margin_used_usd);
-        let snapshot = HyperliquidAccountSnapshot {
-            account_value_usd,
-            withdrawable_usd,
-            total_margin_used_usd,
+        let positions = parse_positions(&perps_state)?;
+        let snapshot = if abstraction.uses_spot_balance_source() {
+            let spot_state: SpotClearinghouseStateResponse = self.info(
+                "spotClearinghouseState",
+                json!({ "user": self.main_address }),
+            )?;
+            parse_unified_account_snapshot(&spot_state, &positions)?
+        } else {
+            parse_perps_account_snapshot(&perps_state)?
         };
-        let positions = parse_positions(response)?;
         Ok((snapshot, positions))
+    }
+
+    fn user_abstraction(&self) -> Result<UserAbstractionMode> {
+        let cached = self
+            .abstraction_mode
+            .lock()
+            .map_err(|_| anyhow::anyhow!("abstraction mode mutex poisoned"))?;
+        if let Some(mode) = *cached {
+            return Ok(mode);
+        }
+        drop(cached);
+
+        let raw: String = self.info("userAbstraction", json!({ "user": self.main_address }))?;
+        let mode = UserAbstractionMode::from_raw(&raw);
+        let mut cached = self
+            .abstraction_mode
+            .lock()
+            .map_err(|_| anyhow::anyhow!("abstraction mode mutex poisoned"))?;
+        *cached = Some(mode);
+        Ok(mode)
     }
 
     fn info<T: serde::de::DeserializeOwned>(
@@ -922,9 +987,94 @@ fn parse_json_response<T: serde::de::DeserializeOwned>(
         .with_context(|| format!("failed to parse {label} response"))
 }
 
-fn parse_positions(response: ClearinghouseStateResponse) -> Result<Vec<HyperliquidPosition>> {
+fn parse_perps_account_snapshot(
+    response: &ClearinghouseStateResponse,
+) -> Result<HyperliquidAccountSnapshot> {
+    let account_value_usd = response
+        .margin_summary
+        .account_value
+        .parse_f64("accountValue")?;
+    let total_margin_used_usd = response
+        .margin_summary
+        .total_margin_used
+        .parse_f64("totalMarginUsed")?;
+    let withdrawable_usd = response
+        .withdrawable
+        .as_ref()
+        .map(|value| value.parse_f64("withdrawable"))
+        .transpose()?
+        .unwrap_or(account_value_usd - total_margin_used_usd);
+    Ok(HyperliquidAccountSnapshot {
+        account_value_usd,
+        withdrawable_usd,
+        total_margin_used_usd,
+    })
+}
+
+fn parse_unified_account_snapshot(
+    spot_state: &SpotClearinghouseStateResponse,
+    positions: &[HyperliquidPosition],
+) -> Result<HyperliquidAccountSnapshot> {
+    let available_by_token = spot_state
+        .token_to_available_after_maintenance
+        .iter()
+        .map(|(token, value)| {
+            value
+                .parse_f64("tokenToAvailableAfterMaintenance")
+                .map(|value| (*token, value))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    let mut selected_balances = spot_state
+        .balances
+        .iter()
+        .filter(|balance| balance.coin.eq_ignore_ascii_case("USDC"));
+
+    let mut account_value_usd = 0.0;
+    let mut withdrawable_usd = 0.0;
+    let mut saw_usdc = false;
+    for balance in selected_balances.by_ref() {
+        saw_usdc = true;
+        let total = balance.total.parse_f64("total")?;
+        let hold = balance.hold.parse_f64("hold")?;
+        account_value_usd += total;
+        withdrawable_usd += available_by_token
+            .get(&balance.token)
+            .copied()
+            .unwrap_or((total - hold).max(0.0));
+    }
+
+    if !saw_usdc {
+        for balance in spot_state.balances.iter().filter(|balance| {
+            USD_QUOTE_COINS
+                .iter()
+                .any(|coin| balance.coin.eq_ignore_ascii_case(coin))
+        }) {
+            let total = balance.total.parse_f64("total")?;
+            let hold = balance.hold.parse_f64("hold")?;
+            account_value_usd += total;
+            withdrawable_usd += available_by_token
+                .get(&balance.token)
+                .copied()
+                .unwrap_or((total - hold).max(0.0));
+        }
+    }
+
+    let hold_back_usd = (account_value_usd - withdrawable_usd).max(0.0);
+    let perps_margin_used_usd = positions
+        .iter()
+        .map(|position| position.margin_used.max(0.0))
+        .sum::<f64>();
+    Ok(HyperliquidAccountSnapshot {
+        account_value_usd,
+        withdrawable_usd,
+        total_margin_used_usd: hold_back_usd.max(perps_margin_used_usd),
+    })
+}
+
+fn parse_positions(response: &ClearinghouseStateResponse) -> Result<Vec<HyperliquidPosition>> {
     let mut positions = Vec::new();
-    for asset in response.asset_positions {
+    for asset in &response.asset_positions {
         let symbol = asset.position.coin.trim().to_ascii_uppercase();
         if symbol.is_empty() {
             continue;
@@ -1221,7 +1371,7 @@ mod tests {
         });
 
         let response: ClearinghouseStateResponse = serde_json::from_value(payload).unwrap();
-        let positions = parse_positions(response).unwrap();
+        let positions = parse_positions(&response).unwrap();
         assert_eq!(positions.len(), 2);
         assert_eq!(positions[0].symbol, "HYPE");
         assert_eq!(positions[0].pos_type, "SHORT");
@@ -1229,6 +1379,33 @@ mod tests {
         assert!((positions[0].leverage - 4.0).abs() < 1e-9);
         assert!((positions[1].entry_price - 0.094602).abs() < 1e-9);
         assert!((positions[1].margin_used - 41.451039).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unified_account_snapshot_uses_spot_quote_balance() {
+        let spot_state: SpotClearinghouseStateResponse = serde_json::from_value(json!({
+            "balances": [
+                {
+                    "coin": "USDC",
+                    "token": 0,
+                    "total": "208.63",
+                    "hold": "0.0"
+                },
+                {
+                    "coin": "USDH",
+                    "token": 360,
+                    "total": "0.0",
+                    "hold": "0.0"
+                }
+            ],
+            "tokenToAvailableAfterMaintenance": [[0, "208.63"]]
+        }))
+        .unwrap();
+
+        let snapshot = parse_unified_account_snapshot(&spot_state, &[]).unwrap();
+        assert!((snapshot.account_value_usd - 208.63).abs() < 1e-9);
+        assert!((snapshot.withdrawable_usd - 208.63).abs() < 1e-9);
+        assert_eq!(snapshot.total_margin_used_usd, 0.0);
     }
 
     #[test]
