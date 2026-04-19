@@ -45,6 +45,11 @@ It also refreshes DB-backed exchange account and position snapshots so the Hub
 can fall back to current live balance and holdings when an in-memory
 Hyperliquid cache is unavailable or stale.
 
+For Hyperliquid `unifiedAccount` users, runtime balance reads now come from
+`spotClearinghouseState`, which Hyperliquid documents as the source of truth
+for trading balance across spot and perps. The runtime still reads perp
+`clearinghouseState` for open position rows.
+
 ## Ownership
 
 The runtime now owns:

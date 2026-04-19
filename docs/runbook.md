@@ -23,6 +23,11 @@ cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
 cargo run -p aiq-runtime -- live daemon --project-dir "$PWD"
 ```
 
+When the Hyperliquid account runs in `unifiedAccount`, the Rust runtime and Hub
+now treat `spotClearinghouseState` as the source of truth for available trading
+balance and quote collateral. Perp `clearinghouseState` still supplies position
+rows, but its balance fields are not used for unified-account sizing.
+
 ## Assist
 
 Assist mode runs signal generation and exit tunnel computation without
