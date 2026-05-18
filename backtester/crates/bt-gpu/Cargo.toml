@@ -14,7 +14,7 @@ codegen = []
 [dependencies]
 bt-core = { path = "../bt-core" }
 bt-data = { path = "../bt-data" }
-cudarc = { version = "0.12", features = ["driver", "cuda-12000"] }
+cudarc = { version = "0.19", features = ["driver", "cuda-12000"] }
 bytemuck = { version = "1", features = ["derive"] }
 rayon = "1"
 rustc-hash = "2"
