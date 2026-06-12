@@ -150,8 +150,9 @@ pub async fn spawn_replay(
             handles.remove(&job_id);
         }
 
-        let parsed_output = parse_replay_result(output_file.as_deref().map(Path::new), &stdout_output)
-            .map(limit_backtest_result_payload);
+        let parsed_output =
+            parse_replay_result(output_file.as_deref().map(Path::new), &stdout_output)
+                .map(limit_backtest_result_payload);
 
         let mut jobs = store.jobs.lock().await;
         if let Some(j) = jobs.get_mut(&job_id) {
@@ -265,7 +266,13 @@ mod tests {
         let points = limited["equity_curve"].as_array().unwrap();
 
         assert_eq!(points.len(), MAX_BACKTEST_EQUITY_POINTS);
-        assert_eq!(points.first().unwrap(), &json!([1_700_000_000_000_i64, 10_000.0]));
-        assert_eq!(points.last().unwrap(), &json!([1_700_000_000_999_i64, 10_999.0]));
+        assert_eq!(
+            points.first().unwrap(),
+            &json!([1_700_000_000_000_i64, 10_000.0])
+        );
+        assert_eq!(
+            points.last().unwrap(),
+            &json!([1_700_000_000_999_i64, 10_999.0])
+        );
     }
 }

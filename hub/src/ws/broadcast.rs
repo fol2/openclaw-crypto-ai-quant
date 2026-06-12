@@ -46,10 +46,42 @@ impl BroadcastHub {
             0
         }
     }
+
+    pub fn receiver_count(&self, topic: &str) -> usize {
+        let channels = self.channels.read().unwrap();
+        channels
+            .get(topic)
+            .map(|tx| tx.receiver_count())
+            .unwrap_or(0)
+    }
 }
 
 impl Default for BroadcastHub {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receiver_count_tracks_active_subscribers() {
+        let hub = BroadcastHub::new();
+
+        assert_eq!(hub.receiver_count("mids"), 0);
+
+        let first = hub.subscribe("mids");
+        assert_eq!(hub.receiver_count("mids"), 1);
+
+        let second = hub.subscribe("mids");
+        assert_eq!(hub.receiver_count("mids"), 2);
+
+        drop(first);
+        assert_eq!(hub.receiver_count("mids"), 1);
+
+        drop(second);
+        assert_eq!(hub.receiver_count("mids"), 0);
     }
 }

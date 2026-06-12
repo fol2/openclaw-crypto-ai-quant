@@ -44,6 +44,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
@@ -311,12 +312,14 @@ async fn shutdown_signal() {
 fn spawn_mids_poller(state: Arc<AppState>) {
     let poll_ms = state.config.mids_poll_ms.max(20);
     let wait_timeout_ms = state.config.mids_wait_timeout_ms.max(100);
+    let publish_min = Duration::from_millis(state.config.mids_publish_min_ms.max(50));
     let mids_debug_log = state.config.mids_debug_log;
     tokio::spawn(async move {
         let mut after_seq: Option<u64> = None;
         let mut after_bbo_seq: Option<u64> = None;
         let mut last_published_mids: HashMap<String, f64> = HashMap::new();
         let mut last_published_bbo: HashMap<String, sidecar::BboQuote> = HashMap::new();
+        let mut last_publish_at: Option<Instant> = None;
         loop {
             // Read the symbols last seen in a snapshot query.
             // Skips until the first REST snapshot has been fetched.
@@ -350,6 +353,19 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     }
                     let mids_changed = snap.seq_reset || snap.mids != last_published_mids;
                     let bbo_changed = snap.seq_reset || snap.bbo != last_published_bbo;
+                    let mids_receivers = state.broadcast.receiver_count(ws::topics::TOPIC_MIDS);
+                    let bbo_receivers = state.broadcast.receiver_count(ws::topics::TOPIC_BBO);
+                    if (mids_receivers == 0 || !mids_changed)
+                        && (bbo_receivers == 0 || !bbo_changed)
+                    {
+                        continue;
+                    }
+                    if let Some(last) = last_publish_at {
+                        let elapsed = last.elapsed();
+                        if elapsed < publish_min {
+                            tokio::time::sleep(publish_min - elapsed).await;
+                        }
+                    }
                     let mut changed_symbols: Vec<String> = Vec::new();
                     let mut changed_bbo_symbols: Vec<String> = Vec::new();
                     if mids_debug_log {
@@ -374,8 +390,12 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                         changed_symbols.sort_unstable();
                         changed_bbo_symbols.sort_unstable();
                     }
-                    last_published_mids = snap.mids.clone();
-                    last_published_bbo = snap.bbo.clone();
+                    if mids_receivers > 0 && mids_changed {
+                        last_published_mids = snap.mids.clone();
+                    }
+                    if bbo_receivers > 0 && bbo_changed {
+                        last_published_bbo = snap.bbo.clone();
+                    }
                     let mut ws_mids_receivers = 0usize;
                     let mut ws_bbo_receivers = 0usize;
                     let mut payload_data =
@@ -386,7 +406,7 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                             serde_json::json!(Utc::now().timestamp_millis()),
                         );
                     }
-                    if mids_changed {
+                    if mids_receivers > 0 && mids_changed {
                         if let Ok(json) = serde_json::to_string(&serde_json::json!({
                             "type": "mids",
                             "data": payload_data.clone(),
@@ -395,7 +415,7 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                                 state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
                         }
                     }
-                    if bbo_changed {
+                    if bbo_receivers > 0 && bbo_changed {
                         if let Ok(json) = serde_json::to_string(&serde_json::json!({
                             "type": "bbo",
                             "data": payload_data,
@@ -423,6 +443,9 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                             bbo_sample = ?bbo_sample,
                             "mids publish"
                         );
+                    }
+                    if ws_mids_receivers > 0 || ws_bbo_receivers > 0 {
+                        last_publish_at = Some(Instant::now());
                     }
                     // Old sidecar fallback path has no sequence support; throttle to poll cadence.
                     if after_seq.is_none() && after_bbo_seq.is_none() {

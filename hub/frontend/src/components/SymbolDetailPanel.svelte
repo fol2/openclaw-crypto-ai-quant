@@ -84,6 +84,10 @@
   let _candlesFetchInFlight = false;
   let _candlesFetchQueued = false;
   let _candlesRolloverReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  let _liveTunnelFetchInFlight = false;
+  let _liveTunnelFetchQueued = false;
+  let _journeyTunnelFetchInFlight = false;
+  let _journeyTunnelFetchQueued: { j: any; fromTs: number; toTs: number } | null = null;
   let mainExtending = false;
   const CANDLE_ROLLOVER_RECONCILE_DELAY_MS = 1600;
   const CANDLE_PERIODIC_RECONCILE_MS = 25_000;
@@ -293,6 +297,11 @@
     const requestMode = mode;
     const requestSymbol = symbol;
     if (!position || !requestSymbol) { tunnelPoints = []; return; }
+    if (_liveTunnelFetchInFlight) {
+      _liveTunnelFetchQueued = true;
+      return;
+    }
+    _liveTunnelFetchInFlight = true;
     try {
       const openTimeMs = tunnelFromTsForPosition(position);
       const res = await getTunnel(
@@ -312,12 +321,23 @@
       if (sameContext(requestMode, requestSymbol)) {
         tunnelPoints = [];
       }
+    } finally {
+      _liveTunnelFetchInFlight = false;
+      if (_liveTunnelFetchQueued) {
+        _liveTunnelFetchQueued = false;
+        setTimeout(() => { void fetchTunnelForLive(); }, 0);
+      }
     }
   }
 
   // ── Tunnel data fetch (journey review) ────────────────────────────
   async function fetchTunnelForJourney(j: any, fromTs: number, toTs: number) {
     if (!j) { journeyTunnelPoints = []; return; }
+    if (_journeyTunnelFetchInFlight) {
+      _journeyTunnelFetchQueued = { j, fromTs, toTs };
+      return;
+    }
+    _journeyTunnelFetchInFlight = true;
     const requestMode = mode;
     const requestSymbol = symbol;
     const requestJourneyId = j.id;
@@ -333,6 +353,13 @@
     } catch {
       if (sameJourneyContext(requestSeq, requestMode, requestSymbol, requestJourneyId)) {
         journeyTunnelPoints = [];
+      }
+    } finally {
+      _journeyTunnelFetchInFlight = false;
+      if (_journeyTunnelFetchQueued) {
+        const queued = _journeyTunnelFetchQueued;
+        _journeyTunnelFetchQueued = null;
+        setTimeout(() => { void fetchTunnelForJourney(queued.j, queued.fromTs, queued.toTs); }, 0);
       }
     }
   }

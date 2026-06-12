@@ -58,6 +58,8 @@ pub struct HubConfig {
     pub mids_poll_ms: u64,
     /// Blocking wait timeout for sidecar `wait_mids` calls.
     pub mids_wait_timeout_ms: u64,
+    /// Minimum interval between frontend market-data broadcasts.
+    pub mids_publish_min_ms: u64,
     /// Emit per-publish mids debug logs (seq + changed symbols) for monitor tracing.
     pub mids_debug_log: bool,
     /// Accept and emit frontend flash-trigger debug logs from the monitor UI.
@@ -324,6 +326,7 @@ impl HubConfig {
                 .or_else(read_main_address_from_secrets),
             mids_poll_ms: env_u64("AIQ_MONITOR_MIDS_POLL_MS", 100),
             mids_wait_timeout_ms: env_u64("AIQ_MONITOR_MIDS_WAIT_TIMEOUT_MS", 25_000),
+            mids_publish_min_ms: env_u64("AIQ_MONITOR_MIDS_PUBLISH_MIN_MS", 250),
             mids_debug_log: env_bool("AIQ_MONITOR_MIDS_DEBUG_LOG", false),
             flash_debug_log: env_bool("AIQ_MONITOR_FLASH_DEBUG_LOG", false),
             manual_trade_enabled: env_bool("AIQ_MANUAL_TRADE_ENABLE", false),

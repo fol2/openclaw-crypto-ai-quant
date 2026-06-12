@@ -477,9 +477,13 @@ mod tests {
         );
 
         assert!(args.windows(2).any(|pair| pair == ["-p", "bt-cli"]));
-        assert!(args.windows(2).any(|pair| pair == ["--manifest-path", "backtester/Cargo.toml"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--manifest-path", "backtester/Cargo.toml"]));
         assert!(args.iter().any(|arg| arg == "sweep"));
-        assert!(args.iter().any(|arg| arg == output.to_string_lossy().as_ref()));
+        assert!(args
+            .iter()
+            .any(|arg| arg == output.to_string_lossy().as_ref()));
     }
 
     #[test]

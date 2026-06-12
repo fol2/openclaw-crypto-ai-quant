@@ -89,7 +89,10 @@ async fn run_backtest(
     })))
 }
 
-fn prepare_backtest_output_path(artifacts_dir: &PathBuf, job_id: &str) -> Result<PathBuf, HubError> {
+fn prepare_backtest_output_path(
+    artifacts_dir: &PathBuf,
+    job_id: &str,
+) -> Result<PathBuf, HubError> {
     let dir = artifacts_dir.join("backtests");
     std::fs::create_dir_all(&dir).map_err(|e| {
         HubError::Internal(format!(
