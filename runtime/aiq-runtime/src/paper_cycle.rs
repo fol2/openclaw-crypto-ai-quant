@@ -462,9 +462,12 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
                 } else {
                     &pre_state
                 };
-                if let Some(row) =
-                    exit_tunnel_row_for_state(&prepared, tunnel_state, symbol, input.step_close_ts_ms)
-                {
+                if let Some(row) = exit_tunnel_row_for_state(
+                    &prepared,
+                    tunnel_state,
+                    symbol,
+                    input.step_close_ts_ms,
+                ) {
                     tunnel_rows.push(row);
                 }
                 if !budgeted_decision.intents.is_empty() || !budgeted_decision.fills.is_empty() {

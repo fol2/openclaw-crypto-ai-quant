@@ -147,9 +147,11 @@ fn reconstruct_open_positions(conn: &Connection) -> anyhow::Result<Vec<SnapshotP
                 }
                 let new_total = seed.net_size + size;
                 if new_total > 0.0 {
-                    seed.avg_entry = ((seed.avg_entry * seed.net_size) + (price * size)) / new_total;
+                    seed.avg_entry =
+                        ((seed.avg_entry * seed.net_size) + (price * size)) / new_total;
                     let fill_atr = entry_atr.unwrap_or(seed.entry_atr);
-                    seed.entry_atr = ((seed.entry_atr * seed.net_size) + (fill_atr * size)) / new_total;
+                    seed.entry_atr =
+                        ((seed.entry_atr * seed.net_size) + (fill_atr * size)) / new_total;
                     seed.net_size = new_total;
                 }
                 if let Some(leverage) = leverage {

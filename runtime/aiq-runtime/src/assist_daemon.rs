@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use crate::live_cycle::{self, LiveCycleInput, LiveCycleReport};
 use crate::live_hyperliquid::HyperliquidInfoClient;
-use crate::live_state::{build_strategy_state, ensure_live_runtime_tables, sync_exchange_positions};
+use crate::live_state::{
+    build_strategy_state, ensure_live_runtime_tables, sync_exchange_positions,
+};
 use crate::paper_config::PaperEffectiveConfig;
 
 pub struct AssistDaemonInput<'a> {
@@ -166,7 +168,8 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
         )?;
         let active_symbols = active_symbols(&symbols, &state);
         if active_symbols.is_empty() {
-            warnings.push("assist daemon idle: no configured symbols or open positions".to_string());
+            warnings
+                .push("assist daemon idle: no configured symbols or open positions".to_string());
             idle_polls = idle_polls.saturating_add(1);
             if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
                 break;
@@ -249,7 +252,10 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
                 cycle_report
                     .plans
                     .iter()
-                    .map(|p| format!("{} {} {} @{:.2}", p.symbol, p.action, p.side, p.reference_price))
+                    .map(|p| format!(
+                        "{} {} {} @{:.2}",
+                        p.symbol, p.action, p.side, p.reference_price
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -259,11 +265,8 @@ pub fn run_daemon(input: AssistDaemonInput<'_>) -> Result<AssistDaemonReport> {
         persist_exit_tunnel_rows(input.live_db, &cycle_report.tunnel_rows)?;
 
         // Persist signal rows from the cycle
-        let signals_written = persist_signal_rows(
-            input.live_db,
-            &cycle_report,
-            next_due_step_close_ts_ms,
-        )?;
+        let signals_written =
+            persist_signal_rows(input.live_db, &cycle_report, next_due_step_close_ts_ms)?;
 
         // Record runtime cycle step
         record_runtime_cycle_step(
