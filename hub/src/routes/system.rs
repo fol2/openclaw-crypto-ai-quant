@@ -398,18 +398,16 @@ mod tests {
     #[test]
     fn removed_v8_sidecar_is_not_an_allowed_service() {
         let err = validate_service("openclaw-ai-quant-ws-sidecar-v8").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown service: openclaw-ai-quant-ws-sidecar-v8")
-        );
+        assert!(err
+            .to_string()
+            .contains("unknown service: openclaw-ai-quant-ws-sidecar-v8"));
     }
 
     #[test]
     fn removed_legacy_funding_service_is_not_an_allowed_service() {
         let err = validate_service("openclaw-ai-quant-funding").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown service: openclaw-ai-quant-funding")
-        );
+        assert!(err
+            .to_string()
+            .contains("unknown service: openclaw-ai-quant-funding"));
     }
 }

@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use futures::stream::StreamExt;
 use futures::SinkExt;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::state::AppState;
@@ -30,9 +31,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let hub = &state.broadcast;
 
-    // Each client gets a small set of topic subscriptions.
-    let mut subscriptions: Vec<tokio::sync::broadcast::Receiver<String>> = Vec::new();
-    let mut sub_topics: Vec<String> = Vec::new();
+    let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
 
     // Spawn a task that forwards broadcast messages to the client.
     let (tx_to_client, mut rx_to_client) = tokio::sync::mpsc::channel::<String>(64);
@@ -56,21 +55,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             match parsed.msg_type.as_str() {
                                 "subscribe" => {
                                     if let Some(topic) = &parsed.topic {
-                                        if !sub_topics.contains(topic) {
-                                            let rx = hub.subscribe(topic);
-                                            sub_topics.push(topic.clone());
-                                            subscriptions.push(rx);
-
-                                            // Spawn per-subscription forwarder.
+                                        if !subscriptions.contains_key(topic) {
                                             let tx = tx_to_client.clone();
                                             let mut sub_rx = hub.subscribe(topic);
-                                            tokio::spawn(async move {
+                                            let handle = tokio::spawn(async move {
                                                 while let Ok(msg) = sub_rx.recv().await {
                                                     if tx.send(msg).await.is_err() {
                                                         break;
                                                     }
                                                 }
                                             });
+                                            subscriptions.insert(topic.clone(), handle);
+                                        }
+                                    }
+                                }
+                                "unsubscribe" => {
+                                    if let Some(topic) = &parsed.topic {
+                                        if let Some(handle) = subscriptions.remove(topic) {
+                                            handle.abort();
                                         }
                                     }
                                 }
@@ -89,4 +91,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 
     forward_task.abort();
+    for handle in subscriptions.into_values() {
+        handle.abort();
+    }
 }

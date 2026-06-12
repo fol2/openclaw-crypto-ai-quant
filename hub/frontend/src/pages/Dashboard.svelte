@@ -24,6 +24,8 @@
   let volumes: Record<string, number> = $state({});
   let focusSym = $state('');
   let pollTimer: any = null;
+  let refreshInFlight = false;
+  let refreshQueued = false;
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
   let selectedInterval = $state('1h');
@@ -234,6 +236,11 @@
     return (snapshotNowMs() - d.getTime()) < signalFreshWindowMs();
   }
   async function refresh() {
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return;
+    }
+    refreshInFlight = true;
     try {
       appState.loading = true;
       const [data, vol] = await Promise.all([
@@ -259,6 +266,11 @@
       error = e.message || 'fetch failed';
     } finally {
       appState.loading = false;
+      refreshInFlight = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        void refresh();
+      }
     }
   }
 

@@ -19,8 +19,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::fs::File;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -5131,13 +5133,32 @@ fn run_command(
     cmd.current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("spawn {:?}", cmd.get_program()))?;
-    fs::write(stdout_path, &output.stdout)
-        .with_context(|| format!("write {}", stdout_path.display()))?;
-    fs::write(stderr_path, &output.stderr)
-        .with_context(|| format!("write {}", stderr_path.display()))?;
+
+    let child_stdout = child
+        .stdout
+        .take()
+        .context("spawned command missing stdout pipe")?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .context("spawned command missing stderr pipe")?;
+
+    let stdout_handle = capture_child_pipe(child_stdout, stdout_path.to_path_buf(), false);
+    let stderr_handle = capture_child_pipe(child_stderr, stderr_path.to_path_buf(), true);
+
+    let status = child
+        .wait()
+        .with_context(|| format!("wait for {:?}", cmd.get_program()))?;
+    let stdout = join_child_capture(stdout_handle, stdout_path, "stdout")?;
+    let stderr = join_child_capture(stderr_handle, stderr_path, "stderr")?;
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
     if !output.status.success() {
         bail!(
             "command {:?} failed with status {:?}",
@@ -5146,6 +5167,58 @@ fn run_command(
         );
     }
     Ok(output)
+}
+
+fn capture_child_pipe<R: Read + Send + 'static>(
+    mut reader: R,
+    output_path: PathBuf,
+    mirror_to_stderr: bool,
+) -> thread::JoinHandle<Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut file = File::create(&output_path)
+            .with_context(|| format!("create {}", output_path.display()))?;
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 8192];
+
+        loop {
+            let read_len = reader
+                .read(&mut buffer)
+                .with_context(|| format!("read stream for {}", output_path.display()))?;
+            if read_len == 0 {
+                break;
+            }
+            let chunk = &buffer[..read_len];
+            captured.extend_from_slice(chunk);
+            file.write_all(chunk)
+                .with_context(|| format!("write {}", output_path.display()))?;
+            file.flush()
+                .with_context(|| format!("flush {}", output_path.display()))?;
+            if mirror_to_stderr {
+                let mut stderr = io::stderr().lock();
+                stderr
+                    .write_all(chunk)
+                    .context("mirror child stderr to parent stderr")?;
+                stderr.flush().context("flush mirrored child stderr")?;
+            }
+        }
+
+        Ok(captured)
+    })
+}
+
+fn join_child_capture(
+    handle: thread::JoinHandle<Result<Vec<u8>>>,
+    output_path: &Path,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "child {} capture thread panicked while writing {}",
+            stream_name,
+            output_path.display()
+        ),
+    }
 }
 
 fn restart_user_service(service: &str) -> Result<bool> {
@@ -5390,6 +5463,9 @@ mod tests {
     use rusqlite::Connection;
     use serde_json::Value;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn config_yaml(interval: &str) -> String {
         format!(
@@ -5528,6 +5604,80 @@ esac
         let mut perms = fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn run_command_streams_stderr_artifact_before_child_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("emit_progress.sh");
+        let stdout_path = dir.path().join("command.stdout.txt");
+        let stderr_path = dir.path().join("command.stderr.txt");
+        let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'progress one\n' >&2
+sleep 1
+printf 'progress two\n' >&2
+printf 'stdout line\n'
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let cwd = dir.path().to_path_buf();
+        let script_path_for_thread = script_path.clone();
+        let stdout_path_for_thread = stdout_path.clone();
+        let stderr_path_for_thread = stderr_path.clone();
+        let handle = thread::spawn(move || {
+            let mut cmd = Command::new(&script_path_for_thread);
+            let result = run_command(
+                &mut cmd,
+                &cwd,
+                &stdout_path_for_thread,
+                &stderr_path_for_thread,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_progress = false;
+        while Instant::now() < deadline {
+            if let Ok(contents) = fs::read_to_string(&stderr_path) {
+                if contents.contains("progress one") {
+                    saw_progress = true;
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            saw_progress,
+            "stderr artifact should receive progress before the child process exits"
+        );
+        assert!(
+            matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "the child process should still be running when the first progress line lands"
+        );
+
+        let output = handle.join().unwrap().unwrap();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("progress one"),
+            "captured stderr should include the first progress line"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("progress two"),
+            "captured stderr should include the second progress line"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("stdout line"),
+            "captured stdout should include the child stdout payload"
+        );
+        assert_eq!(fs::read(&stderr_path).unwrap(), output.stderr);
+        assert_eq!(fs::read(&stdout_path).unwrap(), output.stdout);
     }
 
     fn write_role_aware_fake_factory_backtester(path: &Path) {

@@ -74,13 +74,14 @@ export class HubWS {
   }
 
   subscribe(topic: string, handler: MessageHandler) {
-    if (!this.handlers.has(topic)) {
+    const firstHandler = !this.handlers.has(topic);
+    if (firstHandler) {
       this.handlers.set(topic, new Set());
     }
     this.handlers.get(topic)!.add(handler);
     this.pendingSubs.add(topic);
 
-    if (this.connected) {
+    if (firstHandler && this.connected) {
       this.sendSubscribe(topic);
     }
   }
@@ -92,6 +93,9 @@ export class HubWS {
       if (set.size === 0) {
         this.handlers.delete(topic);
         this.pendingSubs.delete(topic);
+        if (this.connected) {
+          this.sendUnsubscribe(topic);
+        }
       }
     }
   }
@@ -99,6 +103,12 @@ export class HubWS {
   private sendSubscribe(topic: string) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'subscribe', topic }));
+    }
+  }
+
+  private sendUnsubscribe(topic: string) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'unsubscribe', topic }));
     }
   }
 

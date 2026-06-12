@@ -515,10 +515,8 @@ async fn run_factory(
         .trim()
         .to_ascii_lowercase();
     if !matches!(profile.as_str(), "daily") {
-        return HubError::BadRequest(format!(
-            "invalid factory profile: {profile} (valid: daily)"
-        ))
-        .into_response();
+        return HubError::BadRequest(format!("invalid factory profile: {profile} (valid: daily)"))
+            .into_response();
     }
     let config_path = resolve_requested_path(
         &state.config.aiq_root,
@@ -928,7 +926,10 @@ mod tests {
 
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0]["run_id"], "archive_20260315T020000Z_002");
-        assert_eq!(runs[0]["directory_name"], "run_archive_20260315T020000Z_002");
+        assert_eq!(
+            runs[0]["directory_name"],
+            "run_archive_20260315T020000Z_002"
+        );
         assert_eq!(runs[1]["run_id"], "daily_20260315T010000Z_001");
     }
 

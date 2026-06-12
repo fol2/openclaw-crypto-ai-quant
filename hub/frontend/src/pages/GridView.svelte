@@ -24,6 +24,14 @@
   let trendSeq = 0;
   let candleSeq = 0;
   let volumeSeq = 0;
+  let refreshInFlight = false;
+  let refreshQueued = false;
+  let trendInFlight = false;
+  let trendQueued = false;
+  let candleInFlight = false;
+  let candleQueued = false;
+  let volumeInFlight = false;
+  let volumeQueued = false;
 
   function finitePositive(v: unknown): number | null {
     const n = Number(v);
@@ -123,6 +131,11 @@
   }
 
   async function refreshTrend() {
+    if (trendInFlight) {
+      trendQueued = true;
+      return;
+    }
+    trendInFlight = true;
     const seq = ++trendSeq;
     const interval = trendInterval;
     const bars = trendBars;
@@ -130,10 +143,21 @@
       const res = await getTrendCloses(interval, bars);
       if (seq !== trendSeq || trendInterval !== interval || trendBars !== bars) return;
       trendCloses = res.closes || {};
-    } catch {}
+    } catch {} finally {
+      trendInFlight = false;
+      if (trendQueued) {
+        trendQueued = false;
+        void refreshTrend();
+      }
+    }
   }
 
   async function refreshCandles() {
+    if (candleInFlight) {
+      candleQueued = true;
+      return;
+    }
+    candleInFlight = true;
     const seq = ++candleSeq;
     const interval = candleInterval;
     const bars = candleBars;
@@ -141,19 +165,41 @@
       const res = await getTrendCandles(interval, bars);
       if (seq !== candleSeq || candleInterval !== interval || candleBars !== bars) return;
       trendCandles = res.candles || {};
-    } catch {}
+    } catch {} finally {
+      candleInFlight = false;
+      if (candleQueued) {
+        candleQueued = false;
+        void refreshCandles();
+      }
+    }
   }
 
   async function refreshVolumes() {
+    if (volumeInFlight) {
+      volumeQueued = true;
+      return;
+    }
+    volumeInFlight = true;
     const seq = ++volumeSeq;
     try {
       const res = await getVolumes();
       if (seq !== volumeSeq) return;
       volumes = res.volumes || {};
-    } catch {}
+    } catch {} finally {
+      volumeInFlight = false;
+      if (volumeQueued) {
+        volumeQueued = false;
+        void refreshVolumes();
+      }
+    }
   }
 
   async function refresh() {
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return;
+    }
+    refreshInFlight = true;
     const seq = ++refreshSeq;
     const requestedMode = normaliseGridMode(mode);
     if (requestedMode !== mode) {
@@ -172,9 +218,15 @@
         selectedSymbol = '';
       }
       await Promise.all([refreshTrend(), refreshCandles(), refreshVolumes()]);
-    } catch {}
-    if (seq === refreshSeq) {
-      loading = false;
+    } catch {} finally {
+      if (seq === refreshSeq) {
+        loading = false;
+      }
+      refreshInFlight = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        void refresh();
+      }
     }
   }
 

@@ -767,7 +767,10 @@ pub fn position_entries(
     Ok(rows)
 }
 
-pub fn latest_journey_entries(conn: &Connection, symbol: &str) -> Result<Vec<TradeEntry>, HubError> {
+pub fn latest_journey_entries(
+    conn: &Connection,
+    symbol: &str,
+) -> Result<Vec<TradeEntry>, HubError> {
     let Some(journey) = trade_journeys(conn, 1, 0, Some(symbol))?.into_iter().next() else {
         return Ok(Vec::new());
     };
@@ -1444,7 +1447,10 @@ mod tests {
         let journeys = trade_journeys(&conn, 10, 0, Some("ATOM")).unwrap();
         assert_eq!(journeys.len(), 1);
         assert!(!journeys[0].is_open);
-        assert_eq!(journeys[0].close_ts.as_deref(), Some("2026-03-01T00:05:00Z"));
+        assert_eq!(
+            journeys[0].close_ts.as_deref(),
+            Some("2026-03-01T00:05:00Z")
+        );
         assert_eq!(journeys[0].exit_price, Some(10.5));
         assert_eq!(journeys[0].legs[1].action, "REDUCE");
     }
@@ -1527,7 +1533,10 @@ mod tests {
         assert_eq!(journeys[0].open_ts, "2026-03-10T18:00:00Z");
         assert!((journeys[0].entry_price - 33.8).abs() < 1e-9);
         assert!((journeys[0].peak_size - 5.0).abs() < 1e-9);
-        assert_eq!(journeys[1].close_ts.as_deref(), Some("2026-03-10T15:00:00Z"));
+        assert_eq!(
+            journeys[1].close_ts.as_deref(),
+            Some("2026-03-10T15:00:00Z")
+        );
     }
 
     #[test]
@@ -1606,7 +1615,10 @@ mod tests {
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].symbol, "HYPE");
         assert_eq!(positions[0].open_trade_id, 1);
-        assert_eq!(positions[0].open_timestamp.as_deref(), Some("2026-03-10T18:00:00Z"));
+        assert_eq!(
+            positions[0].open_timestamp.as_deref(),
+            Some("2026-03-10T18:00:00Z")
+        );
         assert!((positions[0].entry_price - 33.8).abs() < 1e-9);
         assert!((positions[0].size - 5.0).abs() < 1e-9);
     }

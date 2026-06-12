@@ -118,7 +118,9 @@ pub fn sync_exchange_positions(
         let current_open_trade = current_open_trade_marker(&tx, &symbol)?;
         let side_changed = prior
             .as_ref()
-            .map(|row| !row.pos_type.is_empty() && !row.pos_type.eq_ignore_ascii_case(&current_pos_type))
+            .map(|row| {
+                !row.pos_type.is_empty() && !row.pos_type.eq_ignore_ascii_case(&current_pos_type)
+            })
             .unwrap_or(false);
         tx.execute(
             "INSERT OR REPLACE INTO position_state (symbol, open_trade_id, pos_type, open_time_ms, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at)
@@ -205,10 +207,7 @@ pub fn sync_exchange_positions(
     })
 }
 
-fn current_open_trade_marker(
-    conn: &Connection,
-    symbol: &str,
-) -> Result<Option<(i64, String)>> {
+fn current_open_trade_marker(conn: &Connection, symbol: &str) -> Result<Option<(i64, String)>> {
     let has_trades = conn
         .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trades' LIMIT 1")?
         .exists([])?;
@@ -415,72 +414,79 @@ pub fn note_submitted_order(
             .pos_type
             .map(|value| value.trim().to_ascii_uppercase())
             .filter(|value| !value.is_empty());
-        let (pos_type, open_time_ms, last_funding_time_ms, adds_count, tp1_taken, last_add_time_ms, entry_adx_threshold) =
-            match projection.action {
-                SubmittedOrderAction::Open => (
-                    projected_pos_type
-                        .or_else(|| {
-                            prior
-                                .as_ref()
-                                .map(|row| row.pos_type.clone())
-                                .filter(|value| !value.is_empty())
-                        })
-                        .unwrap_or_default(),
-                    projection.ts_ms.max(0),
-                    projection.ts_ms.max(0),
-                    0_i64,
-                    0_i64,
-                    0_i64,
-                    projection
-                        .entry_adx_threshold
-                        .filter(|value| *value > 0.0)
-                        .or_else(|| {
-                            prior
-                                .as_ref()
-                                .map(|row| row.entry_adx_threshold)
-                                .filter(|value| *value > 0.0)
-                        })
-                        .unwrap_or(0.0),
-                ),
-                SubmittedOrderAction::Add => (
-                    projected_pos_type
-                        .or_else(|| {
-                            prior
-                                .as_ref()
-                                .map(|row| row.pos_type.clone())
-                                .filter(|value| !value.is_empty())
-                        })
-                        .unwrap_or_default(),
-                    prior
-                        .as_ref()
-                        .map(|row| row.open_time_ms)
-                        .filter(|value| *value > 0)
-                        .unwrap_or(projection.ts_ms.max(0)),
-                    prior
-                        .as_ref()
-                        .map(|row| row.last_funding_time_ms)
-                        .filter(|value| *value > 0)
-                        .unwrap_or(projection.ts_ms.max(0)),
-                    prior
-                        .as_ref()
-                        .map(|row| i64::from(row.adds_count))
-                        .unwrap_or(0_i64)
-                        + 1_i64,
-                    if prior.as_ref().is_some_and(|row| row.tp1_taken) {
-                        1_i64
-                    } else {
-                        0_i64
-                    },
-                    projection.ts_ms.max(0),
-                    prior
-                        .as_ref()
-                        .map(|row| row.entry_adx_threshold)
-                        .filter(|value| *value > 0.0)
-                        .or_else(|| projection.entry_adx_threshold.filter(|value| *value > 0.0))
-                        .unwrap_or(0.0),
-                ),
-                SubmittedOrderAction::Close | SubmittedOrderAction::Reduce => unreachable!(),
-            };
+        let (
+            pos_type,
+            open_time_ms,
+            last_funding_time_ms,
+            adds_count,
+            tp1_taken,
+            last_add_time_ms,
+            entry_adx_threshold,
+        ) = match projection.action {
+            SubmittedOrderAction::Open => (
+                projected_pos_type
+                    .or_else(|| {
+                        prior
+                            .as_ref()
+                            .map(|row| row.pos_type.clone())
+                            .filter(|value| !value.is_empty())
+                    })
+                    .unwrap_or_default(),
+                projection.ts_ms.max(0),
+                projection.ts_ms.max(0),
+                0_i64,
+                0_i64,
+                0_i64,
+                projection
+                    .entry_adx_threshold
+                    .filter(|value| *value > 0.0)
+                    .or_else(|| {
+                        prior
+                            .as_ref()
+                            .map(|row| row.entry_adx_threshold)
+                            .filter(|value| *value > 0.0)
+                    })
+                    .unwrap_or(0.0),
+            ),
+            SubmittedOrderAction::Add => (
+                projected_pos_type
+                    .or_else(|| {
+                        prior
+                            .as_ref()
+                            .map(|row| row.pos_type.clone())
+                            .filter(|value| !value.is_empty())
+                    })
+                    .unwrap_or_default(),
+                prior
+                    .as_ref()
+                    .map(|row| row.open_time_ms)
+                    .filter(|value| *value > 0)
+                    .unwrap_or(projection.ts_ms.max(0)),
+                prior
+                    .as_ref()
+                    .map(|row| row.last_funding_time_ms)
+                    .filter(|value| *value > 0)
+                    .unwrap_or(projection.ts_ms.max(0)),
+                prior
+                    .as_ref()
+                    .map(|row| i64::from(row.adds_count))
+                    .unwrap_or(0_i64)
+                    + 1_i64,
+                if prior.as_ref().is_some_and(|row| row.tp1_taken) {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                projection.ts_ms.max(0),
+                prior
+                    .as_ref()
+                    .map(|row| row.entry_adx_threshold)
+                    .filter(|value| *value > 0.0)
+                    .or_else(|| projection.entry_adx_threshold.filter(|value| *value > 0.0))
+                    .unwrap_or(0.0),
+            ),
+            SubmittedOrderAction::Close | SubmittedOrderAction::Reduce => unreachable!(),
+        };
 
         tx.execute(
             "INSERT OR REPLACE INTO position_state (symbol, open_trade_id, pos_type, open_time_ms, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at)
